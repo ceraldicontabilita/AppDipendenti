@@ -24,7 +24,7 @@ import tempfile
 import os
 import logging
 
-from backend.app.database import Database
+from app.database import Database
 
 router = APIRouter(tags=["F24 Parser"])
 logger = logging.getLogger(__name__)
@@ -377,7 +377,7 @@ async def riconcilia_f24_con_banca(db, f24_id: str, totale: float, scadenza_str:
     """
     Cerca in estratto_conto_movimenti e prima_nota_banca un movimento per l'F24.
     """
-    from backend.app.services.paghe_riconciliazione import cerca_in_estratto_conto
+    from app.services.paghe_riconciliazione import cerca_in_estratto_conto
     try:
         keywords = ["F24", "ERARIO", "INPS", "AGENZIA", "ENTRATE", "TRIBUT"]
         result = await cerca_in_estratto_conto(
@@ -717,7 +717,7 @@ async def riconcilia_f24(
     """
     try:
         db = Database.get_db()
-        from backend.app.services.paghe_riconciliazione import riconcilia_tutti_f24
+        from app.services.paghe_riconciliazione import riconcilia_tutti_f24
         result = await riconcilia_tutti_f24(db, anno=anno)
         return {
             "success": True,
