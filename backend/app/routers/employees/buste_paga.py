@@ -11,9 +11,9 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 import logging
 
-from backend.app.database import Database
-from backend.app.services.libro_unico_parser import parse_libro_unico_pdf, ParsingError
-from backend.app.utils.error_handler import handle_errors
+from app.database import Database
+from app.services.libro_unico_parser import parse_libro_unico_pdf, ParsingError
+from app.utils.error_handler import handle_errors
 
 logger = logging.getLogger(__name__)
 
