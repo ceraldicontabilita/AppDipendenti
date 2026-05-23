@@ -1,26 +1,17 @@
 services:
   - type: web
-    name: dipendenti-cloud-backend
+    name: AppDipendenti
     runtime: python
-    rootDir: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: MONGO_URL
         sync: false
       - key: DB_NAME
         value: Gestionale
+      - key: JWT_SECRET
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
       - key: CORS_ORIGINS
         value: "*"
-    healthCheckPath: /api/health
-
-  - type: web
-    name: dipendenti-cloud-frontend
-    runtime: node
-    rootDir: frontend
-    buildCommand: npm install && npm run build
-    staticPublishPath: ./dist
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
