@@ -21,9 +21,9 @@ import time
 
 from jose import jwt
 
-from backend.app.config import settings
-from backend.app.database import Database, Collections
-from backend.app.repositories import UserRepository
+from app.config import settings
+from app.database import Database, Collections
+from app.repositories import UserRepository
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
