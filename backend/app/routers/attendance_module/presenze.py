@@ -10,9 +10,9 @@ from datetime import datetime, timezone, timedelta
 import uuid
 import logging
 
-from backend.app.database import Database
+from app.database import Database
 from .models import TipoAssenza, StatoRichiesta, STATI_PRESENZA
-from backend.app.utils.error_handler import handle_errors
+from app.utils.error_handler import handle_errors
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -761,7 +761,7 @@ async def import_presenze_da_pdf(file: UploadFile = File(...)) -> Dict[str, Any]
         tmp_path = tmp.name
     
     try:
-        from backend.app.routers.libro_unico_parser import parse_libro_unico_completo
+        from app.routers.libro_unico_parser import parse_libro_unico_completo
         parsed = parse_libro_unico_completo(tmp_path)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Errore parsing PDF: {str(e)}")
