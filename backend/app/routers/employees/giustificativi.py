@@ -21,10 +21,10 @@ import os
 import base64
 import asyncio
 
-from backend.app.database import Database
+from app.database import Database
 
 import logging
-from backend.app.utils.error_handler import handle_errors
+from app.utils.error_handler import handle_errors
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -1105,7 +1105,7 @@ async def upload_libro_unico_pdf(file: UploadFile = File(...)) -> Dict[str, Any]
     I dati vengono salvati nella collection `presenze_mensili` per essere
     visualizzati correttamente nel tab Giustificativi.
     """
-    from backend.app.parsers.payslip_giustificativi_parser import parse_libro_unico_pdf
+    from app.parsers.payslip_giustificativi_parser import parse_libro_unico_pdf
     
     filename = (file.filename or "").lower()
     if not (filename.endswith('.pdf') or filename.endswith('.zip')):
