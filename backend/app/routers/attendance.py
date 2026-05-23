@@ -22,10 +22,10 @@ from enum import Enum
 import uuid
 import io
 
-from backend.app.database import Database
+from app.database import Database
 
 import logging
-from backend.app.utils.error_handler import handle_errors
+from app.utils.error_handler import handle_errors
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
