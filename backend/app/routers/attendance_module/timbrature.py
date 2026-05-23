@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import uuid
 import logging
 
-from backend.app.database import Database
+from app.database import Database
 from .models import TipoTimbratura
 
 logger = logging.getLogger(__name__)
