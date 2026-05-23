@@ -21,8 +21,8 @@ from datetime import datetime, timezone
 from uuid import uuid4
 import logging
 
-from backend.app.database import Database
-from backend.app.utils.dependencies import get_current_user
+from app.database import Database
+from app.utils.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
