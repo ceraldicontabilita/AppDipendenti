@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 import logging
 import re
 
-from backend.app.database import Database, Collections
+from app.database import Database, Collections
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dipendenti", tags=["Fascicolo Dipendente"])
