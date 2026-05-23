@@ -1,7 +1,7 @@
 services:
   - type: web
     name: AppDipendenti
-    runtime: python
+    env: python
     buildCommand: pip install -r backend/requirements.txt
     startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
     envVars:
@@ -11,7 +11,7 @@ services:
         value: Gestionale
       - key: JWT_SECRET
         sync: false
+      - key: PIN_CODE
+        value: "141574"
       - key: ANTHROPIC_API_KEY
         sync: false
-      - key: CORS_ORIGINS
-        value: "*"
