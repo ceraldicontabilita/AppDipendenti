@@ -11,8 +11,8 @@ import logging
 import os
 from pathlib import Path
 
-from backend.app.database import Database
-from backend.app.utils.error_handler import handle_errors
+from app.database import Database
+from app.utils.error_handler import handle_errors
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1563,7 +1563,7 @@ async def parse_payslips_for_tfr() -> Dict[str, Any]:
     Legge dalla cartella /app/uploads/paghe.
     """
     try:
-        from backend.app.services.payslip_pdf_parser import parse_all_payslips
+        from app.services.payslip_pdf_parser import parse_all_payslips
         
         if not os.path.exists(PAYSLIPS_FOLDER):
             return {
