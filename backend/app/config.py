@@ -3,10 +3,39 @@ import os
 from typing import List
 
 
+def _shared_auth_secret() -> str:
+    """Segreto JWT UNIFICATO per tutte le app Ceraldi.
+
+    Fonte unica: collezione `sistema_stato` (chiave `auth_secret`) sul DB condiviso
+    `Gestionale` — lo stesso meccanismo usato da Lotti. Così le tre app firmano e
+    validano i token con la STESSA chiave, senza sincronizzare variabili a mano, e
+    quando verranno fuse l'autenticazione è già coerente.
+    Fallback: env JWT_SECRET, poi una chiave di processo.
+    """
+    try:
+        from pymongo import MongoClient
+        uri = os.environ.get("MONGO_URL")
+        if uri:
+            cli = MongoClient(uri, serverSelectionTimeoutMS=4000)
+            coll = cli[os.environ.get("DB_NAME", "Gestionale")]["sistema_stato"]
+            doc = coll.find_one({"chiave": "auth_secret"})
+            if doc and doc.get("valore"):
+                cli.close()
+                return doc["valore"]
+            import secrets as _s
+            val = os.environ.get("JWT_SECRET") or _s.token_hex(32)
+            coll.update_one({"chiave": "auth_secret"}, {"$set": {"valore": val}}, upsert=True)
+            cli.close()
+            return val
+    except Exception:
+        pass
+    return os.environ.get("JWT_SECRET") or "changeme-secret-key"
+
+
 class Settings:
     """Config centrale. I valori sensibili arrivano dalle env di Render."""
-    # JWT
-    SECRET_KEY: str = os.environ.get("JWT_SECRET", "changeme-secret-key")
+    # JWT — segreto condiviso tra le app Ceraldi (vedi _shared_auth_secret)
+    SECRET_KEY: str = _shared_auth_secret()
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 giorni
 
