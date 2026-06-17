@@ -50,7 +50,8 @@ function Login({ onLogin }) {
   const press = (n) => { setErr(""); if (pin.length < 8) setPin(pin + n); };
   const submit = async (p) => {
     try {
-      const r = await api.post("/auth/pin-login", { dipendente_id: sel.id, pin: p });
+      const body = sel.admin ? { pin: p } : { dipendente_id: sel.id, pin: p };
+      const r = await api.post("/auth/pin-login", body);
       localStorage.setItem(TK, r.data.access_token);
       localStorage.setItem("pt_role", r.data.role);
       localStorage.setItem("pt_name", r.data.name || sel.nome_completo);
@@ -64,13 +65,15 @@ function Login({ onLogin }) {
       <div className="brand"><div className="logo"><Users size={30} /></div>
         <h2>Portale Dipendenti</h2><div className="muted" style={{textAlign:"center"}}>Ceraldi Group</div></div>
       <div className="card"><h3>Chi sei?</h3>
-        {lista.length === 0 && <div className="muted">Nessun dipendente abilitato. Chiedi all'amministratore di impostare il tuo PIN.</div>}
+        {lista.length === 0 && <div className="muted">Nessun dipendente abilitato. Entra come amministratore per impostare i PIN.</div>}
         {lista.map((d) => (
           <button key={d.id} className="btn gh" style={{ marginTop: 8, textAlign: "left" }} onClick={() => setSel(d)}>
             {d.nome_completo} <span className="muted">· {d.mansione}</span>
           </button>
         ))}
       </div>
+      <button className="btn sec" onClick={() => setSel({ id: null, nome_completo: "Amministratore", admin: true })}>
+        Accesso amministratore</button>
     </div>
   );
 
@@ -242,8 +245,13 @@ function Gestione() {
   const [doc, setDoc] = useState(null);
   const [coda, setCoda] = useState([]);
   const [msg, setMsg] = useState("");
+  const [accessi, setAccessi] = useState([]);
+  const [pinIn, setPinIn] = useState({});
   const loadCoda = useCallback(()=>{ api.get("/richieste?stato=aperta").then((r)=>setCoda(r.data)).catch(()=>{}); },[]);
-  useEffect(()=>{loadCoda();},[loadCoda]);
+  const loadAccessi = useCallback(()=>{ api.get("/accessi").then((r)=>setAccessi(r.data)).catch(()=>{}); },[]);
+  useEffect(()=>{loadCoda();loadAccessi();},[loadCoda,loadAccessi]);
+  const salvaPin = async (id)=>{ const pin=pinIn[id]; if(!pin)return; try{await api.post(`/accessi/${id}/pin`,{pin});}catch{} setPinIn({...pinIn,[id]:""}); loadAccessi(); };
+  const salvaRuolo = async (id,ruolo_app)=>{ try{await api.post(`/accessi/${id}/ruolo`,{ruolo_app});}catch{} loadAccessi(); };
   const genera = async () => {
     setMsg("");
     try { const r = await api.post("/turni/genera",{settimana_inizio:lun}); setDoc(r.data); }
@@ -272,6 +280,24 @@ function Gestione() {
             </tbody></table></div>
           {doc.stato!=="pubblicato" && <button className="btn" style={{marginTop:10}} onClick={pubblica}><Send size={15}/> Pubblica e notifica</button>}
         </>}
+      </div>
+      <div className="card"><h3>Accessi dipendenti</h3>
+        {accessi.length===0 && <div className="muted">Nessun dipendente in anagrafica.</div>}
+        {accessi.map((d)=>(
+          <div className="daycard" key={d.id} style={{flexDirection:"column",alignItems:"stretch",gap:6}}>
+            <div className="row"><div><b>{d.nome_completo}</b> <span className="muted">· {d.mansione}</span></div>
+              {d.pin_impostato?<span className="pill ok">PIN ok</span>:<span className="pill warn">no PIN</span>}</div>
+            <div className="row" style={{gap:6}}>
+              <input className="input" style={{marginTop:0}} inputMode="numeric" placeholder="nuovo PIN" value={pinIn[d.id]||""} onChange={(e)=>setPinIn({...pinIn,[d.id]:e.target.value})}/>
+              <button className="btn sm" onClick={()=>salvaPin(d.id)}>Salva PIN</button>
+            </div>
+            <select value={d.ruolo_app} onChange={(e)=>salvaRuolo(d.id,e.target.value)}>
+              <option value="dipendente">dipendente</option>
+              <option value="responsabile_turni">responsabile turni</option>
+              <option value="admin">admin</option>
+            </select>
+          </div>
+        ))}
       </div>
       <div className="card"><h3>Richieste da gestire</h3>
         {coda.length===0 && <div className="muted">Nessuna richiesta aperta.</div>}
