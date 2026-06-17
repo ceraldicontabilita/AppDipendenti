@@ -6,17 +6,17 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, date
 import logging
 
-from app.repositories.employee_repository import (
+from backend.app.repositories.employee_repository import (
     EmployeeRepository,
     PayslipRepository,
     LibrettoSanitarioRepository
 )
-from app.exceptions import (
+from backend.app.exceptions import (
     NotFoundError,
     ValidationError,
     DuplicateError
 )
-from app.models.employee import (
+from backend.app.models.employee import (
     EmployeeCreate,
     EmployeeUpdate,
     PayslipCreate,

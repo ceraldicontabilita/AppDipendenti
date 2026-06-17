@@ -11,8 +11,8 @@ import logging
 import asyncio
 import os
 
-from app.database import Database
-from app.utils.error_handler import handle_errors
+from backend.app.database import Database
+from backend.app.utils.error_handler import handle_errors
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -341,7 +341,7 @@ async def crea_cedolino(data: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 
     # --- EVENT BUS: cedolino importato (Chat 9c) ---
     try:
-        from app.services.event_bus import propagate_event, EventTypes
+        from backend.app.services.event_bus import propagate_event, EventTypes
         await propagate_event(EventTypes.CEDOLINO_IMPORTATO, {
             "cedolino_id": cedolino.get("id"),
             "dipendente_id": cedolino.get("dipendente_id"),
@@ -730,7 +730,7 @@ async def conferma_cedolino(stima: CedolinoStima) -> Dict[str, Any]:
 
     # --- EVENT BUS: propaga evento cedolino importato (conferma manuale) ---
     try:
-        from app.services.event_bus import propagate_event, EventTypes
+        from backend.app.services.event_bus import propagate_event, EventTypes
         await propagate_event(EventTypes.CEDOLINO_IMPORTATO, {
             "cedolino_id": cedolino["id"],
             "dipendente_id": cedolino.get("dipendente_id"),
@@ -1472,7 +1472,7 @@ async def import_cedolini_da_gmail(
 
         # --- EVENT BUS: propaga evento cedolino importato (da Gmail) ---
         try:
-            from app.services.event_bus import propagate_event, EventTypes
+            from backend.app.services.event_bus import propagate_event, EventTypes
             await propagate_event(EventTypes.CEDOLINO_IMPORTATO, {
                 "cedolino_id": doc_to_insert.get("id"),
                 "dipendente_id": doc_to_insert.get("dipendente_id"),
@@ -1527,8 +1527,8 @@ async def acconti_banca_dipendente(dipendente_id: str, anno: Optional[int] = Non
 @router.post("/acconti/scan-estratto-conto")
 async def scan_acconti_da_estratto_conto(body: Dict[str, Any] = Body(default={})):
     """Scansiona estratto_conto_movimenti per bonifici a dipendenti e li collega."""
-    from app.services.acconti_auto_linker import scan_and_link_acconti
-    from app.database import Database as _DB
+    from backend.app.services.acconti_auto_linker import scan_and_link_acconti
+    from backend.app.database import Database as _DB
     dry = bool(body.get("dry_run", False))
     return await scan_and_link_acconti(_DB.get_db(), dry_run=dry)
 
@@ -1536,6 +1536,6 @@ async def scan_acconti_da_estratto_conto(body: Dict[str, Any] = Body(default={})
 @router.get("/acconti/dipendente/{dipendente_id}")
 async def lista_acconti_dipendente(dipendente_id: str, anno: Optional[int] = None):
     """Lista acconti/stipendi bancari collegati a un dipendente."""
-    from app.services.acconti_auto_linker import get_pagamenti_dipendente
-    from app.database import Database as _DB
+    from backend.app.services.acconti_auto_linker import get_pagamenti_dipendente
+    from backend.app.database import Database as _DB
     return await get_pagamenti_dipendente(_DB.get_db(), dipendente_id, anno=anno)

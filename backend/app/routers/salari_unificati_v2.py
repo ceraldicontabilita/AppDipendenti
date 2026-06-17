@@ -14,8 +14,8 @@ from fastapi import APIRouter, HTTPException, Query, Body
 from typing import Dict, Any, Optional
 import logging
 
-from app.database import Database
-from app.utils.error_handler import handle_errors
+from backend.app.database import Database
+from backend.app.utils.error_handler import handle_errors
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -35,7 +35,7 @@ async def get_saldo_dipendente(
     - TFR: accantonamento mese, totale
     - Permessi ex-festività
     """
-    from app.services.salari_unificati_v2 import get_saldo_completo_dipendente
+    from backend.app.services.salari_unificati_v2 import get_saldo_completo_dipendente
     db = Database.get_db()
     return await get_saldo_completo_dipendente(db, codice_fiscale=codice_fiscale, anno=anno)
 
@@ -50,7 +50,7 @@ async def riepilogo_tutti_dipendenti(
     Evidenzia chi ha debiti residui o cedolini non pagati.
     Mostra saldo debito/credito, ferie, ROL.
     """
-    from app.services.salari_unificati_v2 import get_riepilogo_salari_tutti
+    from backend.app.services.salari_unificati_v2 import get_riepilogo_salari_tutti
     db = Database.get_db()
     return await get_riepilogo_salari_tutti(db, anno=anno)
 
@@ -71,7 +71,7 @@ async def registra_pagamento(
     - tipo: "acconto" | "saldo"
     - note: note libere
     """
-    from app.services.salari_unificati_v2 import registra_pagamento_salario
+    from backend.app.services.salari_unificati_v2 import registra_pagamento_salario
     
     db = Database.get_db()
     
@@ -112,7 +112,7 @@ async def riconcilia_cedolini_banca(
     Riconcilia cedolini non pagati con movimenti estratto conto.
     Cerca corrispondenze per nome/IBAN/importo e registra pagamenti.
     """
-    from app.services.cedolini_manager import riconcilia_stipendio_automatico
+    from backend.app.services.cedolini_manager import riconcilia_stipendio_automatico
     
     db = Database.get_db()
     anno = data.get("anno", None)
@@ -149,7 +149,7 @@ async def riconcilia_cedolini_banca(
         
         if riconc:
             # Registra pagamento
-            from app.services.salari_unificati_v2 import registra_pagamento_salario
+            from backend.app.services.salari_unificati_v2 import registra_pagamento_salario
             await registra_pagamento_salario(
                 db, ced["id"], residuo, "bonifico",
                 note=f"Riconciliazione automatica estratto conto",

@@ -9,8 +9,8 @@ import uuid
 import logging
 import io
 
-from app.database import Database
-from app.utils.error_handler import handle_errors
+from backend.app.database import Database
+from backend.app.utils.error_handler import handle_errors
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -137,7 +137,7 @@ async def registra_pagamento_cedolino(
 
     # --- EVENT BUS: propaga CEDOLINO_PAGATO (registra-pagamento manuale) ---
     try:
-        from app.services.event_bus import propagate_event, EventTypes
+        from backend.app.services.event_bus import propagate_event, EventTypes
         await propagate_event(EventTypes.CEDOLINO_PAGATO, {
             "cedolino_id": cedolino_id,
             "dipendente_id": cedolino.get("dipendente_id"),

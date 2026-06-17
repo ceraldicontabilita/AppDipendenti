@@ -12,8 +12,8 @@ import shutil
 from docx import Document
 import tempfile
 
-from app.database import Database, Collections
-from app.utils.error_handler import handle_errors
+from backend.app.database import Database, Collections
+from backend.app.utils.error_handler import handle_errors
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

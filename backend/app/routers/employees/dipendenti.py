@@ -10,8 +10,8 @@ import logging
 import io
 import re
 
-from app.database import Database, Collections
-from app.utils.error_handler import handle_errors
+from backend.app.database import Database, Collections
+from backend.app.utils.error_handler import handle_errors
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -144,7 +144,7 @@ async def lista_duplicati_dipendenti() -> Dict[str, Any]:
     Analizza l'anagrafica e ritorna gruppi di sospetti duplicati.
     Si basa su CF normalizzato e su nome+cognome normalizzati.
     """
-    from app.services.dipendenti_dedupe import trova_duplicati
+    from backend.app.services.dipendenti_dedupe import trova_duplicati
     return await trova_duplicati()
 
 
@@ -159,7 +159,7 @@ async def merge_duplicato_dipendente(
     vengono scartati. Soft delete di default (il duplicato resta come
     `merged_into` al target e `in_carico=False`).
     """
-    from app.services.dipendenti_dedupe import merge_dipendenti
+    from backend.app.services.dipendenti_dedupe import merge_dipendenti
     target_id = payload.get("target_id")
     duplicate_id = payload.get("duplicate_id")
     soft = payload.get("soft", True)
@@ -181,7 +181,7 @@ async def auto_merge_duplicati(
     Default dry_run=True: ritorna lista dei merge previsti senza eseguirli.
     Passa `{"dry_run": false}` per eseguire effettivamente i merge.
     """
-    from app.services.dipendenti_dedupe import auto_merge_tutti
+    from backend.app.services.dipendenti_dedupe import auto_merge_tutti
     dry_run = bool(payload.get("dry_run", True))
     return await auto_merge_tutti(dry_run=dry_run)
 
@@ -547,7 +547,7 @@ async def bulk_upsert_dipendenti(payload: Dict[str, Any] = Body(...)) -> Dict[st
             }
             await db[Collections.EMPLOYEES].insert_one(nuovo_doc.copy())
             try:
-                from app.services.event_bus import propagate_event, EventTypes
+                from backend.app.services.event_bus import propagate_event, EventTypes
                 await propagate_event(EventTypes.DIPENDENTE_CREATED, {"dipendente_id": nuovo_doc["id"], "codice_fiscale": cf, "stato": "attivo"}, db, source_module="bulk_upsert")
             except Exception:
                 logger.exception("Errore evento bulk dipendente.created")
@@ -801,7 +801,7 @@ async def create_dipendente(data: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     
     # Event bus: propaga evento per deduplica, alert IBAN/contratto, audit
     try:
-        from app.services.event_bus import propagate_event, EventTypes
+        from backend.app.services.event_bus import propagate_event, EventTypes
         await propagate_event(EventTypes.DIPENDENTE_CREATED, {
             "dipendente_id": dipendente["id"],
             "nome": nome,
@@ -886,7 +886,7 @@ async def create_busta_paga(data: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         # --- EVENT BUS: propaga evento cedolino importato (busta-paga creata) ---
         # Solo per CREAZIONE, non per UPDATE (evita doppi alert su modifiche)
         try:
-            from app.services.event_bus import propagate_event, EventTypes
+            from backend.app.services.event_bus import propagate_event, EventTypes
             # Parse mese/anno dal periodo "YYYY-MM"
             periodo_parts = (busta.get("periodo", "") or "").split("-")
             mese_int = int(periodo_parts[1]) if len(periodo_parts) >= 2 and periodo_parts[1].isdigit() else None
@@ -1076,7 +1076,7 @@ async def update_dipendente(dipendente_id: str, data: Dict[str, Any] = Body(...)
     
     # Event bus: propaga evento per risoluzione alert (IBAN, contratto, etc.)
     try:
-        from app.services.event_bus import propagate_event, EventTypes
+        from backend.app.services.event_bus import propagate_event, EventTypes
         await propagate_event(EventTypes.DIPENDENTE_UPDATED, {
             "dipendente_id": dip_id,
             "iban_cedolino": new_iban,
@@ -1092,7 +1092,7 @@ async def update_dipendente(dipendente_id: str, data: Dict[str, Any] = Body(...)
     # form ha lo stesso effetto di cliccare "Cessa dipendente".
     if cessazione_triggerata:
         try:
-            from app.services.event_bus import propagate_event, EventTypes
+            from backend.app.services.event_bus import propagate_event, EventTypes
             await propagate_event(EventTypes.DIPENDENTE_CESSATO, {
                 "dipendente_id": dip_id,
                 "nome_completo": data.get("nome_completo") or dipendente_old.get("nome_completo", ""),
@@ -1130,7 +1130,7 @@ async def delete_dipendente(dipendente_id: str) -> Dict[str, str]:
             {"_id": 0, "id": 1, "nome_completo": 1}
         )
         if dip:
-            from app.services.event_bus import propagate_event, EventTypes
+            from backend.app.services.event_bus import propagate_event, EventTypes
             await propagate_event(EventTypes.DIPENDENTE_CESSATO, {
                 "dipendente_id": dip.get("id", dipendente_id),
                 "nome_completo": dip.get("nome_completo", ""),
@@ -2275,7 +2275,7 @@ async def scan_buste_paga_folders() -> Dict[str, Any]:
     Scansiona le cartelle delle buste paga e restituisce i progressivi trovati.
     """
     import os
-    from app.utils.busta_paga_parser import scan_all_dipendenti
+    from backend.app.utils.busta_paga_parser import scan_all_dipendenti
     
     base_path = "/app/documents/buste_paga"
     
@@ -2313,7 +2313,7 @@ async def import_buste_paga_to_dipendenti(
     - match_mode: "cf" per codice fiscale, "nome" per nome completo
     - dry_run: se True, mostra solo le corrispondenze trovate senza aggiornare
     """
-    from app.utils.busta_paga_parser import scan_all_dipendenti
+    from backend.app.utils.busta_paga_parser import scan_all_dipendenti
     
     db = Database.get_db()
     base_path = "/app/documents/buste_paga"
@@ -2430,7 +2430,7 @@ async def get_buste_paga_dipendente(dipendente_id: str) -> Dict[str, Any]:
     Cerca per nome o CF nelle cartelle delle buste paga.
     """
     import os
-    from app.utils.busta_paga_parser import scan_dipendente_folder
+    from backend.app.utils.busta_paga_parser import scan_dipendente_folder
     
     db = Database.get_db()
     
@@ -2493,7 +2493,7 @@ async def import_busta_paga_to_dipendente(dipendente_id: str) -> Dict[str, Any]:
     Aggiorna il record del dipendente con TFR, ferie, permessi, paga base, contingenza.
     """
     import os
-    from app.utils.busta_paga_parser import get_latest_progressivi
+    from backend.app.utils.busta_paga_parser import get_latest_progressivi
     
     db = Database.get_db()
     

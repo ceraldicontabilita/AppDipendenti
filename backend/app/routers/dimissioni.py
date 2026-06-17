@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, Query
 
-from app.database import Database
-from app.utils.error_handler import handle_errors
+from backend.app.database import Database
+from backend.app.utils.error_handler import handle_errors
 
 router = APIRouter()
 

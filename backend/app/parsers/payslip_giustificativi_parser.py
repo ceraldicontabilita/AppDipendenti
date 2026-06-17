@@ -276,7 +276,7 @@ def parse_payslip_with_giustificativi(pdf_bytes: bytes) -> List[Dict[str, Any]]:
             return results
     
     # Fallback: parser semplice (senza giustificativi)
-    from app.parsers.payslip_parser_simple import parse_payslip_simple
+    from backend.app.parsers.payslip_parser_simple import parse_payslip_simple
     simple_results = parse_payslip_simple(pdf_bytes)
     
     # Aggiungi struttura giustificativi vuota per compatibilità

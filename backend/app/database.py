@@ -8,6 +8,15 @@ logger = logging.getLogger(__name__)
 MONGO_URL = os.environ.get("MONGO_URL", "")
 DB_NAME = os.environ.get("DB_NAME", "Gestionale")
 
+
+class Collections:
+    """Nomi canonici delle collection MongoDB (un solo punto di verità)."""
+    USERS = "users"
+    EMPLOYEES = "dipendenti"
+    PAYSLIPS = "cedolini"
+    AUDIT_LOG = "audit_log"
+
+
 class Database:
     client: AsyncIOMotorClient = None
     db = None
@@ -26,3 +35,8 @@ class Database:
     @classmethod
     def get_db(cls):
         return cls.db
+
+
+def get_database():
+    """Accessor funzionale usato dalle dependency FastAPI (Depends)."""
+    return Database.get_db()

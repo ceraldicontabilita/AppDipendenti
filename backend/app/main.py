@@ -52,10 +52,6 @@ def register_routers():
     app.include_router(attendance.router, prefix="/api/attendance", tags=["Presenze"])
     app.include_router(dimissioni.router, prefix="/api/dimissioni", tags=["Dimissioni"])
 
-    from .routers.attendance_module import presenze, timbrature
-    app.include_router(presenze.router, prefix="/api/attendance", tags=["Presenze modulo"])
-    app.include_router(timbrature.router, prefix="/api/attendance", tags=["Timbrature"])
-
     from .routers import libro_unico_parser, f24_parser, bonifici_stipendi, salari_unificati_v2
     app.include_router(libro_unico_parser.router, prefix="/api/paghe", tags=["Libro Unico"])
     app.include_router(f24_parser.router, prefix="/api/paghe", tags=["F24 Parser"])

@@ -20,8 +20,8 @@ import re
 import uuid
 import logging
 
-from app.database import Database
-from app.utils.error_handler import handle_errors
+from backend.app.database import Database
+from backend.app.utils.error_handler import handle_errors
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/bonifici-stipendi", tags=["Bonifici Stipendi"])

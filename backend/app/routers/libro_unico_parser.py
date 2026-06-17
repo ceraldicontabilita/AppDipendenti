@@ -21,7 +21,7 @@ import os
 import logging
 import calendar
 
-from app.database import Database
+from backend.app.database import Database
 
 router = APIRouter(tags=["Libro Unico Parser"])
 logger = logging.getLogger(__name__)
@@ -625,7 +625,7 @@ async def riconcilia_stipendio_con_banca(
     Cerca in prima_nota_banca e estratto_conto_movimenti un pagamento per lo stipendio.
     Ritorna l'id del movimento se trovato, altrimenti None.
     """
-    from app.services.paghe_riconciliazione import cerca_in_estratto_conto
+    from backend.app.services.paghe_riconciliazione import cerca_in_estratto_conto
     try:
         keywords = ["STIPENDIO", "CEDOLINO"]
         if cognome_nome:
@@ -942,7 +942,7 @@ async def riconcilia_stipendi(
     """
     try:
         db = Database.get_db()
-        from app.services.paghe_riconciliazione import riconcilia_tutti_stipendi
+        from backend.app.services.paghe_riconciliazione import riconcilia_tutti_stipendi
         result = await riconcilia_tutti_stipendi(db, anno=anno, mese=mese)
         return {
             "success": True,
