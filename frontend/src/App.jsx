@@ -116,7 +116,6 @@ export default function DipendentiCloudApp() {
     { id: "ferie-permessi", label: "Ferie & Permessi", icon: Calendar, section: "DIPENDENTI" },
     { id: "turni", label: "Turni", icon: Grid3X3, section: "DIPENDENTI" },
     { id: "buste-paga", label: "Buste Paga", icon: Euro, section: "DIPENDENTI" },
-    { id: "missioni", label: "Missioni", icon: MapPin, section: "DIPENDENTI" },
     { id: "documenti", label: "Documenti", icon: FolderOpen, section: "DIPENDENTI" },
   ];
 
@@ -518,12 +517,11 @@ function PresenzePage({ dipendenti, reload }) {
   const [formData, setFormData] = useState({
     dipendente_id: "", tipo: "P", data_inizio: "", data_fine: "", nota: ""
   });
-  const [penna, setPenna] = useState("P");
+  const [penna, setPenna] = useState(null);
   const [tuttiMode, setTuttiMode] = useState(false);
   const [ferieList, setFerieList] = useState([]);
   const [turniMese, setTurniMese] = useState([]);
   const [tipiTurno, setTipiTurno] = useState([]);
-  const [evid, setEvid] = useState(null);
 
   const mesi = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
   const daysInMonth = new Date(anno, mese, 0).getDate();
@@ -564,7 +562,7 @@ function PresenzePage({ dipendenti, reload }) {
   // Codice giustificativo derivato per una cella: presenza salvata > ferie/permesso > turno.
   const codiceDerivato = (dipId, day) => {
     const pres = getPresenza(dipId, day);
-    if (pres) return pres.giustificativo || (pres.stato === 'presente' ? 'P' : pres.stato === 'assente' ? 'UN' : null);
+    if (pres) return pres.giustificativo || (pres.stato === 'presente' ? 'P' : pres.stato === 'assente' ? 'AS' : null);
     const date = new Date(anno, mese - 1, day);
     const fer = ferieDi(dipId, isoD(date));
     if (fer) return fer.tipo === 'Permesso' ? 'PE' : fer.tipo === 'Malattia' ? 'M' : fer.tipo === 'ROL' ? 'R' : 'F';
@@ -587,7 +585,7 @@ function PresenzePage({ dipendenti, reload }) {
   const applica = async (dipIds, day) => {
     if (!penna) return;
     const data = `${anno}-${String(mese).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-    const stato = penna === 'P' ? 'presente' : penna === 'UN' ? 'assente' : 'giustificato';
+    const stato = penna === 'P' ? 'presente' : penna === 'AS' ? 'assente' : 'giustificato';
     const batch = dipIds.map(id => ({ dipendente_id: id, data, stato, giustificativo: penna }));
     try { await axios.post(`${API}/presenze/batch`, batch); await loadPresenze(); } catch (e) { console.error(e); }
   };
@@ -630,14 +628,13 @@ function PresenzePage({ dipendenti, reload }) {
 
   const tipiGiustificativo = [
     { code: "P", label: "Presente", color: "#10b981" },
-    { code: "UN", label: "Assente", color: "#ef4444" },
+    { code: "AS", label: "Assente", color: "#ef4444" },
     { code: "F", label: "Ferie", color: "#3b82f6" },
     { code: "PE", label: "Permesso", color: "#8b5cf6" },
     { code: "M", label: "Malattia", color: "#f59e0b" },
     { code: "R", label: "ROL", color: "#06b6d4" },
     { code: "CH", label: "Chiuso", color: "#6b7280" },
     { code: "RS", label: "Riposo Sett.", color: "#9ca3af" },
-    { code: "T", label: "Trasferimento", color: "#ec4899" },
     { code: "X", label: "Cessato", color: "#374151" },
     { code: "FNL", label: "Festività Non Lav.", color: "#a855f7" },
   ];
@@ -679,10 +676,6 @@ function PresenzePage({ dipendenti, reload }) {
           <span className="dc-presenze-stat-value dc-text-red">0</span>
         </div>
         <div className="dc-presenze-stat">
-          <span className="dc-presenze-stat-label">TRASFERIMENTO</span>
-          <span className="dc-presenze-stat-value dc-text-red">0</span>
-        </div>
-        <div className="dc-presenze-stat">
           <span className="dc-presenze-stat-label">ALTRI</span>
           <span className="dc-presenze-stat-value">0</span>
         </div>
@@ -718,18 +711,8 @@ function PresenzePage({ dipendenti, reload }) {
             Applica a tutti i dipendenti
           </label>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 10, paddingTop: 10, borderTop: "1px solid #f1f5f9" }}>
-          <span style={{ fontSize: 13, color: "#64748b", marginRight: 4 }}>Evidenzia nel mese:</span>
-          {tipiGiustificativo.map(t => (
-            <button key={t.code} type="button" onClick={() => setEvid(evid === t.code ? null : t.code)} title={`Evidenzia tutti i ${t.label} del mese`}
-              style={{ border: evid === t.code ? "3px solid #1E1B4B" : "1px solid #e5e7eb", background: evid === t.code ? t.color : "#fff", color: evid === t.code ? "#fff" : "#374151", borderRadius: 8, padding: "4px 9px", fontWeight: 700, cursor: "pointer", fontSize: 12 }}>
-              {t.code}
-            </button>
-          ))}
-          {evid && <button type="button" onClick={() => setEvid(null)} style={{ border: "none", background: "transparent", color: "#64748b", cursor: "pointer", fontSize: 12, textDecoration: "underline" }}>azzera</button>}
-        </div>
         <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 8 }}>
-          Scegli un giustificativo, poi clicca la cella dipendente/giorno per applicarlo (anche su giorni passati). Clicca il <b>numero del giorno</b> in cima per applicarlo a tutti.
+          Seleziona un tipo: nel mese si <b>evidenziano</b> tutte le sue caselle. Poi clicca una cella dipendente/giorno per <b>applicarlo</b> (anche su giorni passati), o il <b>numero del giorno</b> in cima per applicarlo a tutti.
         </div>
       </div>
 
@@ -774,7 +757,7 @@ function PresenzePage({ dipendenti, reload }) {
                   const salvata = getPresenza(dip.id, day);
                   const code = codiceDerivato(dip.id, day);
                   const tipo = tipiGiustificativo.find(t => t.code === code);
-                  const dimmed = evid && code !== evid;
+                  const dimmed = penna && code !== penna;
                   return (
                     <td key={i} className={`dc-presenze-td-day ${isWeekend ? 'weekend' : ''}`} onClick={() => applica(tuttiMode ? dipendenti.map(d => d.id) : [dip.id], day)} style={{ cursor: "pointer" }}>
                       {code ? (
