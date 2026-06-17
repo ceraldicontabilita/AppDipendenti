@@ -178,7 +178,7 @@ async def pin_login(
 
 @router.get("/dipendenti-login", summary="Elenco dipendenti per schermata login mobile")
 async def dipendenti_login_list():
-    """Lista (id, nome, mansione, ruolo) dei dipendenti con PIN attivo. Nessun dato sensibile."""
+    """Lista dipendenti attivi (id, nome, mansione, ruolo, pin_impostato). Nessun dato sensibile."""
     return await lista_login()
 
 

@@ -53,34 +53,84 @@ def crea_token_dipendente(dip: Dict[str, Any]) -> str:
 
 
 async def lista_login() -> List[Dict[str, Any]]:
-    """Elenco dipendenti che possono accedere (PIN impostato). Niente dati sensibili."""
+    """Elenco dipendenti per la schermata di login del portale.
+
+    Mostra TUTTI i dipendenti attivi: chi non ha ancora un PIN lo crea al primo
+    accesso (flag pin_impostato=False). Nessun dato sensibile.
+    """
     db = Database.get_db()
     cursor = db[Collections.EMPLOYEES].find(
-        {"pin_hash": {"$exists": True, "$ne": None},
-         "attivo": {"$ne": False},
+        {"attivo": {"$ne": False},
          "merged_into": {"$exists": False}},
-        {"_id": 0, "id": 1, "nome_completo": 1, "mansione": 1, "ruolo_app": 1},
+        {"_id": 0, "id": 1, "nome_completo": 1, "mansione": 1, "ruolo_app": 1, "pin_hash": 1},
     ).sort("nome_completo", 1)
     out = []
     for d in await cursor.to_list(500):
+        if not d.get("id"):
+            continue
         out.append({
             "id": d.get("id"),
             "nome_completo": d.get("nome_completo", ""),
             "mansione": d.get("mansione", ""),
             "ruolo_app": d.get("ruolo_app", "dipendente"),
+            "pin_impostato": bool(d.get("pin_hash")),
         })
     return out
 
 
+async def _pin_operatore_valido(db, dip: Dict[str, Any], pin: str) -> bool:
+    """Verifica il PIN contro la fonte operatori condivisa (tablet_operatori),
+    la stessa usata dalla cassa di Lotti. Accetta solo se l'operatore con quel
+    PIN corrisponde, per nome, al dipendente selezionato (un dipendente non puo'
+    entrare col PIN di un altro). PIN unico cassa+portale, nessuna copia.
+    """
+    nome_dip = (dip.get("nome_completo") or "").lower()
+    if not nome_dip:
+        return False
+    candidati = []
+    try:
+        coll = db["tablet_operatori"]
+        doc = await coll.find_one({"attivo": True, "pin_chiaro": pin}, {"_id": 0, "nome": 1})
+        if doc:
+            candidati.append(doc)
+        else:
+            try:
+                import bcrypt
+                for d in await coll.find({"attivo": True}, {"_id": 0, "nome": 1, "pin": 1}).to_list(100):
+                    h = (d.get("pin") or "")
+                    if h.startswith("$2") and bcrypt.checkpw(pin.encode(), h.encode()):
+                        candidati.append(d)
+                        break
+            except Exception:
+                pass
+    except Exception:
+        return False
+    for c in candidati:
+        nome_op = (c.get("nome") or "").lower().strip()
+        if nome_op and (nome_op in nome_dip or all(tok in nome_dip for tok in nome_op.split() if tok)):
+            return True
+    return False
+
+
 async def login_dipendente(dipendente_id: str, pin: str) -> Optional[Dict[str, Any]]:
-    """Valida pin contro il dipendente. Ritorna dict con token oppure None."""
+    """Valida il PIN del dipendente e ritorna il token, oppure None.
+
+    Due fonti accettate (PIN unico aziendale):
+      1. PIN personale del portale (pin_hash sul documento), se impostato.
+      2. PIN della cassa: stessa fonte operatori di Lotti (tablet_operatori).
+    """
     if not _valid_pin_format(pin):
         return None
     db = Database.get_db()
     dip = await db[Collections.EMPLOYEES].find_one({"id": dipendente_id})
-    if not dip or not dip.get("pin_hash"):
+    if not dip:
         return None
-    if not verify_pin(pin, dip["pin_hash"]):
+    ok = False
+    if dip.get("pin_hash") and verify_pin(pin, dip["pin_hash"]):
+        ok = True
+    if not ok and await _pin_operatore_valido(db, dip, pin):
+        ok = True
+    if not ok:
         return None
     token = crea_token_dipendente(dip)
     return {
