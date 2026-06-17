@@ -523,6 +523,7 @@ function PresenzePage({ dipendenti, reload }) {
   const [ferieList, setFerieList] = useState([]);
   const [turniMese, setTurniMese] = useState([]);
   const [tipiTurno, setTipiTurno] = useState([]);
+  const [evid, setEvid] = useState(null);
 
   const mesi = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
   const daysInMonth = new Date(anno, mese, 0).getDate();
@@ -576,6 +577,11 @@ function PresenzePage({ dipendenti, reload }) {
     const dataStr = `${anno}-${String(mese).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
     return presenze.find(p => p.dipendente_id === dipId && p.data === dataStr);
   };
+
+  // Riposi attesi nel mese = numero di domeniche (≈ una settimana di riposo a testa per settimana).
+  const domenicheMese = (() => { let n = 0; for (let d = 1; d <= daysInMonth; d++) if (new Date(anno, mese - 1, d).getDay() === 0) n++; return n; })();
+  // Conta solo i giorni di Riposo settimanale (RS): ferie e permessi NON contano.
+  const contaRiposi = (dipId) => { let n = 0; for (let d = 1; d <= daysInMonth; d++) if (codiceDerivato(dipId, d) === 'RS') n++; return n; };
 
   // Pennello: applica il giustificativo selezionato a uno o tutti i dipendenti, in qualsiasi giorno.
   const applica = async (dipIds, day) => {
@@ -712,6 +718,16 @@ function PresenzePage({ dipendenti, reload }) {
             Applica a tutti i dipendenti
           </label>
         </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 10, paddingTop: 10, borderTop: "1px solid #f1f5f9" }}>
+          <span style={{ fontSize: 13, color: "#64748b", marginRight: 4 }}>Evidenzia nel mese:</span>
+          {tipiGiustificativo.map(t => (
+            <button key={t.code} type="button" onClick={() => setEvid(evid === t.code ? null : t.code)} title={`Evidenzia tutti i ${t.label} del mese`}
+              style={{ border: evid === t.code ? "3px solid #1E1B4B" : "1px solid #e5e7eb", background: evid === t.code ? t.color : "#fff", color: evid === t.code ? "#fff" : "#374151", borderRadius: 8, padding: "4px 9px", fontWeight: 700, cursor: "pointer", fontSize: 12 }}>
+              {t.code}
+            </button>
+          ))}
+          {evid && <button type="button" onClick={() => setEvid(null)} style={{ border: "none", background: "transparent", color: "#64748b", cursor: "pointer", fontSize: 12, textDecoration: "underline" }}>azzera</button>}
+        </div>
         <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 8 }}>
           Scegli un giustificativo, poi clicca la cella dipendente/giorno per applicarlo (anche su giorni passati). Clicca il <b>numero del giorno</b> in cima per applicarlo a tutti.
         </div>
@@ -742,7 +758,13 @@ function PresenzePage({ dipendenti, reload }) {
                 <td className="dc-presenze-td-name">
                   <div className="dc-table-user">
                     <Avatar nome={dip.nome} cognome={dip.cognome} size="sm" />
-                    <span>{dip.cognome} {dip.nome?.[0]}.</span>
+                    <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.25 }}>
+                      <span>{dip.cognome ? `${dip.cognome} ${dip.nome?.[0] || ''}.` : dip.nome}</span>
+                      {(() => { const r = contaRiposi(dip.id); const ok = r >= domenicheMese; return (
+                        <span style={{ fontSize: 10, fontWeight: 700, color: ok ? "#16a34a" : "#dc2626" }} title="Riposi del mese rispetto agli attesi">
+                          {ok ? "✓" : "⚠"} {r}/{domenicheMese} riposi
+                        </span>); })()}
+                    </div>
                   </div>
                 </td>
                 {Array.from({length: daysInMonth}, (_, i) => {
@@ -752,10 +774,11 @@ function PresenzePage({ dipendenti, reload }) {
                   const salvata = getPresenza(dip.id, day);
                   const code = codiceDerivato(dip.id, day);
                   const tipo = tipiGiustificativo.find(t => t.code === code);
+                  const dimmed = evid && code !== evid;
                   return (
                     <td key={i} className={`dc-presenze-td-day ${isWeekend ? 'weekend' : ''}`} onClick={() => applica(tuttiMode ? dipendenti.map(d => d.id) : [dip.id], day)} style={{ cursor: "pointer" }}>
                       {code ? (
-                        <span className="dc-presenza-badge" style={{ backgroundColor: tipo?.color || '#10b981', opacity: salvata ? 1 : 0.55 }}>
+                        <span className="dc-presenza-badge" style={{ backgroundColor: tipo?.color || '#10b981', opacity: dimmed ? 0.12 : (salvata ? 1 : 0.55) }}>
                           {code}
                         </span>
                       ) : (
