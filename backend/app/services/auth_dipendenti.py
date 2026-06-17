@@ -112,6 +112,31 @@ async def _pin_operatore_valido(db, dip: Dict[str, Any], pin: str) -> bool:
     return False
 
 
+async def operatore_amministratore(db, pin: str):
+    """Operatore con ruolo amministratore e questo PIN, dalla fonte condivisa
+    tablet_operatori. Permette l'accesso admin col PIN unico della cassa."""
+    try:
+        coll = db["tablet_operatori"]
+        doc = await coll.find_one(
+            {"attivo": True, "pin_chiaro": pin, "ruolo": "amministratore"},
+            {"_id": 0, "id": 1, "nome": 1},
+        )
+        if doc:
+            return doc
+        try:
+            import bcrypt
+            for d in await coll.find({"attivo": True, "ruolo": "amministratore"},
+                                     {"_id": 0, "id": 1, "nome": 1, "pin": 1}).to_list(50):
+                h = (d.get("pin") or "")
+                if h.startswith("$2") and bcrypt.checkpw(pin.encode(), h.encode()):
+                    return d
+        except Exception:
+            pass
+    except Exception:
+        return None
+    return None
+
+
 async def login_dipendente(dipendente_id: str, pin: str) -> Optional[Dict[str, Any]]:
     """Valida il PIN del dipendente e ritorna il token, oppure None.
 

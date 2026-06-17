@@ -22,7 +22,7 @@ from jose import jwt
 from backend.app.config import settings
 from backend.app.database import Database, Collections
 from backend.app.repositories import UserRepository
-from backend.app.services.auth_dipendenti import login_dipendente, lista_login
+from backend.app.services.auth_dipendenti import login_dipendente, lista_login, operatore_amministratore
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -110,6 +110,24 @@ async def pin_login(
             pass
         logger.info(f"PIN-login dipendente OK · IP {ip} · {result['user_id']} · {result['role']}")
         return result
+
+    # --- Ramo admin via fonte operatori condivisa (PIN unico cassa) ---
+    if pin.isdigit() and 4 <= len(pin) <= 12:
+        db_op = Database.get_db()
+        op = await operatore_amministratore(db_op, pin)
+        if op:
+            _clear_failures(ip)
+            expire = datetime.now(timezone.utc) + timedelta(minutes=PIN_TOKEN_EXPIRE_MINUTES)
+            token = jwt.encode(
+                {"sub": op.get("id", "admin"), "name": op.get("nome", "Amministratore"),
+                 "role": "admin", "tipo": "admin", "exp": expire,
+                 "iat": datetime.now(timezone.utc), "auth_method": "pin_operatore"},
+                settings.SECRET_KEY, algorithm=settings.ALGORITHM,
+            )
+            logger.info(f"PIN-login admin (operatore cassa) OK · IP {ip}")
+            return {"access_token": token, "token_type": "bearer",
+                    "user_id": op.get("id", "admin"), "name": op.get("nome", "Amministratore"),
+                    "role": "admin", "tipo": "admin", "auth_method": "pin_operatore"}
 
     # --- Ramo admin: PIN unico da env ---
     if not settings.PIN_CODE:
