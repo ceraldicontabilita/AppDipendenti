@@ -4,14 +4,21 @@ services:
     env: python
     buildCommand: pip install -r backend/requirements.txt
     startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
     envVars:
-      - key: MONGO_URL
+      - key: MONGO_URL          # stringa MongoDB Atlas (stesso cluster Gestionale)
         sync: false
       - key: DB_NAME
         value: Gestionale
-      - key: JWT_SECRET
+      - key: JWT_SECRET         # segreto firma token (nuovo, non riusare il vecchio)
         sync: false
-      - key: PIN_CODE
-        value: "141574"
-      - key: ANTHROPIC_API_KEY
+      - key: PIN_CODE           # PIN admin (mobile) — valore SOLO qui, non nel codice
+        sync: false
+      - key: PIN_ADMIN_USERNAME
+        value: ceraldi
+      - key: ANTHROPIC_API_KEY  # opzionale (estrazione AI documenti)
+        sync: false
+      - key: IMAP_USER          # opzionale (import buste da Gmail)
+        sync: false
+      - key: IMAP_PASSWORD      # opzionale (App Password Gmail)
         sync: false
