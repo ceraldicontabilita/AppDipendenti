@@ -511,6 +511,9 @@ function PresenzePage({ dipendenti, reload }) {
   });
   const [penna, setPenna] = useState("P");
   const [tuttiMode, setTuttiMode] = useState(false);
+  const [ferieList, setFerieList] = useState([]);
+  const [turniMese, setTurniMese] = useState([]);
+  const [tipiTurno, setTipiTurno] = useState([]);
 
   const mesi = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
   const daysInMonth = new Date(anno, mese, 0).getDate();
@@ -526,6 +529,39 @@ function PresenzePage({ dipendenti, reload }) {
   };
 
   useEffect(() => { loadPresenze(); }, [anno, mese]);
+
+  // Carica ferie, tipi turno e i turni delle settimane che toccano il mese (per derivare le presenze)
+  useEffect(() => {
+    axios.get(`${API}/ferie`).then(r => setFerieList(r.data || [])).catch(() => {});
+    axios.get(`${API}/turni`).then(r => setTipiTurno(r.data || [])).catch(() => {});
+    const isoD = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const lunSet = new Set();
+    for (let g = 1; g <= daysInMonth; g++) {
+      const dt = new Date(anno, mese - 1, g); const off = (dt.getDay() + 6) % 7;
+      const lun = new Date(dt); lun.setDate(dt.getDate() - off); lunSet.add(isoD(lun));
+    }
+    Promise.all([...lunSet].map(s => axios.get(`${API}/assegnazioni-turni?settimana=${s}`).then(r => r.data || []).catch(() => [])))
+      .then(arrs => setTurniMese(arrs.flat()));
+  }, [anno, mese]);
+
+  const isoD = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const NOMI_G = ["Domenica", "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato"];
+  const lunISOdi = (date) => { const off = (date.getDay() + 6) % 7; const l = new Date(date); l.setDate(date.getDate() - off); return isoD(l); };
+  const ferieDi = (dipId, dateStr) => ferieList.find(f => f.dipendente_id === dipId && f.data_inizio <= dateStr && (f.data_fine || f.data_inizio) >= dateStr);
+  const turnoDi = (dipId, date) => turniMese.find(a => a.dipendente_id === dipId && a.settimana === lunISOdi(date) && a.giorno === NOMI_G[date.getDay()]);
+  const nomeTurnoId = (id) => (tipiTurno.find(t => t.id === id) || {}).nome;
+
+  // Codice giustificativo derivato per una cella: presenza salvata > ferie/permesso > turno.
+  const codiceDerivato = (dipId, day) => {
+    const pres = getPresenza(dipId, day);
+    if (pres) return pres.giustificativo || (pres.stato === 'presente' ? 'P' : pres.stato === 'assente' ? 'UN' : null);
+    const date = new Date(anno, mese - 1, day);
+    const fer = ferieDi(dipId, isoD(date));
+    if (fer) return fer.tipo === 'Permesso' ? 'PE' : fer.tipo === 'Malattia' ? 'M' : fer.tipo === 'ROL' ? 'R' : 'F';
+    const t = turnoDi(dipId, date);
+    if (t) { const n = nomeTurnoId(t.turno_id); return n === 'Riposo' ? 'RS' : n === 'Ferie' ? 'F' : n ? 'P' : null; }
+    return null;
+  };
 
   const getPresenza = (dipId, day) => {
     const dataStr = `${anno}-${String(mese).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
@@ -701,15 +737,17 @@ function PresenzePage({ dipendenti, reload }) {
                   </div>
                 </td>
                 {Array.from({length: daysInMonth}, (_, i) => {
-                  const pres = getPresenza(dip.id, i + 1);
-                  const date = new Date(anno, mese - 1, i + 1);
+                  const day = i + 1;
+                  const date = new Date(anno, mese - 1, day);
                   const isWeekend = date.getDay() === 0 || date.getDay() === 6;
-                  const tipo = tipiGiustificativo.find(t => t.code === (pres?.giustificativo || (pres?.stato === 'presente' ? 'P' : '')));
+                  const salvata = getPresenza(dip.id, day);
+                  const code = codiceDerivato(dip.id, day);
+                  const tipo = tipiGiustificativo.find(t => t.code === code);
                   return (
-                    <td key={i} className={`dc-presenze-td-day ${isWeekend ? 'weekend' : ''}`} onClick={() => applica(tuttiMode ? dipendenti.map(d => d.id) : [dip.id], i + 1)} style={{ cursor: "pointer" }}>
-                      {pres ? (
-                        <span className="dc-presenza-badge" style={{ backgroundColor: tipo?.color || '#10b981' }}>
-                          {pres.giustificativo || (pres.stato === 'presente' ? 'P' : pres.stato?.[0]?.toUpperCase())}
+                    <td key={i} className={`dc-presenze-td-day ${isWeekend ? 'weekend' : ''}`} onClick={() => applica(tuttiMode ? dipendenti.map(d => d.id) : [dip.id], day)} style={{ cursor: "pointer" }}>
+                      {code ? (
+                        <span className="dc-presenza-badge" style={{ backgroundColor: tipo?.color || '#10b981', opacity: salvata ? 1 : 0.55 }}>
+                          {code}
                         </span>
                       ) : (
                         <span className="dc-presenza-empty">-</span>
