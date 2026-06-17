@@ -37,15 +37,17 @@ def register_routers():
     app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
     app.include_router(pin_login.router, prefix="/api/auth", tags=["PIN Login"])
 
-    from .routers.employees import dipendenti, buste_paga, employee_contracts, giustificativi, shifts, fascicolo_dipendente
+    from .routers.employees import dipendenti, buste_paga, employee_contracts, giustificativi, shifts, fascicolo_dipendente, accessi
     app.include_router(dipendenti.router, prefix="/api/dipendenti", tags=["Dipendenti"])
+    app.include_router(accessi.router, prefix="/api/accessi", tags=["Accessi"])
     app.include_router(buste_paga.router, prefix="/api", tags=["Buste Paga"])
     app.include_router(employee_contracts.router, prefix="/api/contracts", tags=["Contratti"])
     app.include_router(giustificativi.router, prefix="/api/giustificativi", tags=["Giustificativi"])
     app.include_router(shifts.router, prefix="/api/shifts", tags=["Turni"])
     app.include_router(fascicolo_dipendente.router, prefix="/api", tags=["Fascicolo"])
 
-    from .routers import cedolini, cedolini_riconciliazione, tfr, attendance, dimissioni
+    from .routers import cedolini, cedolini_riconciliazione, tfr, attendance, dimissioni, richieste
+    app.include_router(richieste.router, prefix="/api/richieste", tags=["Richieste"])
     app.include_router(cedolini_riconciliazione.router, prefix="/api/cedolini", tags=["Cedolini Ric."])
     app.include_router(cedolini.router, prefix="/api/cedolini", tags=["Cedolini"])
     app.include_router(tfr.router, prefix="/api/tfr", tags=["TFR"])

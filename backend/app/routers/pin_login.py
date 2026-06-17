@@ -22,6 +22,7 @@ from jose import jwt
 from backend.app.config import settings
 from backend.app.database import Database, Collections
 from backend.app.repositories import UserRepository
+from backend.app.services.auth_dipendenti import login_dipendente, lista_login
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -86,11 +87,25 @@ async def pin_login(
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
                             f"Troppi tentativi, riprova tra {lock_sec}s")
 
+    pin = str(payload.get("pin", "")).strip()
+    dipendente_id = payload.get("dipendente_id")
+
+    # --- Ramo dipendente: dipendente_id + PIN personale ---
+    if dipendente_id:
+        result = await login_dipendente(str(dipendente_id), pin)
+        if not result:
+            _register_failure(ip)
+            logger.warning(f"PIN-login dipendente fallito da IP {ip}")
+            raise HTTPException(401, "Credenziali non valide")
+        _clear_failures(ip)
+        logger.info(f"PIN-login dipendente OK · IP {ip} · {result['user_id']} · {result['role']}")
+        return result
+
+    # --- Ramo admin: PIN unico da env ---
     if not settings.PIN_CODE:
         logger.error("PIN-login: PIN_CODE non configurato nelle env")
         raise HTTPException(503, "Login PIN non configurato")
 
-    pin = str(payload.get("pin", "")).strip()
     if not pin.isdigit() or not (4 <= len(pin) <= 12):
         _register_failure(ip)
         raise HTTPException(400, "PIN non valido")
@@ -149,6 +164,12 @@ async def pin_login(
         "role": user.get("role", "admin"),
         "auth_method": "pin",
     }
+
+
+@router.get("/dipendenti-login", summary="Elenco dipendenti per schermata login mobile")
+async def dipendenti_login_list():
+    """Lista (id, nome, mansione, ruolo) dei dipendenti con PIN attivo. Nessun dato sensibile."""
+    return await lista_login()
 
 
 @router.get("/pin-login/health", summary="Health check PIN login")
