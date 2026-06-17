@@ -124,13 +124,16 @@ async def dettaglio(settimana_inizio: str, identity: Dict[str, Any] = Depends(ge
         raise HTTPException(404, "Settimana non trovata")
     if identity.get("role") in ("admin", "responsabile_turni"):
         return doc
-    # dipendente: solo se pubblicata, e solo la sua riga
+    # dipendente: vede la griglia completa di tutti, ma solo se pubblicata
+    # e senza le note gestionali (avvisi/metadati interni)
     if doc["stato"] != "pubblicato":
         raise HTTPException(403, "Turni non ancora pubblicati")
-    mid = identity["id"]
-    giorni = [{"data": g["data"], "giorno_nome": g["giorno_nome"],
-               "turno": g["assegnazioni"].get(mid, {})} for g in doc["giorni"]]
-    return {"settimana_inizio": doc["settimana_inizio"], "stato": doc["stato"], "giorni": giorni}
+    return {
+        "settimana_inizio": doc["settimana_inizio"],
+        "stato": doc["stato"],
+        "giorni": doc["giorni"],
+        "totali": doc.get("totali", {}),
+    }
 
 
 @router.put("/{settimana_inizio}/cella", summary="Modifica una cella (responsabile/admin) + rivalida")
