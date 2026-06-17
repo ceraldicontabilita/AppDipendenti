@@ -950,6 +950,8 @@ function TurniPage({ dipendenti, turni, reload }) {
   const [assegnazioni, setAssegnazioni] = useState([]);
   const [busy, setBusy] = useState(false);
   const giorni = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"];
+  const lunCorrente = (() => { const o = new Date(); const off = (o.getDay() + 6) % 7; const m = new Date(o); m.setDate(o.getDate() - off); m.setHours(0, 0, 0, 0); return m; })();
+  const dataDi = (i) => { const d = new Date(lunCorrente); d.setDate(lunCorrente.getDate() + i); return d.getDate(); };
 
   useEffect(() => {
     axios.get(`${API}/assegnazioni-turni`).then(res => setAssegnazioni(res.data || [])).catch(() => {});
@@ -1035,7 +1037,7 @@ function TurniPage({ dipendenti, turni, reload }) {
           <thead>
             <tr>
               <th>DIPENDENTE</th>
-              {giorni.map(g => <th key={g}>{g}</th>)}
+              {giorni.map((g, i) => <th key={g}>{g} {dataDi(i)}</th>)}
             </tr>
           </thead>
           <tbody>
