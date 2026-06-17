@@ -595,8 +595,8 @@ async def delete_documento(documento_id: str):
 
 @router.get("/dashboard/stats")
 async def get_dashboard_stats():
-    dipendenti = await get_db().dipendenti_cloud.find({}, {"_id": 0}).to_list(1000)
-    attivi = [d for d in dipendenti if d.get("stato") == "attivo"]
+    dipendenti = await get_db().dipendenti.find({}, {"_id": 0}).to_list(1000)
+    attivi = [d for d in dipendenti if d.get("attivo", True) is not False and d.get("stato", "attivo") not in ("cessato", "disattivo", "inattivo")]
     
     ferie_pending = await get_db().ferie_cloud.count_documents({"stato": "in_attesa"})
     missioni_pending = await get_db().missioni_cloud.count_documents({"stato": "in_attesa"})
