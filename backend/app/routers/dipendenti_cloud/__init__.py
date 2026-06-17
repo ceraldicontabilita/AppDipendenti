@@ -408,23 +408,37 @@ async def delete_turno(turno_id: str):
     return {"message": "Turno eliminato"}
 
 @router.get("/assegnazioni-turni")
-async def get_assegnazioni():
-    assegnazioni = await get_db().assegnazioni_turni_cloud.find({}, {"_id": 0}).to_list(1000)
+async def get_assegnazioni(settimana: Optional[str] = None):
+    query = {"settimana": settimana} if settimana else {}
+    assegnazioni = await get_db().assegnazioni_turni_cloud.find(query, {"_id": 0}).to_list(2000)
     return assegnazioni
+
+@router.post("/assegnazioni-turni/migra")
+async def migra_settimana_assegnazioni(data: dict):
+    """Una-tantum: assegna una settimana ai record che non ce l'hanno."""
+    settimana = data.get("settimana")
+    if not settimana:
+        raise HTTPException(status_code=400, detail="settimana obbligatoria")
+    res = await get_db().assegnazioni_turni_cloud.update_many(
+        {"$or": [{"settimana": {"$exists": False}}, {"settimana": None}]},
+        {"$set": {"settimana": settimana}}
+    )
+    return {"migrati": res.modified_count}
 
 @router.post("/assegnazioni-turni")
 async def create_or_update_assegnazione(data: dict):
     dipendente_id = data.get("dipendente_id")
     giorno = data.get("giorno")
     turno_id = data.get("turno_id")
+    settimana = data.get("settimana")
     
     if not dipendente_id or not giorno:
         raise HTTPException(status_code=400, detail="dipendente_id e giorno sono obbligatori")
     
-    existing = await get_db().assegnazioni_turni_cloud.find_one({
-        "dipendente_id": dipendente_id,
-        "giorno": giorno
-    })
+    match = {"dipendente_id": dipendente_id, "giorno": giorno}
+    if settimana:
+        match["settimana"] = settimana
+    existing = await get_db().assegnazioni_turni_cloud.find_one(match)
     
     if turno_id:
         if existing:
@@ -437,7 +451,8 @@ async def create_or_update_assegnazione(data: dict):
                 "id": generate_id(),
                 "dipendente_id": dipendente_id,
                 "giorno": giorno,
-                "turno_id": turno_id
+                "turno_id": turno_id,
+                "settimana": settimana,
             }
             await get_db().assegnazioni_turni_cloud.insert_one(ass)
     else:

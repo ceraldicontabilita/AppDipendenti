@@ -951,12 +951,17 @@ function TurniPage({ dipendenti, turni, reload }) {
   const [busy, setBusy] = useState(false);
   const [evid, setEvid] = useState(null);
   const giorni = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"];
-  const lunCorrente = (() => { const o = new Date(); const off = (o.getDay() + 6) % 7; const m = new Date(o); m.setDate(o.getDate() - off); m.setHours(0, 0, 0, 0); return m; })();
-  const dataDi = (i) => { const d = new Date(lunCorrente); d.setDate(lunCorrente.getDate() + i); return d.getDate(); };
+  const lunOggi = (() => { const o = new Date(); const off = (o.getDay() + 6) % 7; const m = new Date(o); m.setDate(o.getDate() - off); m.setHours(0, 0, 0, 0); return m; })();
+  const [lunedi, setLunedi] = useState(lunOggi);
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const settimana = iso(lunedi);
+  const dataDi = (i) => { const d = new Date(lunedi); d.setDate(lunedi.getDate() + i); return d.getDate(); };
+  const meseLabel = (() => { const f = new Date(lunedi); const l = new Date(lunedi); l.setDate(l.getDate() + 6); return `${f.getDate()} ${f.toLocaleDateString('it-IT', { month: 'short' })} – ${l.getDate()} ${l.toLocaleDateString('it-IT', { month: 'short' })}`; })();
+  const BASE_BAR = new Date(2026, 5, 15);
+  const settimanaPari = ((Math.round((lunedi - BASE_BAR) / (7 * 86400000)) % 2) + 2) % 2 === 0;
 
-  useEffect(() => {
-    axios.get(`${API}/assegnazioni-turni`).then(res => setAssegnazioni(res.data || [])).catch(() => {});
-  }, []);
+  const caricaSettimana = (s) => axios.get(`${API}/assegnazioni-turni?settimana=${s}`).then(res => setAssegnazioni(res.data || [])).catch(() => {});
+  useEffect(() => { caricaSettimana(settimana); }, [settimana]);
 
   const getAssegnazione = (dipId, giorno) => assegnazioni.find(a => a.dipendente_id === dipId && a.giorno === giorno);
   const getTurno = (turnoId) => turni.find(t => t.id === turnoId);
@@ -971,9 +976,8 @@ function TurniPage({ dipendenti, turni, reload }) {
   const salva = async (updates) => {
     setBusy(true);
     try {
-      for (const u of updates) await axios.post(`${API}/assegnazioni-turni`, u);
-      const res = await axios.get(`${API}/assegnazioni-turni`);
-      setAssegnazioni(res.data || []);
+      for (const u of updates) await axios.post(`${API}/assegnazioni-turni`, { ...u, settimana });
+      await caricaSettimana(settimana);
     } finally { setBusy(false); }
   };
 
@@ -1007,6 +1011,16 @@ function TurniPage({ dipendenti, turni, reload }) {
       const row = BASE[(dip.nome || "").trim().toLowerCase()];
       if (row) row.forEach((nome, gi) => updates.push({ dipendente_id: dip.id, giorno: giorni[gi], turno_id: idTurno(nome) || null }));
     });
+    // Bar: due gruppi che si alternano mattina/pomeriggio a settimane alterne
+    const setBar = (cognomi, turnoNome) => {
+      dipendenti.filter(d => cognomi.some(c => (d.cognome || "").toLowerCase().includes(c))).forEach(dip => {
+        for (let gi = 0; gi < 6; gi++) updates.push({ dipendente_id: dip.id, giorno: giorni[gi], turno_id: idTurno(turnoNome) || null });
+        updates.push({ dipendente_id: dip.id, giorno: "Domenica", turno_id: idTurno("Riposo") || null });
+      });
+    };
+    const g1 = ["vespa", "capezzuto"], g2 = ["parisi", "moscato"];
+    if (settimanaPari) { setBar(g1, "Bar 6:30-15"); setBar(g2, "Bar 15-21"); }
+    else { setBar(g1, "Bar 15-21"); setBar(g2, "Bar 6:30-15"); }
     if (updates.length) await salva(updates);
   };
 
@@ -1033,10 +1047,14 @@ function TurniPage({ dipendenti, turni, reload }) {
         </div>
       </div>
 
-      <div style={{ marginBottom: 16 }}>
+      <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <button onClick={() => setLunedi(d => { const n = new Date(d); n.setDate(d.getDate() - 7); return n; })} className="dc-btn">‹</button>
+        <strong style={{ minWidth: 150, textAlign: "center" }}>{meseLabel}{settimanaPari ? "" : " · bar invertito"}</strong>
+        <button onClick={() => setLunedi(d => { const n = new Date(d); n.setDate(d.getDate() + 7); return n; })} className="dc-btn">›</button>
+        <button onClick={() => setLunedi(lunOggi)} className="dc-btn" style={{ fontSize: 12 }}>Oggi</button>
         <button onClick={generaProduzione} disabled={busy}
-          style={{ background: "#5D29C7", color: "#fff", border: "none", padding: "10px 18px", borderRadius: 10, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
-          {busy ? "Attendi…" : "Genera settimana produzione"}
+          style={{ marginLeft: "auto", background: "#5D29C7", color: "#fff", border: "none", padding: "10px 18px", borderRadius: 10, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
+          {busy ? "Attendi…" : "Genera settimana"}
         </button>
       </div>
 
