@@ -98,6 +98,16 @@ async def pin_login(
             logger.warning(f"PIN-login dipendente fallito da IP {ip}")
             raise HTTPException(401, "Credenziali non valide")
         _clear_failures(ip)
+        try:
+            from backend.app.services.audit_logger import log_evento
+            await log_evento(
+                modulo="accesso", azione="login",
+                entita_id=result["user_id"], entita_collection="dipendenti",
+                db=Database.get_db(), fonte="portale", utente=result["user_id"],
+                dettaglio="Accesso al portale via PIN", extra={"ip": ip},
+            )
+        except Exception:
+            pass
         logger.info(f"PIN-login dipendente OK · IP {ip} · {result['user_id']} · {result['role']}")
         return result
 

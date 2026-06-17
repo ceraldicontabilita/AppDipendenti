@@ -46,8 +46,9 @@ def register_routers():
     app.include_router(shifts.router, prefix="/api/shifts", tags=["Turni"])
     app.include_router(fascicolo_dipendente.router, prefix="/api", tags=["Fascicolo"])
 
-    from .routers import cedolini, cedolini_riconciliazione, tfr, attendance, dimissioni, richieste
+    from .routers import cedolini, cedolini_riconciliazione, tfr, attendance, dimissioni, richieste, portale_buste
     app.include_router(richieste.router, prefix="/api/richieste", tags=["Richieste"])
+    app.include_router(portale_buste.router, prefix="/api/portale/buste", tags=["Portale Buste"])
     app.include_router(cedolini_riconciliazione.router, prefix="/api/cedolini", tags=["Cedolini Ric."])
     app.include_router(cedolini.router, prefix="/api/cedolini", tags=["Cedolini"])
     app.include_router(tfr.router, prefix="/api/tfr", tags=["TFR"])
