@@ -206,6 +206,12 @@ async def upsert_pagha(data: dict):
         {"$set": doc}, upsert=True)
     return {"ok": True, "pagha": doc}
 
+@router.delete("/paghe")
+async def delete_pagha(dipendente_id: str, anno: int, mese: int):
+    res = await get_db().paghe_mensili.delete_one(
+        {"dipendente_id": dipendente_id, "anno": int(anno), "mese": int(mese)})
+    return {"ok": True, "eliminati": res.deleted_count}
+
 # --- Import automatico Libro Unico (PDF) → divide per dipendente e memorizza i netti ---
 
 _CF_RE = re.compile(r'\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b')
