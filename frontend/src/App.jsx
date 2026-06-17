@@ -152,7 +152,7 @@ export default function DipendentiCloudApp() {
       case "turni":
         return <TurniPage dipendenti={activeDipendenti} turni={turni} reload={loadData} />;
       case "buste-paga":
-        return <BustePagaPage dipendenti={dipendenti} bustePaga={bustePaga} reload={loadData} getDipendente={getDipendente} />;
+        return <BustePagaPage dipendenti={activeDipendenti} reload={loadData} getDipendente={getDipendente} />;
       case "missioni":
         return <MissioniPage dipendenti={activeDipendenti} missioni={missioni} reload={loadData} getDipendente={getDipendente} />;
       case "documenti":
@@ -1206,149 +1206,127 @@ function TurniPage({ dipendenti, turni, reload }) {
 
 // Buste Paga Page
 function BustePagaPage({ dipendenti, reload, getDipendente }) {
-  const [bustePaga, setBustePaga] = useState([]);
-  const [selectedDip, setSelectedDip] = useState("");
   const [anno, setAnno] = useState(new Date().getFullYear());
+  const [mese, setMese] = useState(new Date().getMonth() + 1);
+  const [righe, setRighe] = useState({});
+  const [salvato, setSalvato] = useState({});
   const mesi = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
 
-  const loadBuste = async () => {
-    const params = new URLSearchParams();
-    if (anno) params.append('anno', anno);
-    if (selectedDip) params.append('dipendente_id', selectedDip);
-    const res = await axios.get(`${API}/buste-paga?${params}`);
-    setBustePaga(res.data || []);
+  const vuota = () => ({ importo_busta: "", bonifico_ricevuto: false, bonifico_importo: "", bonifico_data: "", acconti: [] });
+
+  const load = async () => {
+    const res = await axios.get(`${API}/paghe?anno=${anno}&mese=${mese}`);
+    const map = {};
+    (res.data || []).forEach(p => { map[p.dipendente_id] = {
+      importo_busta: p.importo_busta ?? "",
+      bonifico_ricevuto: !!p.bonifico_ricevuto,
+      bonifico_importo: p.bonifico_importo ?? "",
+      bonifico_data: p.bonifico_data ?? "",
+      acconti: (p.acconti || []).map(a => ({ importo: a.importo ?? "", data: a.data ?? "" })),
+    }; });
+    setRighe(map);
+  };
+  useEffect(() => { load(); }, [anno, mese]);
+
+  const get = (id) => righe[id] || vuota();
+  const upd = (id, patch) => setRighe(r => ({ ...r, [id]: { ...get(id), ...patch } }));
+  const setAcc = (id, idx, patch) => { const acc = [...(get(id).acconti || [])]; acc[idx] = { ...(acc[idx] || { importo: "", data: "" }), ...patch }; upd(id, { acconti: acc }); };
+  const addAcc = (id) => { const acc = [...(get(id).acconti || [])]; if (acc.length < 3) { acc.push({ importo: "", data: "" }); upd(id, { acconti: acc }); } };
+  const delAcc = (id, idx) => { const acc = [...(get(id).acconti || [])]; acc.splice(idx, 1); upd(id, { acconti: acc }); };
+
+  const salva = async (id) => {
+    const d = get(id);
+    const payload = {
+      dipendente_id: id, anno, mese,
+      importo_busta: d.importo_busta === "" ? null : parseFloat(d.importo_busta),
+      bonifico_ricevuto: d.bonifico_ricevuto,
+      bonifico_importo: d.bonifico_importo === "" ? null : parseFloat(d.bonifico_importo),
+      bonifico_data: d.bonifico_data || null,
+      acconti: (d.acconti || []).filter(a => a.importo !== "" && a.importo != null).map(a => ({ importo: parseFloat(a.importo), data: a.data || null })),
+    };
+    try { await axios.post(`${API}/paghe`, payload); setSalvato(s => ({ ...s, [id]: true })); setTimeout(() => setSalvato(s => ({ ...s, [id]: false })), 1500); } catch (e) { console.error(e); alert("Errore salvataggio"); }
   };
 
-  useEffect(() => { loadBuste(); }, [anno, selectedDip]);
-
-  const handleGenera = async () => {
-    const mese = new Date().getMonth() + 1;
-    await axios.post(`${API}/buste-paga/genera`, { mese, anno, lordo: 1500 });
-    loadBuste();
-  };
-
-  const dipendente = getDipendente(selectedDip);
-  const totaleNetto = bustePaga.reduce((sum, b) => sum + (b.netto || 0), 0);
-  const totaleLordo = bustePaga.reduce((sum, b) => sum + (b.lordo || 0), 0);
+  const eur = (n) => (n || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const totBuste = dipendenti.reduce((s, d) => s + (parseFloat(get(d.id).importo_busta) || 0), 0);
+  const totBonifici = dipendenti.reduce((s, d) => s + (parseFloat(get(d.id).bonifico_importo) || 0), 0);
+  const totAcconti = dipendenti.reduce((s, d) => s + (get(d.id).acconti || []).reduce((a, x) => a + (parseFloat(x.importo) || 0), 0), 0);
+  const inp = { border: "1px solid #d1d5db", borderRadius: 8, padding: "7px 9px", fontSize: 14, width: "100%", boxSizing: "border-box" };
 
   return (
     <div className="dc-page">
       <div className="dc-page-header">
         <div>
           <h1>Buste Paga</h1>
-          <p>Gestione cedolini e retribuzioni</p>
+          <p>Importo busta, bonifico ricevuto e acconti · tutto salvato sul database</p>
         </div>
         <div className="dc-page-actions">
-          <select value={selectedDip} onChange={e => setSelectedDip(e.target.value)} className="dc-select">
-            <option value="">Tutti i dipendenti</option>
-            {dipendenti.map(d => <option key={d.id} value={d.id}>{d.cognome} {d.nome}</option>)}
+          <select value={mese} onChange={e => setMese(+e.target.value)} className="dc-select">
+            {mesi.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
           </select>
           <select value={anno} onChange={e => setAnno(+e.target.value)} className="dc-select">
-            {[2024,2025,2026].map(y => <option key={y} value={y}>{y}</option>)}
+            {[2024, 2025, 2026, 2027].map(y => <option key={y} value={y}>{y}</option>)}
           </select>
         </div>
       </div>
 
-      {/* Stats */}
-      <div className="dc-buste-stats">
-        <div className="dc-buste-stat dc-buste-stat-blue">
-          <span className="dc-buste-stat-label">CEDOLINI ANNO</span>
-          <span className="dc-buste-stat-value">{bustePaga.length}</span>
-        </div>
-        <div className="dc-buste-stat dc-buste-stat-green">
-          <span className="dc-buste-stat-label">TOTALE NETTO</span>
-          <span className="dc-buste-stat-value">€ {totaleNetto.toLocaleString('it-IT', {minimumFractionDigits: 2})}</span>
-        </div>
-        <div className="dc-buste-stat dc-buste-stat-cyan">
-          <span className="dc-buste-stat-label">TOTALE LORDO</span>
-          <span className="dc-buste-stat-value">€ {totaleLordo.toLocaleString('it-IT', {minimumFractionDigits: 2})}</span>
-        </div>
-        <div className="dc-buste-stat">
-          <span className="dc-buste-stat-label">ANNI DISPONIBILI</span>
-          <span className="dc-buste-stat-value">3</span>
-        </div>
+      <div className="dc-buste-stats" style={{ marginBottom: 16 }}>
+        <div className="dc-buste-stat dc-buste-stat-blue"><span className="dc-buste-stat-label">TOTALE BUSTE</span><span className="dc-buste-stat-value">€ {eur(totBuste)}</span></div>
+        <div className="dc-buste-stat dc-buste-stat-green"><span className="dc-buste-stat-label">BONIFICI</span><span className="dc-buste-stat-value">€ {eur(totBonifici)}</span></div>
+        <div className="dc-buste-stat dc-buste-stat-cyan"><span className="dc-buste-stat-label">ACCONTI</span><span className="dc-buste-stat-value">€ {eur(totAcconti)}</span></div>
+        <div className="dc-buste-stat"><span className="dc-buste-stat-label">DIPENDENTI</span><span className="dc-buste-stat-value">{dipendenti.length}</span></div>
       </div>
 
-      <div className="dc-buste-grid">
-        {/* Cedolini List */}
-        <div className="dc-card">
-          <div className="dc-card-header">
-            <h3>CEDOLINI {anno}</h3>
-            {dipendente && <p>{dipendente.nome} {dipendente.cognome}<br/><small>{dipendente.ruolo}</small></p>}
-          </div>
-          <table className="dc-table">
-            <thead>
-              <tr>
-                <th>MESE</th>
-                <th>NETTO</th>
-                <th>PDF</th>
-              </tr>
-            </thead>
-            <tbody>
-              {bustePaga.map((b) => (
-                <tr key={b.id}>
-                  <td>
-                    <span className={`dc-mese-badge ${b.stato === 'PAGATO' ? 'paid' : ''}`}>
-                      {mesi[b.mese - 1]}
-                    </span>
-                  </td>
-                  <td className="dc-text-green">€{b.netto?.toLocaleString('it-IT', {minimumFractionDigits: 2})}</td>
-                  <td>
-                    <button className="dc-btn-icon dc-btn-pdf">
-                      <FileText size={16} /> PDF
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr>
-                <td><strong>TOTALE ANNO</strong></td>
-                <td className="dc-text-green"><strong>€{totaleNetto.toLocaleString('it-IT', {minimumFractionDigits: 2})}</strong></td>
-                <td></td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {dipendenti.map(dip => {
+          const d = get(dip.id);
+          const acc = d.acconti || [];
+          return (
+            <div key={dip.id} className="dc-card" style={{ padding: 14 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <div className="dc-table-user" style={{ minWidth: 190 }}>
+                  <Avatar nome={dip.nome} cognome={dip.cognome} size="sm" />
+                  <span style={{ fontWeight: 600 }}>{dip.cognome ? `${dip.cognome} ${dip.nome || ''}` : dip.nome}</span>
+                </div>
 
-        {/* Storico per anno */}
-        <div className="dc-card">
-          <h3>Storico per anno</h3>
-          <table className="dc-table">
-            <thead>
-              <tr>
-                <th>ANNO</th>
-                <th>CEDOLINI</th>
-                <th>TOTALE NETTO</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>2026</td>
-                <td>1</td>
-                <td className="dc-text-blue">€1.486</td>
-              </tr>
-              <tr className="active">
-                <td>2025</td>
-                <td>11</td>
-                <td className="dc-text-blue">€12.832</td>
-              </tr>
-              <tr>
-                <td>2024</td>
-                <td>12</td>
-                <td className="dc-text-blue">€14.966</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                  <label style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>IMPORTO BUSTA €</label>
+                  <input type="number" step="0.01" value={d.importo_busta} onChange={e => upd(dip.id, { importo_busta: e.target.value })} placeholder="0,00" style={{ ...inp, width: 120 }} />
+                </div>
 
-      <div className="dc-card dc-analisi-card">
-        <h3>Analisi Presenze da Cedolini</h3>
-        <p>Dati estratti automaticamente dai PDF delle buste paga</p>
-        <button onClick={handleGenera} className="dc-btn dc-btn-primary">
-          Analizza Cedolini
-        </button>
+                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                  <label style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>BONIFICO</label>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap" }}>
+                      <input type="checkbox" checked={d.bonifico_ricevuto} onChange={e => upd(dip.id, { bonifico_ricevuto: e.target.checked })} />
+                      ricevuto
+                    </label>
+                    <input type="number" step="0.01" value={d.bonifico_importo} onChange={e => upd(dip.id, { bonifico_importo: e.target.value })} placeholder="€" style={{ ...inp, width: 100 }} />
+                    <input type="date" value={d.bonifico_data || ""} onChange={e => upd(dip.id, { bonifico_data: e.target.value })} style={{ ...inp, width: 150 }} />
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: 1, minWidth: 240 }}>
+                  <label style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>ACCONTI (max 3)</label>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                    {acc.map((a, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 4, background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 8, padding: "4px 6px" }}>
+                        <input type="number" step="0.01" value={a.importo} onChange={e => setAcc(dip.id, i, { importo: e.target.value })} placeholder="€" style={{ ...inp, width: 80, padding: "5px 7px" }} />
+                        <input type="date" value={a.data || ""} onChange={e => setAcc(dip.id, i, { data: e.target.value })} style={{ ...inp, width: 140, padding: "5px 7px" }} />
+                        <button type="button" onClick={() => delAcc(dip.id, i)} title="Rimuovi acconto" style={{ border: "none", background: "transparent", color: "#dc2626", cursor: "pointer", fontWeight: 700, fontSize: 16 }}>×</button>
+                      </div>
+                    ))}
+                    {acc.length < 3 && <button type="button" onClick={() => addAcc(dip.id)} style={{ border: "1px dashed #9ca3af", background: "#fff", color: "#5D29C7", borderRadius: 8, padding: "6px 10px", cursor: "pointer", fontWeight: 600, fontSize: 13 }}>+ acconto</button>}
+                  </div>
+                </div>
+
+                <button type="button" onClick={() => salva(dip.id)} style={{ background: salvato[dip.id] ? "#16a34a" : "#5D29C7", color: "#fff", border: "none", borderRadius: 10, padding: "10px 16px", fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+                  {salvato[dip.id] ? "✓ Salvato" : "Salva"}
+                </button>
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

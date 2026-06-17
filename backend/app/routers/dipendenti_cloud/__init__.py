@@ -173,6 +173,36 @@ async def set_ordine_dipendenti(data: dict):
         {"id": "ordine"}, {"$set": {"lista": lista}}, upsert=True)
     return {"ok": True}
 
+# ============ PAGHE MENSILI (importo busta + bonifico + acconti) ============
+
+@router.get("/paghe")
+async def get_paghe(anno: int, mese: int):
+    return await get_db().paghe_mensili.find(
+        {"anno": int(anno), "mese": int(mese)}, {"_id": 0}).to_list(500)
+
+@router.post("/paghe")
+async def upsert_pagha(data: dict):
+    dip = data.get("dipendente_id"); anno = data.get("anno"); mese = data.get("mese")
+    if not dip or not anno or not mese:
+        raise HTTPException(status_code=400, detail="dipendente_id, anno, mese obbligatori")
+    # Normalizza gli acconti: massimo 3, solo importo+data
+    acconti = []
+    for a in (data.get("acconti") or [])[:3]:
+        acconti.append({"importo": a.get("importo"), "data": a.get("data")})
+    doc = {
+        "dipendente_id": dip, "anno": int(anno), "mese": int(mese),
+        "importo_busta": data.get("importo_busta"),
+        "bonifico_ricevuto": bool(data.get("bonifico_ricevuto", False)),
+        "bonifico_importo": data.get("bonifico_importo"),
+        "bonifico_data": data.get("bonifico_data"),
+        "acconti": acconti,
+        "updated_at": now_iso(),
+    }
+    await get_db().paghe_mensili.update_one(
+        {"dipendente_id": dip, "anno": int(anno), "mese": int(mese)},
+        {"$set": doc}, upsert=True)
+    return {"ok": True, "pagha": doc}
+
 # ============ PRESENZE ============
 
 @router.get("/presenze")
