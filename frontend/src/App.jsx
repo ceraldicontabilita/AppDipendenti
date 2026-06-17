@@ -888,6 +888,7 @@ function FeriePage({ dipendenti, ferie, reload, getDipendente }) {
 // Turni Page
 function TurniPage({ dipendenti, turni, reload }) {
   const [assegnazioni, setAssegnazioni] = useState([]);
+  const [busy, setBusy] = useState(false);
   const giorni = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"];
 
   useEffect(() => {
@@ -896,11 +897,54 @@ function TurniPage({ dipendenti, turni, reload }) {
 
   const getAssegnazione = (dipId, giorno) => assegnazioni.find(a => a.dipendente_id === dipId && a.giorno === giorno);
   const getTurno = (turnoId) => turni.find(t => t.id === turnoId);
+  const idTurno = (nome) => (turni.find(t => t.nome === nome) || {}).id;
+  const nomeTurno = (id) => (turni.find(t => t.id === id) || {}).nome;
 
-  const handleAssegna = async (dipId, giorno, turnoId) => {
-    await axios.post(`${API}/assegnazioni-turni`, { dipendente_id: dipId, giorno, turno_id: turnoId || null });
-    const res = await axios.get(`${API}/assegnazioni-turni`);
-    setAssegnazioni(res.data || []);
+  // Squadra produzione (per nome di battesimo): su questi agisce il motore.
+  const TEAM = ["luigi", "angela", "giuliano", "liliana", "carmine", "mario"];
+  const isTeam = (dip) => TEAM.includes((dip.nome || "").trim().toLowerCase());
+  const UNICI = ["Lunga", "Riposo"]; // un solo turno di questo tipo per giorno
+
+  const salva = async (updates) => {
+    setBusy(true);
+    try {
+      for (const u of updates) await axios.post(`${API}/assegnazioni-turni`, u);
+      const res = await axios.get(`${API}/assegnazioni-turni`);
+      setAssegnazioni(res.data || []);
+    } finally { setBusy(false); }
+  };
+
+  // Riequilibrio automatico: se assegno una Lunga o un Riposo a una persona della
+  // produzione, chi aveva quel turno quel giorno si scambia il turno con lei,
+  // così il giorno resta sempre con una sola lunga e un solo riposo.
+  const handleAssegna = async (dip, giorno, nuovoId) => {
+    const updates = [{ dipendente_id: dip.id, giorno, turno_id: nuovoId || null }];
+    const nuovoNome = nomeTurno(nuovoId);
+    if (isTeam(dip) && UNICI.includes(nuovoNome)) {
+      const vecchioId = (getAssegnazione(dip.id, giorno) || {}).turno_id || null;
+      const altro = dipendenti.find(d =>
+        d.id !== dip.id && isTeam(d) && (getAssegnazione(d.id, giorno) || {}).turno_id === nuovoId);
+      if (altro) updates.push({ dipendente_id: altro.id, giorno, turno_id: vecchioId });
+    }
+    await salva(updates);
+  };
+
+  // Genera la settimana della squadra produzione secondo le regole.
+  const generaProduzione = async () => {
+    const BASE = {
+      luigi:    ["Riposo","Mattina 7-15","Mattina 7-15","Mattina 7-15","Mattina 7-15","Lunga","Mattina 7-15"],
+      angela:   ["Mattina 7-15","Mattina 8-16","Mattina 8-16","Riposo","Lunga","Mattina 7-15","Mattina 7-15"],
+      giuliano: ["Lunga","Pomeriggio","Riposo","Mattina 8-16","Pomeriggio","Mattina 8-16","Mattina 8-16"],
+      liliana:  ["Mattina 8-16","Lunga","Pomeriggio","Mattina 7-15","Riposo","Pomeriggio","Pomeriggio"],
+      carmine:  ["Pomeriggio","Riposo","Lunga","Pomeriggio","Mattina 8-16","Mattina 7-15","Pomeriggio"],
+      mario:    ["Mattina 7-15","Mattina 8-16","Mattina 7-15","Lunga","Mattina 7-15","Pomeriggio","Riposo"],
+    };
+    const updates = [];
+    dipendenti.filter(isTeam).forEach(dip => {
+      const row = BASE[(dip.nome || "").trim().toLowerCase()];
+      if (row) row.forEach((nome, gi) => updates.push({ dipendente_id: dip.id, giorno: giorni[gi], turno_id: idTurno(nome) || null }));
+    });
+    if (updates.length) await salva(updates);
   };
 
   return (
@@ -908,15 +952,22 @@ function TurniPage({ dipendenti, turni, reload }) {
       <div className="dc-page-header">
         <div>
           <h1>Gestione Turni</h1>
-          <p>Assegnazione turni settimanali</p>
+          <p>Assegnazione turni settimanali · la squadra produzione si riequilibra da sola</p>
         </div>
         <div className="dc-turni-legend">
           {turni.map(t => (
             <span key={t.id} className="dc-turno-badge" style={{ backgroundColor: t.colore }}>
-              {t.nome}: {t.orario_inizio}-{t.orario_fine}
+              {t.nome}{t.orario_inizio ? `: ${t.orario_inizio}-${t.orario_fine}` : ""}
             </span>
           ))}
         </div>
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <button onClick={generaProduzione} disabled={busy}
+          style={{ background: "#5D29C7", color: "#fff", border: "none", padding: "10px 18px", borderRadius: 10, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
+          {busy ? "Attendi…" : "Genera settimana produzione"}
+        </button>
       </div>
 
       <div className="dc-card">
@@ -943,7 +994,7 @@ function TurniPage({ dipendenti, turni, reload }) {
                     <td key={g}>
                       <select
                         value={ass?.turno_id || ""}
-                        onChange={e => handleAssegna(dip.id, g, e.target.value)}
+                        onChange={e => handleAssegna(dip, g, e.target.value)}
                         className="dc-turno-select"
                         style={turno ? { backgroundColor: turno.colore + '30', borderColor: turno.colore } : {}}
                       >
