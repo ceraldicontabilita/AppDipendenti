@@ -1210,6 +1210,9 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
   const [mese, setMese] = useState(new Date().getMonth() + 1);
   const [righe, setRighe] = useState({});
   const [salvato, setSalvato] = useState({});
+  const [importing, setImporting] = useState(false);
+  const [importMsg, setImportMsg] = useState(null);
+  const fileRef = useRef(null);
   const mesi = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
 
   const vuota = () => ({ importo_busta: "", bonifico_ricevuto: false, bonifico_importo: "", bonifico_data: "", acconti: [] });
@@ -1248,6 +1251,25 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
   };
 
   const eur = (n) => (n || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  const handleImportLul = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setImporting(true); setImportMsg(null);
+    try {
+      const fd = new FormData(); fd.append("file", f);
+      const res = await axios.post(`${API}/paghe/importa-lul`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+      const r = res.data;
+      setImportMsg(r);
+      if (r.associati?.length) { setMese(r.associati[0].mese); setAnno(r.associati[0].anno); }
+      await load();
+    } catch (err) {
+      setImportMsg({ errore: err.response?.data?.detail || "Errore durante l'import" });
+    } finally {
+      setImporting(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
   const totBuste = dipendenti.reduce((s, d) => s + (parseFloat(get(d.id).importo_busta) || 0), 0);
   const totBonifici = dipendenti.reduce((s, d) => s + (parseFloat(get(d.id).bonifico_importo) || 0), 0);
   const totAcconti = dipendenti.reduce((s, d) => s + (get(d.id).acconti || []).reduce((a, x) => a + (parseFloat(x.importo) || 0), 0), 0);
@@ -1261,6 +1283,11 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
           <p>Importo busta, bonifico ricevuto e acconti · tutto salvato sul database</p>
         </div>
         <div className="dc-page-actions">
+          <input ref={fileRef} type="file" accept="application/pdf" onChange={handleImportLul} style={{ display: "none" }} />
+          <button onClick={() => fileRef.current?.click()} disabled={importing}
+            style={{ background: "#5D29C7", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
+            {importing ? "Importo…" : "Importa Libro Unico"}
+          </button>
           <select value={mese} onChange={e => setMese(+e.target.value)} className="dc-select">
             {mesi.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
           </select>
@@ -1269,6 +1296,31 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
           </select>
         </div>
       </div>
+
+      {importMsg && (
+        <div className="dc-card" style={{ marginBottom: 16, padding: 14, borderLeft: `4px solid ${importMsg.errore ? '#dc2626' : '#16a34a'}` }}>
+          {importMsg.errore ? (
+            <div style={{ color: "#dc2626", fontWeight: 600 }}>⚠ {importMsg.errore}</div>
+          ) : (
+            <div>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>
+                ✓ Libro Unico importato: {importMsg.totale_associati} dipendenti su {importMsg.totale_trovati} — netti memorizzati
+              </div>
+              <div style={{ fontSize: 13, color: "#475569", display: "flex", flexWrap: "wrap", gap: "2px 14px" }}>
+                {importMsg.associati?.map((a, i) => (
+                  <span key={i}>{a.dipendente}: € {eur(a.netto)}{a.metodo !== "codice fiscale" ? " ⚠" : ""}</span>
+                ))}
+              </div>
+              {importMsg.da_controllare?.length > 0 && (
+                <div style={{ marginTop: 8, fontSize: 13, color: "#b45309" }}>
+                  Da controllare: {importMsg.da_controllare.map(x => `${x.nome || x.cf} (${x.motivo})`).join("; ")}
+                </div>
+              )}
+              <button onClick={() => setImportMsg(null)} style={{ marginTop: 8, border: "none", background: "transparent", color: "#64748b", textDecoration: "underline", cursor: "pointer", fontSize: 12 }}>chiudi</button>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="dc-buste-stats" style={{ marginBottom: 16 }}>
         <div className="dc-buste-stat dc-buste-stat-blue"><span className="dc-buste-stat-label">TOTALE BUSTE</span><span className="dc-buste-stat-value">€ {eur(totBuste)}</span></div>

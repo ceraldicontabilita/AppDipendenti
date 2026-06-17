@@ -2,10 +2,13 @@
 Dipendenti in Cloud - Router Module
 Sistema HR completo per gestione personale
 """
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import uuid
+import re
+import os
+import tempfile
 from datetime import datetime, timezone
 
 from backend.app.database import Database
@@ -202,6 +205,101 @@ async def upsert_pagha(data: dict):
         {"dipendente_id": dip, "anno": int(anno), "mese": int(mese)},
         {"$set": doc}, upsert=True)
     return {"ok": True, "pagha": doc}
+
+# --- Import automatico Libro Unico (PDF) → divide per dipendente e memorizza i netti ---
+
+_CF_RE = re.compile(r'\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b')
+_MESI = {"gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
+         "luglio": 7, "agosto": 8, "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12}
+
+def _lul_netto(text):
+    m = re.findall(r'([\d]{1,3}(?:\.\d{3})*,\d{2})\s*€', text)
+    return m[-1] if m else None
+
+def _lul_periodo(text):
+    m = re.search(r'(Gennaio|Febbraio|Marzo|Aprile|Maggio|Giugno|Luglio|Agosto|Settembre|Ottobre|Novembre|Dicembre)\s+(\d{4})', text, re.I)
+    if m:
+        return _MESI[m.group(1).lower()], int(m.group(2))
+    return None, None
+
+def _parse_lul(pdf_path):
+    """Raggruppa le pagine per codice fiscale (gestisce 1, 2 o 3 pagine a dipendente)."""
+    import pdfplumber
+    ced = {}
+    with pdfplumber.open(pdf_path) as pdf:
+        cur = None
+        for page in pdf.pages:
+            t = page.extract_text() or ""
+            cfs = _CF_RE.findall(t)
+            mese, anno = _lul_periodo(t)
+            if cfs:
+                cur = cfs[0]
+                d = ced.setdefault(cur, {"nome": None, "netto": None, "mese": None, "anno": None})
+                if mese:
+                    d["mese"], d["anno"] = mese, anno
+                for line in t.split("\n"):
+                    mm = re.search(r'\b0[0-9]{6}\b\s+([A-ZÀ-Ù\' ]{4,}?)\s+[A-Z]{6}\d{2}[A-Z]', line)
+                    if mm:
+                        d["nome"] = mm.group(1).strip()
+                        break
+            if cur:
+                n = _lul_netto(t)
+                if n:
+                    ced[cur]["netto"] = n
+                if not ced[cur].get("mese") and mese:
+                    ced[cur]["mese"], ced[cur]["anno"] = mese, anno
+    return ced
+
+def _to_float(s):
+    return float(s.replace(".", "").replace(",", ".")) if s else None
+
+@router.post("/paghe/importa-lul")
+async def importa_libro_unico(file: UploadFile = File(...)):
+    """Legge un PDF Libro Unico, lo divide per dipendente (per codice fiscale),
+    associa all'anagrafica e memorizza il netto del mese in paghe_mensili.
+    Conserva bonifici/acconti eventualmente già inseriti."""
+    if not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Il file deve essere un PDF")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(await file.read())
+        path = tmp.name
+    try:
+        ced = _parse_lul(path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Errore lettura PDF: {e}")
+    finally:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+
+    dips = await get_db().dipendenti.find({}, {"_id": 0}).to_list(1000)
+    by_cf = {(d.get("codice_fiscale") or "").upper(): d for d in dips if d.get("codice_fiscale")}
+    by_nome = {f"{(d.get('cognome') or '').upper()} {(d.get('nome') or '').upper()}".strip(): d for d in dips}
+
+    associati, da_controllare = [], []
+    for cf, info in ced.items():
+        dip = by_cf.get(cf)
+        metodo = "codice fiscale"
+        if not dip:
+            dip = by_nome.get((info.get("nome") or "").upper())
+            metodo = "nome (CF non combacia)"
+        netto = _to_float(info.get("netto"))
+        mese, anno = info.get("mese"), info.get("anno")
+        if not dip or not mese:
+            da_controllare.append({"nome": info.get("nome"), "cf": cf, "netto": netto,
+                                   "motivo": "dipendente non trovato" if not dip else "periodo non rilevato"})
+            continue
+        await get_db().paghe_mensili.update_one(
+            {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
+            {"$set": {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
+                      "importo_busta": netto, "busta_da_lul": True, "updated_at": now_iso()}},
+            upsert=True)
+        associati.append({"dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
+                          "netto": netto, "metodo": metodo, "mese": mese, "anno": anno})
+    associati.sort(key=lambda x: x["dipendente"])
+    return {"associati": associati, "da_controllare": da_controllare,
+            "totale_trovati": len(ced), "totale_associati": len(associati)}
 
 # ============ PRESENZE ============
 
