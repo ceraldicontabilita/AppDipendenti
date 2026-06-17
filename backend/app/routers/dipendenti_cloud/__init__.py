@@ -161,6 +161,18 @@ async def delete_dipendente(dipendente_id: str):
         raise HTTPException(status_code=404, detail="Dipendente non trovato")
     return {"message": "Dipendente eliminato"}
 
+@router.get("/ordine-dipendenti")
+async def get_ordine_dipendenti():
+    doc = await get_db().dipendenti_ordine.find_one({"id": "ordine"}, {"_id": 0})
+    return {"ordine": (doc or {}).get("lista", [])}
+
+@router.post("/ordine-dipendenti")
+async def set_ordine_dipendenti(data: dict):
+    lista = data.get("ordine", [])
+    await get_db().dipendenti_ordine.update_one(
+        {"id": "ordine"}, {"$set": {"lista": lista}}, upsert=True)
+    return {"ok": True}
+
 # ============ PRESENZE ============
 
 @router.get("/presenze")

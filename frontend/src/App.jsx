@@ -2,9 +2,10 @@
  * Dipendenti in Cloud - Modulo HR completo con sidebar dedicata
  * Layout originale con sidebar blu scuro e navigazione tramite URL
  */
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import axios from "axios";
+import Sortable from "sortablejs";
 import { 
   Users, Calendar, Clock, FileText, Briefcase, Home, 
   ChevronRight, Plus, Check, X, Edit2, Trash2, 
@@ -69,17 +70,19 @@ export default function DipendentiCloudApp() {
   const [documenti, setDocumenti] = useState([]);
   const [stats, setStats] = useState({});
   const [loading, setLoading] = useState(true);
+  const [ordineDip, setOrdineDip] = useState([]);
 
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [dipRes, ferRes, turRes, missRes, docRes, statsRes] = await Promise.all([
+      const [dipRes, ferRes, turRes, missRes, docRes, statsRes, ordRes] = await Promise.all([
         axios.get(`${API}/dipendenti`),
         axios.get(`${API}/ferie`),
         axios.get(`${API}/turni`),
         axios.get(`${API}/missioni`),
         axios.get(`${API}/documenti`),
         axios.get(`${API}/dashboard/stats`),
+        axios.get(`${API}/ordine-dipendenti`).catch(() => ({ data: { ordine: [] } })),
       ]);
       setDipendenti(dipRes.data || []);
       setFerie(ferRes.data || []);
@@ -87,6 +90,7 @@ export default function DipendentiCloudApp() {
       setMissioni(missRes.data || []);
       setDocumenti(docRes.data || []);
       setStats(statsRes.data || {});
+      setOrdineDip((ordRes.data || {}).ordine || []);
     } catch (error) {
       console.error("Error loading data:", error);
     } finally {
@@ -97,7 +101,12 @@ export default function DipendentiCloudApp() {
   useEffect(() => { loadData(); }, [loadData]);
 
   const getDipendente = (id) => dipendenti.find(d => d.id === id);
-  const activeDipendenti = dipendenti.filter(d => d.stato === "attivo");
+  const activeDipendenti = (() => {
+    const attivi = dipendenti.filter(d => d.stato === "attivo");
+    if (!ordineDip.length) return attivi;
+    const pos = (id) => { const i = ordineDip.indexOf(id); return i === -1 ? 9999 : i; };
+    return [...attivi].sort((a, b) => pos(a.id) - pos(b.id));
+  })();
 
   // Menu items
   const menuItems = [
@@ -1019,6 +1028,7 @@ function TurniPage({ dipendenti, turni, reload }) {
   const [assegnazioni, setAssegnazioni] = useState([]);
   const [busy, setBusy] = useState(false);
   const [evid, setEvid] = useState(null);
+  const tbodyRef = useRef(null);
   const giorni = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"];
   const lunOggi = (() => { const o = new Date(); const off = (o.getDay() + 6) % 7; const m = new Date(o); m.setDate(o.getDate() - off); m.setHours(0, 0, 0, 0); return m; })();
   const [lunedi, setLunedi] = useState(lunOggi);
@@ -1031,6 +1041,17 @@ function TurniPage({ dipendenti, turni, reload }) {
 
   const caricaSettimana = (s) => axios.get(`${API}/assegnazioni-turni?settimana=${s}`).then(res => setAssegnazioni(res.data || [])).catch(() => {});
   useEffect(() => { caricaSettimana(settimana); }, [settimana]);
+  useEffect(() => {
+    if (!tbodyRef.current) return;
+    const s = Sortable.create(tbodyRef.current, {
+      handle: ".dc-drag-handle", animation: 150,
+      onEnd: () => {
+        const ids = Array.from(tbodyRef.current.children).map(tr => tr.getAttribute("data-id")).filter(Boolean);
+        axios.post(`${API}/ordine-dipendenti`, { ordine: ids }).then(() => reload && reload());
+      },
+    });
+    return () => s.destroy();
+  }, []);
 
   const getAssegnazione = (dipId, giorno) => assegnazioni.find(a => a.dipendente_id === dipId && a.giorno === giorno);
   const getTurno = (turnoId) => turni.find(t => t.id === turnoId);
@@ -1131,17 +1152,19 @@ function TurniPage({ dipendenti, turni, reload }) {
         <table className="dc-table dc-turni-table">
           <thead>
             <tr>
+              <th style={{ width: 24 }}></th>
               <th>DIPENDENTE</th>
               {giorni.map((g, i) => <th key={g}>{g} {dataDi(i)}</th>)}
             </tr>
           </thead>
-          <tbody>
+          <tbody ref={tbodyRef}>
             {dipendenti.map(dip => (
-              <tr key={dip.id}>
+              <tr key={dip.id} data-id={dip.id}>
+                <td className="dc-drag-handle" style={{ cursor: "grab", color: "#94a3b8", textAlign: "center", userSelect: "none", touchAction: "none" }} title="Trascina per riordinare">⠿</td>
                 <td>
                   <div className="dc-table-user">
                     <Avatar nome={dip.nome} cognome={dip.cognome} size="sm" />
-                    <span>{dip.cognome} {dip.nome?.[0]}.</span>
+                    <span>{dip.cognome ? `${dip.cognome} ${dip.nome?.[0] || ''}.` : dip.nome}</span>
                   </div>
                 </td>
                 {giorni.map(g => {
