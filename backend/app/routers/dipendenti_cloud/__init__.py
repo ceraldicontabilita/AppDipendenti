@@ -325,6 +325,31 @@ async def create_ferie(ferie: FerieCloud):
     await get_db().ferie_cloud.insert_one(ferie_dict)
     return serialize_doc(ferie_dict)
 
+@router.post("/ferie-giorno")
+async def set_ferie_giorno(data: dict):
+    """Assegna/aggiorna/rimuove un'assenza di un singolo giorno dal calendario.
+    tipo=None rimuove. Usato dalla vista calendario di Ferie & Permessi."""
+    dip = data.get("dipendente_id")
+    giorno = data.get("data")
+    tipo = data.get("tipo")
+    if not dip or not giorno:
+        raise HTTPException(status_code=400, detail="dipendente_id e data obbligatori")
+    existing = await get_db().ferie_cloud.find_one({
+        "dipendente_id": dip, "data_inizio": giorno, "data_fine": giorno
+    })
+    if tipo:
+        if existing:
+            await get_db().ferie_cloud.update_one({"id": existing["id"]}, {"$set": {"tipo": tipo}})
+        else:
+            await get_db().ferie_cloud.insert_one({
+                "id": generate_id(), "dipendente_id": dip, "tipo": tipo,
+                "data_inizio": giorno, "data_fine": giorno, "giorni": 1,
+                "stato": "approvata", "created_at": now_iso()
+            })
+    elif existing:
+        await get_db().ferie_cloud.delete_one({"id": existing["id"]})
+    return {"ok": True}
+
 @router.put("/ferie/{ferie_id}/approva")
 async def approva_ferie(ferie_id: str):
     result = await get_db().ferie_cloud.update_one(

@@ -763,6 +763,24 @@ function FeriePage({ dipendenti, ferie, reload, getDipendente }) {
   const [formData, setFormData] = useState({
     dipendente_id: "", tipo: "Ferie", data_inizio: "", data_fine: "", giorni: 1, nota: ""
   });
+  const [mese, setMese] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
+
+  const TIPI = [
+    { tipo: "Ferie", code: "F", color: "#3b82f6" },
+    { tipo: "Permesso", code: "PE", color: "#8b5cf6" },
+  ];
+  const ymd = (y, m, d) => `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  const giorniMese = new Date(mese.getFullYear(), mese.getMonth() + 1, 0).getDate();
+  const meseLabel = mese.toLocaleDateString('it-IT', { month: 'long', year: 'numeric' });
+  const assenzaDi = (dipId, dateStr) => ferie.find(f =>
+    f.dipendente_id === dipId && f.data_inizio <= dateStr && (f.data_fine || f.data_inizio) >= dateStr);
+
+  const ciclaCella = async (dipId, dateStr) => {
+    const att = assenzaDi(dipId, dateStr);
+    const next = !att ? "Ferie" : att.tipo === "Ferie" ? "Permesso" : null;
+    await axios.post(`${API}/ferie-giorno`, { dipendente_id: dipId, data: dateStr, tipo: next });
+    reload();
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -791,6 +809,48 @@ function FeriePage({ dipendenti, ferie, reload, getDipendente }) {
         <button onClick={() => setShowModal(true)} className="dc-btn dc-btn-primary">
           <Plus size={18} /> Nuova Richiesta
         </button>
+      </div>
+
+      <div className="dc-card" style={{ overflowX: "auto", marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+          <button onClick={() => setMese(new Date(mese.getFullYear(), mese.getMonth() - 1, 1))} className="dc-btn">‹</button>
+          <strong style={{ textTransform: "capitalize", minWidth: 150, textAlign: "center" }}>{meseLabel}</strong>
+          <button onClick={() => setMese(new Date(mese.getFullYear(), mese.getMonth() + 1, 1))} className="dc-btn">›</button>
+          <span style={{ marginLeft: 12, fontSize: 13, color: "#64748b" }}>
+            Clicca una cella: vuoto → <b style={{ color: "#3b82f6" }}>Ferie</b> → <b style={{ color: "#8b5cf6" }}>Permesso</b> → vuoto
+          </span>
+        </div>
+        <table className="dc-table" style={{ fontSize: 12, borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={{ position: "sticky", left: 0, background: "#fff", minWidth: 130, zIndex: 1 }}>DIPENDENTE</th>
+              {Array.from({ length: giorniMese }, (_, i) => i + 1).map(d => {
+                const dow = new Date(mese.getFullYear(), mese.getMonth(), d).getDay();
+                const we = dow === 0 || dow === 6;
+                return <th key={d} style={{ padding: "4px 3px", textAlign: "center", background: we ? "#f1f5f9" : undefined, color: we ? "#94a3b8" : undefined }}>{d}</th>;
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {dipendenti.map(dip => (
+              <tr key={dip.id}>
+                <td style={{ position: "sticky", left: 0, background: "#fff", whiteSpace: "nowrap" }}>{dip.cognome} {dip.nome?.[0]}.</td>
+                {Array.from({ length: giorniMese }, (_, i) => i + 1).map(d => {
+                  const dateStr = ymd(mese.getFullYear(), mese.getMonth(), d);
+                  const att = assenzaDi(dip.id, dateStr);
+                  const meta = att ? TIPI.find(t => t.tipo === att.tipo) : null;
+                  return (
+                    <td key={d} onClick={() => ciclaCella(dip.id, dateStr)} title={att ? att.tipo : ""}
+                      style={{ cursor: "pointer", textAlign: "center", padding: "5px 3px", border: "1px solid #f1f5f9",
+                        background: meta ? meta.color : "transparent", color: meta ? "#fff" : "#cbd5e1", fontWeight: 600 }}>
+                      {meta ? meta.code : "·"}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
 
       <div className="dc-card">
