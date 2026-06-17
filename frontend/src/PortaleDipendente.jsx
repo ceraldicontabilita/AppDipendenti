@@ -28,14 +28,6 @@ const TIPI = [
 const tipoLabel = (v) => (TIPI.find((t) => t.v === v) || {}).l || v;
 const fmt = (d) => (d ? `${d.slice(8, 10)}/${d.slice(5, 7)}` : "-");
 
-function turnoCell(a) {
-  if (!a || !a.turno) return <span className="t-riposo">—</span>;
-  if (a.turno === "lunga") return <span className="t-lunga">{a.label}</span>;
-  if (a.turno === "riposo") return <span className="t-riposo">Riposo</span>;
-  if (a.turno === "indisponibile") return <span className="t-indisp">Ferie</span>;
-  return <span className="t-lav">{a.inizio}–{a.fine}</span>;
-}
-
 /* ---------------- LOGIN ---------------- */
 function Login({ onLogin }) {
   const [lista, setLista] = useState([]);
@@ -96,46 +88,121 @@ function Login({ onLogin }) {
 }
 
 /* ---------------- TURNI ---------------- */
-function Turni() {
-  const [mine, setMine] = useState(null);
-  const [grid, setGrid] = useState(null);
-  const [tutti, setTutti] = useState(false);
-  useEffect(() => { api.get("/turni/miei/corrente").then((r)=>setMine(r.data)).catch(()=>setMine({giorni:[]})); }, []);
-  const vediTutti = async () => {
-    setTutti(true);
-    if (mine?.settimana_inizio) {
-      try { const r = await api.get(`/turni/${mine.settimana_inizio}`); setGrid(r.data); } catch {}
+/* ===================== MOTORE TURNI (regole pasticceria) =====================
+   Ricostruito dai file HTML condivisi. Squadra di 6, lunghe a rotazione,
+   Luigi riposa il lunedì ed è sempre lunga il sabato, Angela riposa il giovedì
+   e la domenica è al banco. Nessuno due lunghe o due riposi di fila; chi fa la
+   lunga venerdì non la fa il sabato. */
+const TEAM = ["Luigi", "Angela", "Giuliano", "Liliana", "Carmine", "Mario"];
+const GG = ["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"];
+
+function rotate(a,n){ return a.slice(n).concat(a.slice(0,n)); }
+function pickN(cands,used,n){ const out=[]; for(const p of cands){ if(!used.has(p)&&out.length<n){ out.push(p); used.add(p);} } return out; }
+function isFixedRest(day,p){ return (day===0&&p==="Luigi")||(day===3&&p==="Angela"); }
+function weekdayLong(day,startName,weekLongs,prevLong){
+  const start=TEAM.indexOf(startName);
+  const pref=rotate(TEAM,(start<0?0:start)+day);
+  let list=pref.filter(p=>!isFixedRest(day,p)&&p!==prevLong&&!weekLongs.has(p));
+  if(day===4)list=list.filter(p=>p!=="Luigi");
+  if(!list.length)list=pref.filter(p=>!isFixedRest(day,p)&&p!==prevLong&&!(day===4&&p==="Luigi"));
+  if(!list.length)list=pref.filter(p=>!isFixedRest(day,p));
+  return list[0];
+}
+function chooseRest(day,used,prevRest){
+  if(day===0)return "Luigi"; if(day===3)return "Angela";
+  let c=rotate(TEAM,day).filter(p=>!used.has(p)&&p!==prevRest);
+  if(day===2)c=c.filter(p=>p!=="Angela"); if(day===1)c=c.filter(p=>p!=="Luigi");
+  if(!c.length)c=TEAM.filter(p=>!used.has(p)); return c[0];
+}
+function generaSchedule(startLong){
+  const sched=[]; let prevLong=null,prevRest=null,fridayLong=null; const weekLongs=new Set();
+  for(let d=0; d<7; d++){
+    const day={m1:[],m2:[],longa:[],pom:[],rip:[],note:[]};
+    if(d===6){ day.m1=[{p:"Angela",time:"07:00–15:00",bank:true}]; day.rip=[{p:"— altri a riposo",time:""}]; day.note=["Angela al banco. Gli altri non in turno."]; sched.push(day); continue; }
+    const used=new Set(), cands=rotate(TEAM,d);
+    if(d<5){
+      const lunga=weekdayLong(d,startLong,weekLongs,prevLong); used.add(lunga); weekLongs.add(lunga);
+      const rip=chooseRest(d,used,prevRest); used.add(rip);
+      const m1=pickN(cands,used,1)[0], m2=pickN(cands,used,1)[0], pom=pickN(cands,used,2);
+      day.m1=[{p:m1,time:"07:00–15:00"}]; day.m2=[{p:m2,time:"08:00–16:00"}];
+      day.longa=[{p:lunga,time:"09:30–19:30"}]; day.pom=pom.map(p=>({p,time:"15:00–21:00"})); day.rip=[{p:rip,time:""}];
+      if(d===0)day.note.push("Luigi riposo fisso"); if(d===3)day.note.push("Angela riposo fisso");
+      prevLong=lunga; prevRest=rip; if(d===4)fridayLong=lunga;
+    } else {
+      const lunga1="Luigi"; const start=TEAM.indexOf(startLong);
+      let pref=rotate(TEAM,(start<0?0:start)+5).filter(p=>p!==lunga1&&p!==fridayLong&&p!==prevLong);
+      if(!pref.length)pref=TEAM.filter(p=>p!==lunga1&&p!==fridayLong); if(!pref.length)pref=TEAM.filter(p=>p!==lunga1);
+      const lunga2=pref[0]; used.add(lunga1); used.add(lunga2);
+      const matt=pickN(cands,used,2), pom=pickN(cands,used,2);
+      day.m1=[{p:matt[0],time:"07:00–15:00"}]; day.m2=[{p:matt[1],time:"08:00–16:00"}];
+      day.longa=[{p:lunga1,time:"09:00–19:00"},{p:lunga2,time:"09:30–19:30"}];
+      day.pom=pom.map(p=>({p,time:"15:00–21:00"})); day.rip=[{p:"— tutti presenti",time:""}];
+      day.note=["Sabato: Luigi sempre lunga."];
     }
-  };
-  if (!mine) return <div className="spin">Caricamento…</div>;
-  if (!mine.settimana_inizio) return <div className="empty">Nessun turno pubblicato al momento.</div>;
+    sched.push(day);
+  }
+  return sched;
+}
+function turnoDi(day,nome){
+  if(!day) return null;
+  for(const k of ["longa","m1","m2","pom","rip"]){
+    const hit=(day[k]||[]).find(x=>x.p===nome);
+    if(hit) return {k, time:hit.time};
+  }
+  return null;
+}
+function Chip({t}){
+  if(!t || !t.k) return <span className="t-riposo">—</span>;
+  if(t.k==="longa") return <span className="t-lunga">Lunga{t.time?` ${t.time}`:""}</span>;
+  if(t.k==="rip") return <span className="t-riposo">Riposo</span>;
+  return <span className="t-lav">{t.time||"—"}</span>;
+}
+function prossimoLunedi(){ const d=new Date(); const off=(d.getDay()+6)%7; d.setDate(d.getDate()-off); return d.toISOString().slice(0,10); }
+function settimanaDate(monday){ const out=[]; const base=new Date(monday+"T12:00:00"); for(let i=0;i<7;i++){ const x=new Date(base); x.setDate(x.getDate()+i); out.push(x.toLocaleDateString("it-IT",{day:"2-digit",month:"2-digit"})); } return out; }
+
+function Turni() {
+  const [griglia, setGriglia] = useState(null);
+  const [tutti, setTutti] = useState(false);
+  const role = localStorage.getItem("pt_role");
+  const isGestore = role === "responsabile_turni" || role === "admin";
+  const mioNome = (localStorage.getItem("pt_name") || "").split(" ")[0];
+  useEffect(() => { api.get("/turni/griglia/corrente").then((r)=>setGriglia(r.data)).catch(()=>setGriglia({settimana_inizio:null})); }, []);
+  if (!griglia) return <div className="spin">Caricamento…</div>;
+  if (!griglia.settimana_inizio) return (
+    <div className="empty">Nessun turno pubblicato.<br/>
+      {isGestore ? "Vai nella scheda Gestione per generarli e pubblicarli." : "Il responsabile non ha ancora pubblicato i turni della settimana."}
+    </div>
+  );
+  const date = settimanaDate(griglia.settimana_inizio);
+  const persone = (griglia.persone && griglia.persone.length) ? griglia.persone : TEAM;
+  const giorni = griglia.giorni || [];
   return (
     <>
       <div className="card">
         <div className="row"><h3 style={{margin:0}}>I miei turni</h3>
-          <span className="pill info">sett. {fmt(mine.settimana_inizio)}</span></div>
-        {mine.giorni.map((g)=>(
-          <div className="daycard" key={g.data}>
-            <div><b>{g.giorno_nome}</b> <span className="muted">{fmt(g.data)}</span></div>
-            <div>{turnoCell(g.turno)}</div>
+          <span className="pill info">sett. {fmt(griglia.settimana_inizio)}</span></div>
+        {giorni.map((g,i)=>(
+          <div className="daycard" key={i}>
+            <div><b>{GG[i]}</b> <span className="muted">{date[i]}</span></div>
+            <div><Chip t={turnoDi(g, mioNome)}/></div>
           </div>
         ))}
       </div>
       {!tutti ? (
-        <button className="btn sec" onClick={vediTutti}><Users size={16}/> Vedi i turni di tutti</button>
-      ) : grid ? (
-        <div className="card"><h3>Tutti i turni</h3>
+        <button className="btn sec" onClick={()=>setTutti(true)}><Users size={16}/> Vedi i turni di tutti</button>
+      ) : (
+        <div className="card"><h3>Tutti i turni · sett. {fmt(griglia.settimana_inizio)}</h3>
           <div className="tgrid"><table>
-            <thead><tr><th>Dipendente</th>{grid.giorni.map((g)=><th key={g.data}>{g.giorno_nome.slice(0,3)}<br/>{fmt(g.data)}</th>)}</tr></thead>
+            <thead><tr><th>Dip.</th>{GG.map((g,i)=><th key={i}>{g.slice(0,3)}<br/>{date[i]}</th>)}</tr></thead>
             <tbody>
-              {Object.entries(grid.totali||{}).map(([id,t])=>(
-                <tr key={id}><td className="name">{t.nome}</td>
-                  {grid.giorni.map((g)=><td key={g.data}>{turnoCell(g.assegnazioni[id])}</td>)}</tr>
+              {persone.map((p)=>(
+                <tr key={p}><td className="name">{p}</td>
+                  {giorni.map((g,i)=><td key={i}><Chip t={turnoDi(g,p)}/></td>)}</tr>
               ))}
             </tbody>
           </table></div>
         </div>
-      ) : <div className="spin">Caricamento griglia…</div>}
+      )}
     </>
   );
 }
@@ -241,46 +308,77 @@ function Notifiche({ onChange }) {
 
 /* ---------------- GESTIONE (Luigi/admin) ---------------- */
 function Gestione() {
-  const [lun, setLun] = useState("");
-  const [doc, setDoc] = useState(null);
-  const [coda, setCoda] = useState([]);
+  const [lun, setLun] = useState(prossimoLunedi());
+  const [startLong, setStartLong] = useState("Luigi");
+  const [sched, setSched] = useState(null);
   const [msg, setMsg] = useState("");
+  const [coda, setCoda] = useState([]);
   const [accessi, setAccessi] = useState([]);
   const [pinIn, setPinIn] = useState({});
+  const [sgg, setSgg] = useState(0);
+  const [sout, setSout] = useState("Angela");
+  const [sin, setSin] = useState("Luigi");
   const loadCoda = useCallback(()=>{ api.get("/richieste?stato=aperta").then((r)=>setCoda(r.data)).catch(()=>{}); },[]);
   const loadAccessi = useCallback(()=>{ api.get("/accessi").then((r)=>setAccessi(r.data)).catch(()=>{}); },[]);
   useEffect(()=>{loadCoda();loadAccessi();},[loadCoda,loadAccessi]);
   const salvaPin = async (id)=>{ const pin=pinIn[id]; if(!pin)return; try{await api.post(`/accessi/${id}/pin`,{pin});}catch{} setPinIn({...pinIn,[id]:""}); loadAccessi(); };
   const salvaRuolo = async (id,ruolo_app)=>{ try{await api.post(`/accessi/${id}/ruolo`,{ruolo_app});}catch{} loadAccessi(); };
-  const genera = async () => {
-    setMsg("");
-    try { const r = await api.post("/turni/genera",{settimana_inizio:lun}); setDoc(r.data); }
-    catch(e){ setMsg(e.response?.data?.detail || "Errore"); }
+  const date = settimanaDate(lun);
+  const elabora = ()=>{ setSched(generaSchedule(startLong)); setMsg(""); };
+  const sostituisci = ()=>{
+    if(!sched) return;
+    if(sout===sin){ setMsg("Scegli due persone diverse"); return; }
+    const day = sched[sgg]; if(!day) return;
+    const ks=["m1","m2","longa","pom","rip"];
+    let kOut=null,kIn=null;
+    for(const k of ks){ if((day[k]||[]).some(x=>x.p===sout))kOut=k; if((day[k]||[]).some(x=>x.p===sin))kIn=k; }
+    if(!kOut){ setMsg(`${sout} non è in turno il ${GG[sgg]}`); return; }
+    (day[kOut]||[]).forEach(x=>{ if(x.p===sout)x.p=sin; });
+    if(kIn)(day[kIn]||[]).forEach(x=>{ if(x.p===sin)x.p=sout; });
+    day.note=[...(day.note||[]), `Scambio: ${sin} ⇄ ${sout}`];
+    setSched([...sched]); setMsg(`${sin} sostituisce ${sout} il ${GG[sgg]}`);
   };
-  const pubblica = async () => {
-    try { const r = await api.post(`/turni/${doc.settimana_inizio}/pubblica`); setMsg(`Pubblicato, ${r.data.dipendenti_notificati} notificati`); setDoc({...doc,stato:"pubblicato"}); }
-    catch(e){ setMsg(e.response?.data?.detail || "Errore"); }
+  const pubblica = async ()=>{
+    if(!sched){ setMsg("Prima elabora i turni"); return; }
+    try{ const r=await api.post("/turni/griglia",{settimana_inizio:lun,persone:TEAM,giorni:sched});
+      setMsg(`Pubblicato · ${r.data.dipendenti_notificati} dipendenti notificati`);
+    }catch(e){ setMsg(e.response?.data?.detail || "Errore nella pubblicazione"); }
   };
   const risolvi = async (r, esito) => { await api.post(`/richieste/${r.id}/risolvi`,{esito}); loadCoda(); };
   return (
     <>
-      <div className="card"><h3>Genera turni</h3>
+      <div className="card"><h3>Genera turni settimana</h3>
         <label>Settimana (lunedì)</label>
         <input className="input" type="date" value={lun} onChange={(e)=>setLun(e.target.value)} />
-        <button className="btn" style={{marginTop:10}} onClick={genera} disabled={!lun}><Calendar size={15}/> Genera bozza</button>
+        <label>Chi fa la lunga il lunedì</label>
+        <select value={startLong} onChange={(e)=>setStartLong(e.target.value)}>
+          {TEAM.map(p=><option key={p} value={p}>{p}</option>)}
+        </select>
+        <button className="btn" style={{marginTop:10}} onClick={elabora}><Calendar size={15}/> Elabora turni</button>
         {msg && <div className="muted" style={{marginTop:8}}>{msg}</div>}
-        {doc && <>
-          {doc.avvisi?.length>0 && <div className="err" style={{marginTop:10}}>
-            <b>Avvisi:</b><br/>{doc.avvisi.join(" · ")}</div>}
+        {sched && <>
           <div className="tgrid" style={{marginTop:10}}><table>
-            <thead><tr><th>Dip.</th>{doc.giorni.map((g)=><th key={g.data}>{g.giorno_nome.slice(0,3)}</th>)}</tr></thead>
-            <tbody>{Object.entries(doc.totali||{}).map(([id,t])=>(
-              <tr key={id}><td className="name">{t.nome}</td>
-                {doc.giorni.map((g)=><td key={g.data}>{turnoCell(g.assegnazioni[id])}</td>)}</tr>))}
+            <thead><tr><th>Dip.</th>{GG.map((g,i)=><th key={i}>{g.slice(0,3)}<br/>{date[i]}</th>)}</tr></thead>
+            <tbody>{TEAM.map(p=>(
+              <tr key={p}><td className="name">{p}</td>
+                {sched.map((g,i)=><td key={i}><Chip t={turnoDi(g,p)}/></td>)}</tr>))}
             </tbody></table></div>
-          {doc.stato!=="pubblicato" && <button className="btn" style={{marginTop:10}} onClick={pubblica}><Send size={15}/> Pubblica e notifica</button>}
+          <button className="btn" style={{marginTop:10}} onClick={pubblica}><Send size={15}/> Pubblica e notifica</button>
         </>}
       </div>
+      {sched && <div className="card"><h3>Sostituzione rapida</h3>
+        <label>Giorno</label>
+        <select value={sgg} onChange={(e)=>setSgg(Number(e.target.value))}>
+          {GG.map((g,i)=><option key={i} value={i}>{g}</option>)}</select>
+        <div className="row" style={{gap:8,alignItems:"flex-end"}}>
+          <div style={{flex:1}}><label>Chi non può</label>
+            <select value={sout} onChange={(e)=>setSout(e.target.value)}>{TEAM.map(p=><option key={p}>{p}</option>)}</select></div>
+          <div style={{flex:1}}><label>Lo sostituisce</label>
+            <select value={sin} onChange={(e)=>setSin(e.target.value)}>{TEAM.map(p=><option key={p}>{p}</option>)}</select></div>
+        </div>
+        <button className="btn sec" style={{marginTop:10}} onClick={sostituisci}>Applica scambio</button>
+        <div className="muted" style={{marginTop:6,fontSize:12}}>Ricordati di ripubblicare dopo le modifiche.</div>
+      </div>}
       <div className="card"><h3>Accessi dipendenti</h3>
         {accessi.length===0 && <div className="muted">Nessun dipendente in anagrafica.</div>}
         {accessi.map((d)=>(

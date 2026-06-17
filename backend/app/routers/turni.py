@@ -213,3 +213,61 @@ async def sblocca(settimana_inizio: str, _: Dict[str, Any] = Depends(require_rol
     if r.matched_count == 0:
         raise HTTPException(404, "Settimana non trovata")
     return {"ok": True, "stato": "bozza"}
+
+
+# ============================================================================
+# Griglia turni generata dal portale (motore client-side con le regole della
+# pasticceria). Il responsabile genera nel browser e PUBBLICA qui; tutti la
+# leggono. Storage semplice, una griglia per settimana.
+# ============================================================================
+COLL_GRIGLIA = "turni_griglia"
+
+
+@router.post("/griglia", summary="Pubblica la griglia turni del portale (responsabile/admin)")
+async def salva_griglia(
+    payload: Dict[str, Any] = Body(...),
+    identity: Dict[str, Any] = Depends(require_roles("responsabile_turni", "admin")),
+):
+    settimana = str(payload.get("settimana_inizio", "")).strip()
+    if not settimana:
+        raise HTTPException(400, "settimana_inizio mancante")
+    doc = {
+        "id": _sid(settimana),
+        "settimana_inizio": settimana,
+        "persone": payload.get("persone", []),
+        "giorni": payload.get("giorni", []),
+        "stato": "pubblicato",
+        "pubblicato_il": _now(),
+        "pubblicato_da": identity.get("name") or identity.get("sub"),
+    }
+    db = Database.get_db()
+    await db[COLL_GRIGLIA].replace_one({"id": _sid(settimana)}, doc, upsert=True)
+    # notifica i dipendenti con PIN (best-effort)
+    try:
+        notificati = 0
+        async for d in db[Collections.EMPLOYEES].find(
+            {"pin_hash": {"$exists": True}, "merged_into": {"$exists": False}},
+            {"_id": 0, "id": 1},
+        ):
+            await crea_notifica(
+                db,
+                dipendente_id=d["id"],
+                tipo="turni",
+                titolo=f"Turni settimana {settimana}",
+                messaggio="I turni della settimana sono stati pubblicati. Aprili nella scheda Turni.",
+            )
+            notificati += 1
+    except Exception:
+        notificati = 0
+    return {"ok": True, "settimana_inizio": settimana, "dipendenti_notificati": notificati}
+
+
+@router.get("/griglia/corrente", summary="Ultima griglia turni pubblicata (tutti)")
+async def griglia_corrente(identity: Dict[str, Any] = Depends(get_identity)):
+    db = Database.get_db()
+    doc = await db[COLL_GRIGLIA].find_one(
+        {"stato": "pubblicato"}, {"_id": 0}, sort=[("settimana_inizio", -1)]
+    )
+    if not doc:
+        return {"settimana_inizio": None, "persone": [], "giorni": []}
+    return doc
