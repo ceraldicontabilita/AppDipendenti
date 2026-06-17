@@ -509,6 +509,8 @@ function PresenzePage({ dipendenti, reload }) {
   const [formData, setFormData] = useState({
     dipendente_id: "", tipo: "P", data_inizio: "", data_fine: "", nota: ""
   });
+  const [penna, setPenna] = useState("P");
+  const [tuttiMode, setTuttiMode] = useState(false);
 
   const mesi = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
   const daysInMonth = new Date(anno, mese, 0).getDate();
@@ -528,6 +530,15 @@ function PresenzePage({ dipendenti, reload }) {
   const getPresenza = (dipId, day) => {
     const dataStr = `${anno}-${String(mese).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
     return presenze.find(p => p.dipendente_id === dipId && p.data === dataStr);
+  };
+
+  // Pennello: applica il giustificativo selezionato a uno o tutti i dipendenti, in qualsiasi giorno.
+  const applica = async (dipIds, day) => {
+    if (!penna) return;
+    const data = `${anno}-${String(mese).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+    const stato = penna === 'P' ? 'presente' : penna === 'UN' ? 'assente' : 'giustificato';
+    const batch = dipIds.map(id => ({ dipendente_id: id, data, stato, giustificativo: penna }));
+    try { await axios.post(`${API}/presenze/batch`, batch); await loadPresenze(); } catch (e) { console.error(e); }
   };
 
   const handleTuttiPresenti = async () => {
@@ -641,6 +652,26 @@ function PresenzePage({ dipendenti, reload }) {
         </button>
       </div>
 
+      {/* Barra pennello */}
+      <div className="dc-card" style={{ marginBottom: 12, padding: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13, color: "#64748b", marginRight: 4 }}>Pennello:</span>
+          {tipiGiustificativo.map(t => (
+            <button key={t.code} type="button" onClick={() => setPenna(t.code)} title={t.label}
+              style={{ border: penna === t.code ? "3px solid #1E1B4B" : "1px solid #e5e7eb", background: penna === t.code ? t.color : "#fff", color: penna === t.code ? "#fff" : "#374151", borderRadius: 8, padding: "6px 10px", fontWeight: 700, cursor: "pointer", fontSize: 13 }}>
+              {t.code} <span style={{ fontWeight: 400, fontSize: 11 }}>{t.label}</span>
+            </button>
+          ))}
+          <label style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
+            <input type="checkbox" checked={tuttiMode} onChange={e => setTuttiMode(e.target.checked)} />
+            Applica a tutti i dipendenti
+          </label>
+        </div>
+        <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 8 }}>
+          Scegli un giustificativo, poi clicca la cella dipendente/giorno per applicarlo (anche su giorni passati). Clicca il <b>numero del giorno</b> in cima per applicarlo a tutti.
+        </div>
+      </div>
+
       {/* Attendance Grid */}
       <div className="dc-card dc-presenze-grid-container">
         <table className="dc-presenze-table">
@@ -652,7 +683,7 @@ function PresenzePage({ dipendenti, reload }) {
                 const dayNames = ['D', 'L', 'M', 'M', 'G', 'V', 'S'];
                 const isWeekend = date.getDay() === 0 || date.getDay() === 6;
                 return (
-                  <th key={i} className={`dc-presenze-th-day ${isWeekend ? 'weekend' : ''}`}>
+                  <th key={i} className={`dc-presenze-th-day ${isWeekend ? 'weekend' : ''}`} onClick={() => applica(dipendenti.map(d => d.id), i + 1)} style={{ cursor: "pointer" }} title="Applica a tutti per questo giorno">
                     <span className="dc-day-name">{dayNames[date.getDay()]}</span>
                     <span className="dc-day-num">{i + 1}</span>
                   </th>
@@ -675,7 +706,7 @@ function PresenzePage({ dipendenti, reload }) {
                   const isWeekend = date.getDay() === 0 || date.getDay() === 6;
                   const tipo = tipiGiustificativo.find(t => t.code === (pres?.giustificativo || (pres?.stato === 'presente' ? 'P' : '')));
                   return (
-                    <td key={i} className={`dc-presenze-td-day ${isWeekend ? 'weekend' : ''}`}>
+                    <td key={i} className={`dc-presenze-td-day ${isWeekend ? 'weekend' : ''}`} onClick={() => applica(tuttiMode ? dipendenti.map(d => d.id) : [dip.id], i + 1)} style={{ cursor: "pointer" }}>
                       {pres ? (
                         <span className="dc-presenza-badge" style={{ backgroundColor: tipo?.color || '#10b981' }}>
                           {pres.giustificativo || (pres.stato === 'presente' ? 'P' : pres.stato?.[0]?.toUpperCase())}
