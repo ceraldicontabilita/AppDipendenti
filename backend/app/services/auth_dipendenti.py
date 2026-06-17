@@ -62,19 +62,24 @@ async def lista_login() -> List[Dict[str, Any]]:
     cursor = db[Collections.EMPLOYEES].find(
         {"attivo": {"$ne": False},
          "merged_into": {"$exists": False}},
-        {"_id": 0, "id": 1, "nome_completo": 1, "mansione": 1, "ruolo_app": 1, "pin_hash": 1},
-    ).sort("nome_completo", 1)
+        {"_id": 0, "id": 1, "nome_completo": 1, "nome": 1, "cognome": 1,
+         "mansione": 1, "ruolo": 1, "ruolo_app": 1, "pin_hash": 1},
+    )
     out = []
     for d in await cursor.to_list(500):
         if not d.get("id"):
             continue
+        nome = (d.get("nome_completo") or f"{d.get('nome','')} {d.get('cognome','')}").strip()
+        if not nome:
+            continue
         out.append({
             "id": d.get("id"),
-            "nome_completo": d.get("nome_completo", ""),
-            "mansione": d.get("mansione", ""),
+            "nome_completo": nome,
+            "mansione": d.get("mansione", "") or d.get("ruolo", ""),
             "ruolo_app": d.get("ruolo_app", "dipendente"),
             "pin_impostato": bool(d.get("pin_hash")),
         })
+    out.sort(key=lambda x: x["nome_completo"].lower())
     return out
 
 
@@ -84,7 +89,7 @@ async def _pin_operatore_valido(db, dip: Dict[str, Any], pin: str) -> bool:
     PIN corrisponde, per nome, al dipendente selezionato (un dipendente non puo'
     entrare col PIN di un altro). PIN unico cassa+portale, nessuna copia.
     """
-    nome_dip = (dip.get("nome_completo") or "").lower()
+    nome_dip = (dip.get("nome_completo") or f"{dip.get('nome','')} {dip.get('cognome','')}").strip().lower()
     if not nome_dip:
         return False
     candidati = []

@@ -18,16 +18,26 @@ async def lista_accessi(_: Dict[str, Any] = Depends(require_roles("admin"))) -> 
     db = Database.get_db()
     docs = await db[Collections.EMPLOYEES].find(
         {"merged_into": {"$exists": False}},
-        {"_id": 0, "id": 1, "nome_completo": 1, "mansione": 1, "ruolo_app": 1, "pin_hash": 1, "attivo": 1},
-    ).sort("nome_completo", 1).to_list(500)
-    return [{
-        "id": d.get("id"),
-        "nome_completo": d.get("nome_completo", ""),
-        "mansione": d.get("mansione", ""),
-        "ruolo_app": d.get("ruolo_app", "dipendente"),
-        "pin_impostato": bool(d.get("pin_hash")),
-        "attivo": d.get("attivo", True),
-    } for d in docs]
+        {"_id": 0, "id": 1, "nome_completo": 1, "nome": 1, "cognome": 1,
+         "mansione": 1, "ruolo": 1, "ruolo_app": 1, "pin_hash": 1, "attivo": 1},
+    ).to_list(500)
+    out = []
+    for d in docs:
+        if not d.get("id"):
+            continue
+        nome = (d.get("nome_completo") or f"{d.get('nome','')} {d.get('cognome','')}").strip()
+        if not nome:
+            continue
+        out.append({
+            "id": d.get("id"),
+            "nome_completo": nome,
+            "mansione": d.get("mansione", "") or d.get("ruolo", ""),
+            "ruolo_app": d.get("ruolo_app", "dipendente"),
+            "pin_impostato": bool(d.get("pin_hash")),
+            "attivo": d.get("attivo", True),
+        })
+    out.sort(key=lambda x: x["nome_completo"].lower())
+    return out
 
 
 @router.post("/{dipendente_id}/pin", summary="Imposta/azzera PIN dipendente (admin)")
