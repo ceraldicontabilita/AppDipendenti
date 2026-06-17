@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Body, Query, Depends
 
 from backend.app.database import Database, Collections
 from backend.app.utils.identity import get_identity, require_roles
+from backend.app.services.notifiche import crea_notifica
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -148,5 +149,32 @@ async def risolvi_richiesta(
                 "creato_il": _now(),
             })
             logger.info(f"Ferie approvate → indisponibilità {req['dipendente_id']} {dal}..{al}")
+
+    # Indisponibilità inviata e approvata da Luigi = vincolo per il generatore
+    if esito == "approvata" and req["tipo"] == "indisponibilita":
+        dati = req.get("dati", {})
+        dal = dati.get("dal") or dati.get("data")
+        al = dati.get("al") or dati.get("data")
+        if dal and al:
+            await db[COLL_INDISP].insert_one({
+                "id": f"indisp_{uuid.uuid4().hex[:12]}",
+                "dipendente_id": req["dipendente_id"],
+                "dal": dal, "al": al,
+                "origine": "indisponibilita",
+                "richiesta_id": richiesta_id,
+                "creato_il": _now(),
+            })
+
+    # Notifica al dipendente l'esito
+    try:
+        await crea_notifica(
+            db, req["dipendente_id"], "richiesta_risolta",
+            f"Richiesta {req['tipo']}: {esito}",
+            (str(payload.get("nota", "")).strip()
+             or f"La tua richiesta «{req['tipo']}» è stata {esito}."),
+            extra={"richiesta_id": richiesta_id, "tipo": req["tipo"], "esito": esito},
+        )
+    except Exception:
+        pass
 
     return {"ok": True, "id": richiesta_id, "stato": esito}
