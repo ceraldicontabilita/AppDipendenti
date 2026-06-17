@@ -949,6 +949,7 @@ function FeriePage({ dipendenti, ferie, reload, getDipendente }) {
 function TurniPage({ dipendenti, turni, reload }) {
   const [assegnazioni, setAssegnazioni] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [evid, setEvid] = useState(null);
   const giorni = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"];
   const lunCorrente = (() => { const o = new Date(); const off = (o.getDay() + 6) % 7; const m = new Date(o); m.setDate(o.getDate() - off); m.setHours(0, 0, 0, 0); return m; })();
   const dataDi = (i) => { const d = new Date(lunCorrente); d.setDate(lunCorrente.getDate() + i); return d.getDate(); };
@@ -1017,11 +1018,18 @@ function TurniPage({ dipendenti, turni, reload }) {
           <p>Assegnazione turni settimanali · la squadra produzione si riequilibra da sola</p>
         </div>
         <div className="dc-turni-legend">
-          {turni.map(t => (
-            <span key={t.id} className="dc-turno-badge" style={{ backgroundColor: t.colore }}>
-              {t.nome}{t.orario_inizio ? `: ${t.orario_inizio}-${t.orario_fine}` : ""}
-            </span>
-          ))}
+          {turni.map(t => {
+            const haOrario = /\d/.test(t.nome);
+            const sel = evid === t.id;
+            return (
+              <span key={t.id} onClick={() => setEvid(sel ? null : t.id)}
+                className="dc-turno-badge"
+                title="Clicca per evidenziare chi fa questo turno"
+                style={{ backgroundColor: t.colore, cursor: "pointer", outline: sel ? "3px solid #1E1B4B" : "none", opacity: evid && !sel ? 0.45 : 1 }}>
+                {t.nome}{!haOrario && t.orario_inizio ? `: ${t.orario_inizio}-${t.orario_fine}` : ""}
+              </span>
+            );
+          })}
         </div>
       </div>
 
@@ -1058,7 +1066,12 @@ function TurniPage({ dipendenti, turni, reload }) {
                         value={ass?.turno_id || ""}
                         onChange={e => handleAssegna(dip, g, e.target.value)}
                         className="dc-turno-select"
-                        style={turno ? { backgroundColor: turno.colore + '30', borderColor: turno.colore } : {}}
+                        style={{
+                          ...(turno ? { backgroundColor: turno.colore + '30', borderColor: turno.colore } : {}),
+                          ...(evid ? (ass?.turno_id === evid
+                            ? { outline: "3px solid " + ((getTurno(evid) || {}).colore || "#1E1B4B"), opacity: 1 }
+                            : { opacity: 0.2 }) : {})
+                        }}
                       >
                         <option value="">-</option>
                         {turni.map(t => <option key={t.id} value={t.id}>{t.nome}</option>)}
