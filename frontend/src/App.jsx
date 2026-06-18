@@ -1241,6 +1241,9 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
       bonifico_pdf: p.bonifico_pdf || "",
       bonifico_causale: p.bonifico_causale || "",
       busta_da_lul: !!p.busta_da_lul,
+      prestito_importo: p.prestito_importo ?? "",
+      prestito_saldo: p.prestito_saldo ?? "",
+      tfr_anticipo_importo: p.tfr_anticipo_importo ?? "",
     }; });
     setRighe(map);
   };
@@ -1286,6 +1289,20 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
       if (fileRef.current) fileRef.current.value = "";
     }
   };
+  const handleImportEmail = async () => {
+    setImporting(true); setImportMsg(null);
+    try {
+      const res = await axios.post(`${API}/paghe/importa-email`);
+      const r = res.data;
+      setImportMsg(r);
+      if (r.mesi?.length) { const u = r.mesi[r.mesi.length - 1]; setMese(u.mese); setAnno(u.anno); }
+      await load();
+    } catch (err) {
+      setImportMsg({ errore: err.response?.data?.detail || "Errore durante l'import da email" });
+    } finally {
+      setImporting(false);
+    }
+  };
   const totBuste = dipendenti.reduce((s, d) => s + (parseFloat(get(d.id).importo_busta) || 0), 0);
   const totBonifici = dipendenti.reduce((s, d) => s + (parseFloat(get(d.id).bonifico_importo) || 0), 0);
   const totAcconti = dipendenti.reduce((s, d) => s + (get(d.id).acconti || []).reduce((a, x) => a + (parseFloat(x.importo) || 0), 0), 0);
@@ -1304,6 +1321,10 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
             style={{ background: "#5b7a6b", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
             {importing ? "Importo…" : "Importa tutti i documenti"}
           </button>
+          <button onClick={handleImportEmail} disabled={importing} title="Scarica gli allegati PDF dalla casella di posta (inbox e cartelle)"
+            style={{ background: "#3f5a4e", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
+            {importing ? "…" : "Importa da email"}
+          </button>
           <select value={mese} onChange={e => setMese(+e.target.value)} className="dc-select">
             {mesi.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
           </select>
@@ -1320,7 +1341,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
           ) : (
             <div>
               <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                ✓ Elaborati {importMsg.file_pdf} documenti · {importMsg.totale_associati} buste{importMsg.bonifici?.length ? ` · ${importMsg.bonifici.length} bonifici` : ""}{importMsg.presenze?.length ? ` · ${importMsg.presenze.length} presenze` : ""}
+                ✓ Elaborati {importMsg.file_pdf} documenti · {importMsg.totale_associati} buste{importMsg.bonifici?.length ? ` · ${importMsg.bonifici.length} bonifici` : ""}{importMsg.prestiti?.length ? ` · ${importMsg.prestiti.length} prestiti` : ""}{importMsg.presenze?.length ? ` · ${importMsg.presenze.length} presenze` : ""}
               </div>
               {importMsg.mesi?.length > 0 && (
                 <div style={{ fontSize: 13, marginBottom: 6, color: "#2a3329" }}>
@@ -1355,6 +1376,21 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                       <span key={i}>{t.dipendente}: € {eur(t.importo)} → {mesi[t.mese - 1]} {t.anno}</span>
                     ))}
                   </div>
+                </div>
+              )}
+              {importMsg.prestiti?.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4, color: "#6a4a86" }}>Prestiti ({importMsg.prestiti.length}) — mastrino separato dalle buste</div>
+                  <div style={{ fontSize: 13, color: "#2a3329", display: "flex", flexDirection: "column", gap: 2 }}>
+                    {importMsg.prestiti.map((p, i) => (
+                      <span key={i}>{p.dipendente}: € {eur(p.importo)} → {mesi[p.mese - 1]} {p.anno} · <strong>saldo prestito € {eur(p.saldo)}</strong></span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {importMsg.cartelle_lette?.length > 0 && (
+                <div style={{ marginTop: 8, fontSize: 12, color: "#6b7669" }}>
+                  Cartelle email lette: {importMsg.cartelle_lette.map(c => `${c.cartella} (${c.messaggi})`).join(" · ")}
                 </div>
               )}
               {importMsg.presenze?.length > 0 && (
@@ -1445,6 +1481,20 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                   {salvato[dip.id] ? "✓ Salvato" : "Salva"}
                 </button>
               </div>
+              {(d.prestito_importo !== "" || d.tfr_anticipo_importo !== "") && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8, paddingTop: 8, borderTop: "1px dashed #e6e0d4" }}>
+                  {d.prestito_importo !== "" && (
+                    <span style={{ background: "#efe9f6", color: "#6a4a86", border: "1px solid #ddd0ec", borderRadius: 8, padding: "3px 10px", fontSize: 12, fontWeight: 700 }}>
+                      Prestito {mesi[mese - 1]}: € {eur(d.prestito_importo)} · saldo € {eur(d.prestito_saldo)}
+                    </span>
+                  )}
+                  {d.tfr_anticipo_importo !== "" && (
+                    <span style={{ background: "#f3ead9", color: "#56442d", border: "1px solid #e7d6b9", borderRadius: 8, padding: "3px 10px", fontSize: 12, fontWeight: 700 }}>
+                      Anticipo TFR: € {eur(d.tfr_anticipo_importo)} (fuori dal saldo)
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           );
         })}

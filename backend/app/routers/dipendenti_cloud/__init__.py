@@ -413,12 +413,10 @@ def _parse_bonifico(text):
             "mese_causale": mese_c, "anno_causale": anno_c, "esplicita": esplicita, "is_tfr": is_tfr}
 
 
-@router.post("/paghe/importa-lul")
-async def importa_libro_unico(files: List[UploadFile] = File(...)):
-    """Legge uno o più PDF Libro Unico (anche dentro file ZIP, anche più ZIP insieme),
-    divide per dipendente (per codice fiscale), associa all'anagrafica e memorizza il
-    netto del mese in paghe_mensili. Ogni PDF porta il proprio mese. Conserva
-    bonifici/acconti eventualmente già inseriti."""
+async def _importa_documenti(pdf_items, errori_iniziali=None):
+    """Pipeline condivisa: riceve una lista di (origine, pdf_bytes) già espansi (da upload
+    file o da posta elettronica), li classifica e li importa in paghe_mensili / prestiti.
+    L'anti-duplicazione per hash evita di re-importare gli stessi documenti."""
     dips = await get_db().dipendenti.find({}, {"_id": 0}).to_list(1000)
     by_cf = {(d.get("codice_fiscale") or "").upper(): d for d in dips if d.get("codice_fiscale")}
     by_nome = {}
@@ -483,11 +481,31 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
         a, m = finestra[0]
         return m, a, "mese precedente (dedotta)"
 
+    async def _ricalcola_saldo_prestiti(dip_id):
+        """Riporto continuo: somma i prestiti del dipendente in ordine cronologico e
+        aggiorna ogni mese con erogato del mese e saldo cumulativo. Ritorna il saldo totale."""
+        movs = await get_db().prestiti_dipendenti.find({"dipendente_id": dip_id}).to_list(1000)
+        erog = {}
+        for mv in movs:
+            k = (mv["anno"], mv["mese"])
+            erog[k] = erog.get(k, 0) + (mv.get("importo") or 0)
+        saldo = 0
+        for (a, m) in sorted(erog.keys()):
+            saldo += erog[(a, m)]
+            await get_db().paghe_mensili.update_one(
+                {"dipendente_id": dip_id, "anno": a, "mese": m},
+                {"$set": {"dipendente_id": dip_id, "anno": a, "mese": m,
+                          "prestito_importo": erog[(a, m)], "prestito_saldo": saldo,
+                          "updated_at": now_iso()},
+                 "$setOnInsert": {"busta_riconciliata": False, "bonifico_riconciliato": False}},
+                upsert=True)
+        return saldo
+
     async def _processa_pdf(pdfbytes, origine):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(pdfbytes)
             path = tmp.name
-        ass, dac, bon, pres, dup, tfr = [], [], [], [], [], []
+        ass, dac, bon, pres, dup, tfr, prestiti = [], [], [], [], [], [], []
         # Anti-duplicazione 1: stesso file già importato (impronta del contenuto)
         h = hashlib.sha256(pdfbytes).hexdigest()
         try:
@@ -495,7 +513,7 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
                 dup.append({"file": origine, "motivo": "documento già importato (stesso file)"})
                 try: os.unlink(path)
                 except Exception: pass
-                return ass, dac, bon, pres, dup, tfr
+                return ass, dac, bon, pres, dup, tfr, prestiti
         except Exception:
             pass
         try:
@@ -526,6 +544,35 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
                     dac.append({"nome": (b.get("causale") or "?")[:30], "origine": origine,
                                 "motivo": "bonifico: " + ", ".join(manca)})
                 else:
+                    caus_low = (b.get("causale") or "").lower()
+                    if "prestito" in caus_low:
+                        # PRESTITO: non imputare a buste paga; mastrino prestiti con saldo progressivo
+                        data = b.get("data")
+                        if not data:
+                            dac.append({"nome": (b.get("causale") or "?")[:30], "origine": origine,
+                                        "motivo": "prestito: data assente"})
+                        elif int(data[:4]) not in ANNI_AMMESSI:
+                            dac.append({"nome": (b.get("causale") or "?")[:30], "origine": origine,
+                                        "motivo": f"anno {data[:4]} non ammesso — bloccato (solo 2023-2026)"})
+                        else:
+                            pa, pm = int(data[:4]), int(data[5:7])
+                            cro = b.get("cro")
+                            gia = await get_db().documenti_importati.find_one({"chiave": f"cro:{cro}"}) if cro else None
+                            if gia:
+                                dup.append({"file": origine, "motivo": f"prestito già importato (CRO {cro})"})
+                            else:
+                                await get_db().prestiti_dipendenti.insert_one({
+                                    "id": str(uuid.uuid4()), "dipendente_id": dip["id"],
+                                    "importo": b["importo"], "data": data, "mese": pm, "anno": pa,
+                                    "causale": b.get("causale"), "cro": cro, "pdf": origine,
+                                    "created_at": now_iso()})
+                                saldo = await _ricalcola_saldo_prestiti(dip["id"])
+                                await _registra_doc(h, "prestito",
+                                    f"cro:{cro}" if cro else f"pre:{dip['id']}:{pa}:{pm}:{b['importo']}", origine)
+                                prestiti.append({"dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
+                                                 "importo": b["importo"], "mese": pm, "anno": pa,
+                                                 "data": data, "saldo": saldo})
+                        return ass, dac, bon, pres, dup, tfr, prestiti
                     mese, anno, fonte = await _imputa_competenza(dip["id"], b)
                     if not mese or not anno:
                         dac.append({"nome": (b.get("causale") or "?")[:30], "origine": origine,
@@ -568,7 +615,7 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
                                         "importo": b["importo"], "mese": mese, "anno": anno,
                                         "causale": b.get("causale"), "data": b.get("data"),
                                         "riconciliato": True, "discrepanza": discrep, "fonte": fonte})
-                return ass, dac, bon, pres, dup, tfr
+                return ass, dac, bon, pres, dup, tfr, prestiti
 
             # ---- FOGLIO PRESENZE (ore/timbrature, non è una busta) ----
             if tipo == "presenze":
@@ -577,12 +624,12 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
                 if anno and anno not in ANNI_AMMESSI:
                     dac.append({"nome": cf or "?", "origine": origine,
                                 "motivo": f"presenze anno {anno} non ammesso — bloccato (solo 2023-2026)"})
-                    return ass, dac, bon, pres, dup, tfr
+                    return ass, dac, bon, pres, dup, tfr, prestiti
                 dip = by_cf.get((cf or "").upper())
                 await _registra_doc(h, "presenze", f"pres:{cf}:{anno}:{mese}", origine)
                 pres.append({"dipendente": (f"{dip.get('cognome')} {dip.get('nome')}".strip() if dip else (cf or "?")),
                              "mese": mese, "anno": anno, "origine": origine})
-                return ass, dac, bon, pres, dup, tfr
+                return ass, dac, bon, pres, dup, tfr, prestiti
 
             # ---- CEDOLINO / LIBRO UNICO multi-dipendente (netti) ----
             ced = _parse_lul(path)
@@ -627,45 +674,20 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
                 os.unlink(path)
             except Exception:
                 pass
-        return ass, dac, bon, pres, dup, tfr
+        return ass, dac, bon, pres, dup, tfr, prestiti
 
-    associati, da_controllare, errori, bonifici, presenze, duplicati, tfr_list = [], [], [], [], [], [], []
+    associati, da_controllare, errori, bonifici, presenze, duplicati, tfr_list, prestiti_list = [], [], [], [], [], [], [], []
+    errori = list(errori_iniziali or [])
     file_pdf = 0
-    for uf in files:
-        nome = uf.filename or ""
-        low = nome.lower()
+    for (nome, data) in pdf_items:
         try:
-            data = await uf.read()
-        except Exception:
-            errori.append(f"{nome}: lettura fallita")
-            continue
-        if low.endswith(".pdf"):
-            try:
-                a, d, b, p, du, tf = await _processa_pdf(data, nome)
-                associati += a; da_controllare += d; bonifici += b; presenze += p; duplicati += du; tfr_list += tf; file_pdf += 1
-            except Exception as e:
-                errori.append(f"{nome}: {e}")
-        elif low.endswith(".zip"):
-            try:
-                with zipfile.ZipFile(io.BytesIO(data)) as z:
-                    pdf_interni = [n for n in z.namelist() if n.lower().endswith(".pdf") and "__MACOSX" not in n]
-                    if not pdf_interni:
-                        errori.append(f"{nome}: ZIP senza PDF")
-                    for zi in pdf_interni:
-                        try:
-                            a, d, b, p, du, tf = await _processa_pdf(z.read(zi), f"{nome} › {zi}")
-                            associati += a; da_controllare += d; bonifici += b; presenze += p; duplicati += du; tfr_list += tf; file_pdf += 1
-                        except Exception as e:
-                            errori.append(f"{nome} › {zi}: {e}")
-            except zipfile.BadZipFile:
-                errori.append(f"{nome}: ZIP non valido")
-            except Exception as e:
-                errori.append(f"{nome}: {e}")
-        else:
-            errori.append(f"{nome}: tipo non supportato (servono PDF o ZIP)")
+            a, d, b, p, du, tf, pr = await _processa_pdf(data, nome)
+            associati += a; da_controllare += d; bonifici += b; presenze += p; duplicati += du; tfr_list += tf; prestiti_list += pr; file_pdf += 1
+        except Exception as e:
+            errori.append(f"{nome}: {e}")
 
     if file_pdf == 0:
-        raise HTTPException(status_code=400, detail="Nessun PDF valido trovato nei file caricati. " + ("; ".join(errori) if errori else ""))
+        raise HTTPException(status_code=400, detail="Nessun PDF elaborabile. " + ("; ".join(errori) if errori else ""))
 
     # Dedup: se lo stesso dipendente/mese è arrivato da più file, tieni una riga sola
     visti = {}
@@ -681,7 +703,141 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
     return {"associati": associati, "da_controllare": da_controllare,
             "totale_associati": len(associati), "file_pdf": file_pdf,
             "mesi": mesi, "errori": errori,
-            "bonifici": bonifici, "presenze": presenze, "duplicati": duplicati, "tfr": tfr_list}
+            "bonifici": bonifici, "presenze": presenze, "duplicati": duplicati, "tfr": tfr_list, "prestiti": prestiti_list}
+
+
+def _espandi_in_pdf(nome, data):
+    """Espande un allegato/file in lista di (origine, pdf_bytes): PDF diretto, oppure
+    PDF contenuti in uno ZIP. Ritorna (items, errori)."""
+    items, errori = [], []
+    low = (nome or "").lower()
+    if low.endswith(".pdf"):
+        items.append((nome, data))
+    elif low.endswith(".zip"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                interni = [n for n in z.namelist() if n.lower().endswith(".pdf") and "__MACOSX" not in n]
+                if not interni:
+                    errori.append(f"{nome}: ZIP senza PDF")
+                for zi in interni:
+                    items.append((f"{nome} › {zi}", z.read(zi)))
+        except zipfile.BadZipFile:
+            errori.append(f"{nome}: ZIP non valido")
+        except Exception as e:
+            errori.append(f"{nome}: {e}")
+    else:
+        errori.append(f"{nome}: tipo non supportato (servono PDF o ZIP)")
+    return items, errori
+
+
+@router.post("/paghe/importa-lul")
+async def importa_libro_unico(files: List[UploadFile] = File(...)):
+    """Importa uno o più PDF (anche dentro ZIP) caricati dall'utente: buste paga,
+    fogli presenze, bonifici (acconti, saldi, TFR, prestiti). Vedi _importa_documenti."""
+    pdf_items, errori = [], []
+    for uf in files:
+        nome = uf.filename or ""
+        try:
+            data = await uf.read()
+        except Exception:
+            errori.append(f"{nome}: lettura fallita")
+            continue
+        its, err = _espandi_in_pdf(nome, data)
+        pdf_items += its
+        errori += err
+    if not pdf_items:
+        raise HTTPException(status_code=400,
+            detail="Nessun PDF valido trovato. " + ("; ".join(errori) if errori else ""))
+    return await _importa_documenti(pdf_items, errori)
+
+
+@router.post("/paghe/importa-email")
+async def importa_da_email(cartella: Optional[str] = None, solo_non_letti: bool = False):
+    """Scarica gli allegati PDF dalla casella di posta (INBOX + tutte le cartelle) e li
+    importa con la stessa pipeline. Credenziali dalle variabili ambiente Render:
+    IMAP_HOST, IMAP_PORT (default 993), IMAP_USER, IMAP_PASSWORD.
+    L'anti-duplicazione per hash evita di re-importare email già lette in passato."""
+    import imaplib, email
+    host = os.getenv("IMAP_HOST") or os.getenv("IMAP_SERVER")
+    user = os.getenv("IMAP_USER") or os.getenv("IMAP_EMAIL")
+    pwd = os.getenv("IMAP_PASSWORD") or os.getenv("IMAP_PASS")
+    port = int(os.getenv("IMAP_PORT") or 993)
+    mancano = [n for n, v in [("IMAP_HOST", host), ("IMAP_USER", user), ("IMAP_PASSWORD", pwd)] if not v]
+    if mancano:
+        raise HTTPException(status_code=400,
+            detail="Variabili ambiente IMAP mancanti su Render: " + ", ".join(mancano) +
+                   ". Servono IMAP_HOST, IMAP_USER, IMAP_PASSWORD (IMAP_PORT opzionale, default 993).")
+    try:
+        M = imaplib.IMAP4_SSL(host, port)
+        M.login(user, pwd)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Connessione/login IMAP fallito ({host}:{port}): {e}")
+
+    pdf_items, errori, cartelle_lette = [], [], []
+    try:
+        # Elenco cartelle: una specifica se richiesta, altrimenti tutte
+        if cartella:
+            target = [cartella]
+        else:
+            target = []
+            typ, data = M.list()
+            if typ == "OK":
+                for raw in data:
+                    line = raw.decode(errors="ignore") if isinstance(raw, bytes) else str(raw)
+                    # l'ultimo token tra virgolette è il nome cartella
+                    nome_c = line.split(' "')[-1].strip().strip('"') if '"' in line else line.split()[-1]
+                    if nome_c and "\\Noselect" not in line:
+                        target.append(nome_c)
+            if "INBOX" not in target:
+                target.insert(0, "INBOX")
+        for box in target:
+            try:
+                typ, _ = M.select(f'"{box}"', readonly=True)
+                if typ != "OK":
+                    continue
+                crit = "(UNSEEN)" if solo_non_letti else "ALL"
+                typ, msgnums = M.search(None, crit)
+                if typ != "OK":
+                    continue
+                ids = msgnums[0].split()
+                cartelle_lette.append({"cartella": box, "messaggi": len(ids)})
+                for num in ids:
+                    typ, msgdata = M.fetch(num, "(RFC822)")
+                    if typ != "OK" or not msgdata or not msgdata[0]:
+                        continue
+                    msg = email.message_from_bytes(msgdata[0][1])
+                    for part in msg.walk():
+                        if part.get_content_maintype() == "multipart":
+                            continue
+                        fn = part.get_filename()
+                        if not fn:
+                            continue
+                        try:
+                            payload = part.get_payload(decode=True)
+                        except Exception:
+                            continue
+                        if not payload:
+                            continue
+                        its, err = _espandi_in_pdf(fn, payload)
+                        pdf_items += [(f"[{box}] {o}", d) for (o, d) in its]
+                        errori += err
+            except Exception as e:
+                errori.append(f"cartella {box}: {e}")
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
+
+    if not pdf_items:
+        return {"associati": [], "da_controllare": [], "totale_associati": 0, "file_pdf": 0,
+                "mesi": [], "errori": errori, "bonifici": [], "presenze": [], "duplicati": [],
+                "tfr": [], "prestiti": [], "cartelle_lette": cartelle_lette,
+                "messaggio": "Nessun allegato PDF trovato nella casella."}
+    res = await _importa_documenti(pdf_items, errori)
+    res["cartelle_lette"] = cartelle_lette
+    return res
+
 
 # ============ PRESENZE ============
 
