@@ -1,11 +1,14 @@
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
 :root{
-  --violet:#5D29C7; --violet-d:#4a1fa0; --navy:#1E1B4B; --navy-2:#2a2660;
-  --bg:#f5f4fb; --card:#ffffff; --ink:#1E1B4B; --muted:#6b6890;
-  --line:#e9e6f5; --ok:#16a34a; --warn:#d97706; --danger:#dc2626;
-  --radius:16px; --shadow:0 4px 18px rgba(30,27,75,.08);
+  /* Design unico Ceraldi: stessa palette verde salvia della gestione.
+     I nomi delle variabili restano per compatibilità col resto del foglio. */
+  --violet:#5b7a6b; --violet-d:#3f5a4e; --navy:#3f5a4e; --navy-2:#45614f;
+  --bg:#faf7f0; --card:#fffefb; --ink:#2a3329; --muted:#6b7669;
+  --line:#e6e0d4; --ok:#3d8168; --warn:#c4894a; --danger:#d35f4e;
+  --radius:16px; --shadow:0 4px 18px rgba(63,90,78,.10);
 }
+.pt-root h1,.pt-head h1,.card h3,.login h2{font-family:'Fraunces',Georgia,serif;letter-spacing:-.01em}
 *{box-sizing:border-box}
 .pt-root{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:var(--bg);
   color:var(--ink);min-height:100vh;max-width:540px;margin:0 auto;position:relative;padding-bottom:78px}
