@@ -1263,15 +1263,16 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
   const eur = (n) => (n || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   const handleImportLul = async (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
+    const fs = Array.from(e.target.files || []);
+    if (!fs.length) return;
     setImporting(true); setImportMsg(null);
     try {
-      const fd = new FormData(); fd.append("file", f);
+      const fd = new FormData();
+      fs.forEach(f => fd.append("files", f));
       const res = await axios.post(`${API}/paghe/importa-lul`, fd, { headers: { "Content-Type": "multipart/form-data" } });
       const r = res.data;
       setImportMsg(r);
-      if (r.associati?.length) { setMese(r.associati[0].mese); setAnno(r.associati[0].anno); }
+      if (r.mesi?.length) { const u = r.mesi[r.mesi.length - 1]; setMese(u.mese); setAnno(u.anno); }
       await load();
     } catch (err) {
       setImportMsg({ errore: err.response?.data?.detail || "Errore durante l'import" });
@@ -1293,7 +1294,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
           <p>Importo busta, bonifico ricevuto e acconti · tutto salvato sul database</p>
         </div>
         <div className="dc-page-actions">
-          <input ref={fileRef} type="file" accept="application/pdf" onChange={handleImportLul} style={{ display: "none" }} />
+          <input ref={fileRef} type="file" accept=".pdf,.zip,application/pdf,application/zip,application/x-zip-compressed" multiple onChange={handleImportLul} style={{ display: "none" }} />
           <button onClick={() => fileRef.current?.click()} disabled={importing}
             style={{ background: "#5b7a6b", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
             {importing ? "Importo…" : "Importa Libro Unico"}
@@ -1314,16 +1315,26 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
           ) : (
             <div>
               <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                ✓ Libro Unico importato: {importMsg.totale_associati} dipendenti su {importMsg.totale_trovati} — netti memorizzati
+                ✓ Importati {importMsg.file_pdf} cedolini · {importMsg.totale_associati} buste memorizzate
               </div>
+              {importMsg.mesi?.length > 0 && (
+                <div style={{ fontSize: 13, marginBottom: 6, color: "#2a3329" }}>
+                  Mesi importati: {importMsg.mesi.map(mm => `${mesi[mm.mese - 1]} ${mm.anno} (${mm.n})`).join(" · ")}
+                </div>
+              )}
               <div style={{ fontSize: 13, color: "#6b7669", display: "flex", flexWrap: "wrap", gap: "2px 14px" }}>
                 {importMsg.associati?.map((a, i) => (
-                  <span key={i}>{a.dipendente}: € {eur(a.netto)}{a.metodo !== "codice fiscale" ? " ⚠" : ""}</span>
+                  <span key={i}>{a.dipendente}: € {eur(a.netto)}{importMsg.mesi?.length > 1 ? ` (${a.mese}/${a.anno})` : ""}{a.metodo !== "codice fiscale" ? " ⚠" : ""}</span>
                 ))}
               </div>
               {importMsg.da_controllare?.length > 0 && (
                 <div style={{ marginTop: 8, fontSize: 13, color: "#7d5526" }}>
                   Da controllare: {importMsg.da_controllare.map(x => `${x.nome || x.cf} (${x.motivo})`).join("; ")}
+                </div>
+              )}
+              {importMsg.errori?.length > 0 && (
+                <div style={{ marginTop: 6, fontSize: 12, color: "#8f3829" }}>
+                  Avvisi: {importMsg.errori.join("; ")}
                 </div>
               )}
               <button onClick={() => setImportMsg(null)} style={{ marginTop: 8, border: "none", background: "transparent", color: "#6b7669", textDecoration: "underline", cursor: "pointer", fontSize: 12 }}>chiudi</button>

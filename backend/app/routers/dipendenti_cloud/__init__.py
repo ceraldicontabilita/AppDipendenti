@@ -8,6 +8,8 @@ from typing import List, Optional, Dict, Any
 import uuid
 import re
 import os
+import io
+import zipfile
 import tempfile
 from datetime import datetime, timezone
 
@@ -260,52 +262,93 @@ def _to_float(s):
     return float(s.replace(".", "").replace(",", ".")) if s else None
 
 @router.post("/paghe/importa-lul")
-async def importa_libro_unico(file: UploadFile = File(...)):
-    """Legge un PDF Libro Unico, lo divide per dipendente (per codice fiscale),
-    associa all'anagrafica e memorizza il netto del mese in paghe_mensili.
-    Conserva bonifici/acconti eventualmente già inseriti."""
-    if not (file.filename or "").lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Il file deve essere un PDF")
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(await file.read())
-        path = tmp.name
-    try:
-        ced = _parse_lul(path)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Errore lettura PDF: {e}")
-    finally:
-        try:
-            os.unlink(path)
-        except Exception:
-            pass
-
+async def importa_libro_unico(files: List[UploadFile] = File(...)):
+    """Legge uno o più PDF Libro Unico (anche dentro file ZIP, anche più ZIP insieme),
+    divide per dipendente (per codice fiscale), associa all'anagrafica e memorizza il
+    netto del mese in paghe_mensili. Ogni PDF porta il proprio mese. Conserva
+    bonifici/acconti eventualmente già inseriti."""
     dips = await get_db().dipendenti.find({}, {"_id": 0}).to_list(1000)
     by_cf = {(d.get("codice_fiscale") or "").upper(): d for d in dips if d.get("codice_fiscale")}
     by_nome = {f"{(d.get('cognome') or '').upper()} {(d.get('nome') or '').upper()}".strip(): d for d in dips}
 
-    associati, da_controllare = [], []
-    for cf, info in ced.items():
-        dip = by_cf.get(cf)
-        metodo = "codice fiscale"
-        if not dip:
-            dip = by_nome.get((info.get("nome") or "").upper())
-            metodo = "nome (CF non combacia)"
-        netto = _to_float(info.get("netto"))
-        mese, anno = info.get("mese"), info.get("anno")
-        if not dip or not mese:
-            da_controllare.append({"nome": info.get("nome"), "cf": cf, "netto": netto,
-                                   "motivo": "dipendente non trovato" if not dip else "periodo non rilevato"})
+    async def _processa_pdf(pdfbytes, origine):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(pdfbytes)
+            path = tmp.name
+        try:
+            ced = _parse_lul(path)
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+        ass, dac = [], []
+        for cf, info in ced.items():
+            dip = by_cf.get(cf)
+            metodo = "codice fiscale"
+            if not dip:
+                dip = by_nome.get((info.get("nome") or "").upper())
+                metodo = "nome (CF non combacia)"
+            netto = _to_float(info.get("netto"))
+            mese, anno = info.get("mese"), info.get("anno")
+            if not dip or not mese:
+                dac.append({"nome": info.get("nome"), "cf": cf, "netto": netto, "origine": origine,
+                            "motivo": "dipendente non trovato" if not dip else "periodo non rilevato"})
+                continue
+            await get_db().paghe_mensili.update_one(
+                {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
+                {"$set": {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
+                          "importo_busta": netto, "busta_da_lul": True, "updated_at": now_iso()}},
+                upsert=True)
+            ass.append({"dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
+                        "netto": netto, "metodo": metodo, "mese": mese, "anno": anno})
+        return ass, dac
+
+    associati, da_controllare, errori = [], [], []
+    file_pdf = 0
+    for uf in files:
+        nome = uf.filename or ""
+        low = nome.lower()
+        try:
+            data = await uf.read()
+        except Exception:
+            errori.append(f"{nome}: lettura fallita")
             continue
-        await get_db().paghe_mensili.update_one(
-            {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
-            {"$set": {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
-                      "importo_busta": netto, "busta_da_lul": True, "updated_at": now_iso()}},
-            upsert=True)
-        associati.append({"dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
-                          "netto": netto, "metodo": metodo, "mese": mese, "anno": anno})
-    associati.sort(key=lambda x: x["dipendente"])
+        if low.endswith(".pdf"):
+            try:
+                a, d = await _processa_pdf(data, nome)
+                associati += a; da_controllare += d; file_pdf += 1
+            except Exception as e:
+                errori.append(f"{nome}: {e}")
+        elif low.endswith(".zip"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(data)) as z:
+                    pdf_interni = [n for n in z.namelist() if n.lower().endswith(".pdf") and "__MACOSX" not in n]
+                    if not pdf_interni:
+                        errori.append(f"{nome}: ZIP senza PDF")
+                    for zi in pdf_interni:
+                        try:
+                            a, d = await _processa_pdf(z.read(zi), f"{nome} › {zi}")
+                            associati += a; da_controllare += d; file_pdf += 1
+                        except Exception as e:
+                            errori.append(f"{nome} › {zi}: {e}")
+            except zipfile.BadZipFile:
+                errori.append(f"{nome}: ZIP non valido")
+            except Exception as e:
+                errori.append(f"{nome}: {e}")
+        else:
+            errori.append(f"{nome}: tipo non supportato (servono PDF o ZIP)")
+
+    if file_pdf == 0:
+        raise HTTPException(status_code=400, detail="Nessun PDF valido trovato nei file caricati. " + ("; ".join(errori) if errori else ""))
+
+    mesi_set = sorted({(a["anno"], a["mese"]) for a in associati})
+    mesi = [{"anno": y, "mese": m, "n": sum(1 for a in associati if a["anno"] == y and a["mese"] == m)}
+            for (y, m) in mesi_set]
+    associati.sort(key=lambda x: (x["anno"], x["mese"], x["dipendente"]))
     return {"associati": associati, "da_controllare": da_controllare,
-            "totale_trovati": len(ced), "totale_associati": len(associati)}
+            "totale_associati": len(associati), "file_pdf": file_pdf,
+            "mesi": mesi, "errori": errori}
 
 # ============ PRESENZE ============
 
