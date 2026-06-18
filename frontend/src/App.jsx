@@ -1355,7 +1355,6 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                       <span key={i}>{t.dipendente}: € {eur(t.importo)} → {mesi[t.mese - 1]} {t.anno}</span>
                     ))}
                   </div>
-                  </div>
                 </div>
               )}
               {importMsg.presenze?.length > 0 && (
