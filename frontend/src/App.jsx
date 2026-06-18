@@ -71,6 +71,7 @@ export default function DipendentiCloudApp() {
   const [stats, setStats] = useState({});
   const [loading, setLoading] = useState(true);
   const [ordineDip, setOrdineDip] = useState([]);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -171,8 +172,16 @@ export default function DipendentiCloudApp() {
 
   return (
     <div className="dc-app">
+      {/* Barra mobile con menu a tendina */}
+      <div className="dc-mobile-topbar">
+        <button className="dc-hamburger" onClick={() => setMobileMenuOpen(true)} aria-label="Apri menu">
+          <span></span><span></span><span></span>
+        </button>
+        <span className="dc-mobile-title">{menuItems.find(m => m.id === currentPage)?.label || "Dipendenti"}</span>
+      </div>
+      {mobileMenuOpen && <div className="dc-mobile-overlay" onClick={() => setMobileMenuOpen(false)} />}
       {/* Sidebar */}
-      <aside className="dc-sidebar">
+      <aside className={`dc-sidebar ${mobileMenuOpen ? 'open' : ''}`}>
         <div className="dc-sidebar-header">
           <div className="dc-sidebar-logo">
             <Users size={28} />
@@ -199,6 +208,7 @@ export default function DipendentiCloudApp() {
                   to={`/dipendenti/${item.id}`}
                   className={`dc-sidebar-item ${currentPage === item.id ? 'active' : ''}`}
                   data-testid={`sidebar-${item.id}`}
+                  onClick={() => setMobileMenuOpen(false)}
                 >
                   <item.icon size={18} />
                   <span>{item.label}</span>
