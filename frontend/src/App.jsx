@@ -709,7 +709,7 @@ function PresenzePage({ dipendenti, reload }) {
       {/* Barra pennello */}
       <div className="dc-card" style={{ marginBottom: 12, padding: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 13, color: "#64748b", marginRight: 4 }}>Pennello:</span>
+          <span style={{ fontSize: 13, color: "#6b7669", marginRight: 4 }}>Pennello:</span>
           {tipiGiustificativo.map(t => (
             <button key={t.code} type="button" onClick={() => setPenna(t.code)} title={t.label}
               style={{ border: penna === t.code ? "3px solid #1E1B4B" : "1px solid #e5e7eb", background: penna === t.code ? t.color : "#fff", color: penna === t.code ? "#fff" : "#374151", borderRadius: 8, padding: "6px 10px", fontWeight: 700, cursor: "pointer", fontSize: 13 }}>
@@ -754,7 +754,7 @@ function PresenzePage({ dipendenti, reload }) {
                     <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.25 }}>
                       <span>{dip.cognome ? `${dip.cognome} ${dip.nome?.[0] || ''}.` : dip.nome}</span>
                       {(() => { const r = contaRiposi(dip.id); const ok = r >= domenicheMese; return (
-                        <span style={{ fontSize: 10, fontWeight: 700, color: ok ? "#16a34a" : "#dc2626" }} title="Riposi del mese rispetto agli attesi">
+                        <span style={{ fontSize: 10, fontWeight: 700, color: ok ? "#3d8168" : "#d35f4e" }} title="Riposi del mese rispetto agli attesi">
                           {ok ? "✓" : "⚠"} {r}/{domenicheMese} riposi
                         </span>); })()}
                     </div>
@@ -910,7 +910,7 @@ function FeriePage({ dipendenti, ferie, reload, getDipendente }) {
           <button onClick={() => setMese(new Date(mese.getFullYear(), mese.getMonth() - 1, 1))} className="dc-btn">‹</button>
           <strong style={{ textTransform: "capitalize", minWidth: 150, textAlign: "center" }}>{meseLabel}</strong>
           <button onClick={() => setMese(new Date(mese.getFullYear(), mese.getMonth() + 1, 1))} className="dc-btn">›</button>
-          <span style={{ marginLeft: 12, fontSize: 13, color: "#64748b" }}>
+          <span style={{ marginLeft: 12, fontSize: 13, color: "#6b7669" }}>
             Clicca una cella: vuoto → <b style={{ color: "#3b82f6" }}>Ferie</b> → <b style={{ color: "#8b5cf6" }}>Permesso</b> → vuoto
           </span>
         </div>
@@ -1159,7 +1159,7 @@ function TurniPage({ dipendenti, turni, reload }) {
         <button onClick={() => setLunedi(d => { const n = new Date(d); n.setDate(d.getDate() + 7); return n; })} className="dc-btn">›</button>
         <button onClick={() => setLunedi(lunOggi)} className="dc-btn" style={{ fontSize: 12 }}>Oggi</button>
         <button onClick={generaProduzione} disabled={busy}
-          style={{ marginLeft: "auto", background: "#5D29C7", color: "#fff", border: "none", padding: "10px 18px", borderRadius: 10, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
+          style={{ marginLeft: "auto", background: "#5b7a6b", color: "#fff", border: "none", padding: "10px 18px", borderRadius: 10, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
           {busy ? "Attendi…" : "Genera settimana"}
         </button>
       </div>
@@ -1295,7 +1295,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
         <div className="dc-page-actions">
           <input ref={fileRef} type="file" accept="application/pdf" onChange={handleImportLul} style={{ display: "none" }} />
           <button onClick={() => fileRef.current?.click()} disabled={importing}
-            style={{ background: "#5D29C7", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
+            style={{ background: "#5b7a6b", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
             {importing ? "Importo…" : "Importa Libro Unico"}
           </button>
           <select value={mese} onChange={e => setMese(+e.target.value)} className="dc-select">
@@ -1308,25 +1308,25 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
       </div>
 
       {importMsg && (
-        <div className="dc-card" style={{ marginBottom: 16, padding: 14, borderLeft: `4px solid ${importMsg.errore ? '#dc2626' : '#16a34a'}` }}>
+        <div className="dc-card" style={{ marginBottom: 16, padding: 14, borderLeft: `4px solid ${importMsg.errore ? '#d35f4e' : '#3d8168'}` }}>
           {importMsg.errore ? (
-            <div style={{ color: "#dc2626", fontWeight: 600 }}>⚠ {importMsg.errore}</div>
+            <div style={{ color: "#d35f4e", fontWeight: 600 }}>⚠ {importMsg.errore}</div>
           ) : (
             <div>
               <div style={{ fontWeight: 700, marginBottom: 6 }}>
                 ✓ Libro Unico importato: {importMsg.totale_associati} dipendenti su {importMsg.totale_trovati} — netti memorizzati
               </div>
-              <div style={{ fontSize: 13, color: "#475569", display: "flex", flexWrap: "wrap", gap: "2px 14px" }}>
+              <div style={{ fontSize: 13, color: "#6b7669", display: "flex", flexWrap: "wrap", gap: "2px 14px" }}>
                 {importMsg.associati?.map((a, i) => (
                   <span key={i}>{a.dipendente}: € {eur(a.netto)}{a.metodo !== "codice fiscale" ? " ⚠" : ""}</span>
                 ))}
               </div>
               {importMsg.da_controllare?.length > 0 && (
-                <div style={{ marginTop: 8, fontSize: 13, color: "#b45309" }}>
+                <div style={{ marginTop: 8, fontSize: 13, color: "#7d5526" }}>
                   Da controllare: {importMsg.da_controllare.map(x => `${x.nome || x.cf} (${x.motivo})`).join("; ")}
                 </div>
               )}
-              <button onClick={() => setImportMsg(null)} style={{ marginTop: 8, border: "none", background: "transparent", color: "#64748b", textDecoration: "underline", cursor: "pointer", fontSize: 12 }}>chiudi</button>
+              <button onClick={() => setImportMsg(null)} style={{ marginTop: 8, border: "none", background: "transparent", color: "#6b7669", textDecoration: "underline", cursor: "pointer", fontSize: 12 }}>chiudi</button>
             </div>
           )}
         </div>
@@ -1352,12 +1352,12 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                 </div>
 
                 <div className="dc-busta-field">
-                  <label style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>IMPORTO BUSTA €</label>
+                  <label style={{ fontSize: 11, color: "#6b7669", fontWeight: 600 }}>IMPORTO BUSTA €</label>
                   <input type="number" step="0.01" value={d.importo_busta} onChange={e => upd(dip.id, { importo_busta: e.target.value })} placeholder="0,00" style={{ ...inp, width: 120 }} />
                 </div>
 
                 <div className="dc-busta-field">
-                  <label style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>BONIFICO</label>
+                  <label style={{ fontSize: 11, color: "#6b7669", fontWeight: 600 }}>BONIFICO</label>
                   <div className="dc-busta-inputs" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap" }}>
                       <input type="checkbox" checked={d.bonifico_ricevuto} onChange={e => upd(dip.id, { bonifico_ricevuto: e.target.checked })} />
@@ -1369,20 +1369,20 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                 </div>
 
                 <div className="dc-busta-field dc-busta-acconti">
-                  <label style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>ACCONTI (max 3)</label>
+                  <label style={{ fontSize: 11, color: "#6b7669", fontWeight: 600 }}>ACCONTI (max 3)</label>
                   <div className="dc-busta-inputs" style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
                     {acc.map((a, i) => (
                       <div key={i} className="dc-busta-acconto" style={{ display: "flex", alignItems: "center", gap: 4, background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 8, padding: "4px 6px" }}>
                         <input type="number" step="0.01" value={a.importo} onChange={e => setAcc(dip.id, i, { importo: e.target.value })} placeholder="€" style={{ ...inp, width: 80, padding: "5px 7px" }} />
                         <input type="date" value={a.data || ""} onChange={e => setAcc(dip.id, i, { data: e.target.value })} style={{ ...inp, width: 140, padding: "5px 7px" }} />
-                        <button type="button" onClick={() => delAcc(dip.id, i)} title="Rimuovi acconto" style={{ border: "none", background: "transparent", color: "#dc2626", cursor: "pointer", fontWeight: 700, fontSize: 16 }}>×</button>
+                        <button type="button" onClick={() => delAcc(dip.id, i)} title="Rimuovi acconto" style={{ border: "none", background: "transparent", color: "#d35f4e", cursor: "pointer", fontWeight: 700, fontSize: 16 }}>×</button>
                       </div>
                     ))}
-                    {acc.length < 3 && <button type="button" onClick={() => addAcc(dip.id)} style={{ border: "1px dashed #9ca3af", background: "#fff", color: "#5D29C7", borderRadius: 8, padding: "6px 10px", cursor: "pointer", fontWeight: 600, fontSize: 13 }}>+ acconto</button>}
+                    {acc.length < 3 && <button type="button" onClick={() => addAcc(dip.id)} style={{ border: "1px dashed #9ca3af", background: "#fff", color: "#5b7a6b", borderRadius: 8, padding: "6px 10px", cursor: "pointer", fontWeight: 600, fontSize: 13 }}>+ acconto</button>}
                   </div>
                 </div>
 
-                <button type="button" onClick={() => salva(dip.id)} className="dc-busta-salva" style={{ background: salvato[dip.id] ? "#16a34a" : "#5D29C7", color: "#fff", border: "none", borderRadius: 10, padding: "10px 16px", fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+                <button type="button" onClick={() => salva(dip.id)} className="dc-busta-salva" style={{ background: salvato[dip.id] ? "#3d8168" : "#5b7a6b", color: "#fff", border: "none", borderRadius: 10, padding: "10px 16px", fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
                   {salvato[dip.id] ? "✓ Salvato" : "Salva"}
                 </button>
               </div>
