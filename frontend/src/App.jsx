@@ -1302,13 +1302,13 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
           <input ref={fileRef} type="file" accept=".pdf,.zip,application/pdf,application/zip,application/x-zip-compressed" multiple onChange={handleImportLul} style={{ display: "none" }} />
           <button onClick={() => fileRef.current?.click()} disabled={importing}
             style={{ background: "#5b7a6b", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
-            {importing ? "Importo…" : "Importa Libro Unico"}
+            {importing ? "Importo…" : "Importa tutti i documenti"}
           </button>
           <select value={mese} onChange={e => setMese(+e.target.value)} className="dc-select">
             {mesi.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
           </select>
           <select value={anno} onChange={e => setAnno(+e.target.value)} className="dc-select">
-            {[2024, 2025, 2026, 2027].map(y => <option key={y} value={y}>{y}</option>)}
+            {[2022, 2023, 2024, 2025, 2026, 2027].map(y => <option key={y} value={y}>{y}</option>)}
           </select>
         </div>
       </div>
