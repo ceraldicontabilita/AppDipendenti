@@ -308,6 +308,7 @@ function Notifiche({ onChange }) {
 
 /* ---------------- GESTIONE (Luigi/admin) ---------------- */
 function Gestione() {
+  const isAdmin = (localStorage.getItem("pt_role") || "") === "admin";
   const [lun, setLun] = useState(prossimoLunedi());
   const [startLong, setStartLong] = useState("Luigi");
   const [sched, setSched] = useState(null);
@@ -320,7 +321,7 @@ function Gestione() {
   const [sin, setSin] = useState("Luigi");
   const loadCoda = useCallback(()=>{ api.get("/richieste?stato=aperta").then((r)=>setCoda(r.data)).catch(()=>{}); },[]);
   const loadAccessi = useCallback(()=>{ api.get("/accessi").then((r)=>setAccessi(r.data)).catch(()=>{}); },[]);
-  useEffect(()=>{loadCoda();loadAccessi();},[loadCoda,loadAccessi]);
+  useEffect(()=>{loadCoda(); if(isAdmin) loadAccessi();},[loadCoda,loadAccessi,isAdmin]);
   const salvaPin = async (id)=>{ const pin=pinIn[id]; if(!pin)return; try{await api.post(`/accessi/${id}/pin`,{pin});}catch{} setPinIn({...pinIn,[id]:""}); loadAccessi(); };
   const salvaRuolo = async (id,ruolo_app)=>{ try{await api.post(`/accessi/${id}/ruolo`,{ruolo_app});}catch{} loadAccessi(); };
   const date = settimanaDate(lun);
@@ -379,6 +380,7 @@ function Gestione() {
         <button className="btn sec" style={{marginTop:10}} onClick={sostituisci}>Applica scambio</button>
         <div className="muted" style={{marginTop:6,fontSize:12}}>Ricordati di ripubblicare dopo le modifiche.</div>
       </div>}
+      {isAdmin && (
       <div className="card"><h3>Accessi dipendenti</h3>
         {accessi.length===0 && <div className="muted">Nessun dipendente in anagrafica.</div>}
         {accessi.map((d)=>(
@@ -397,6 +399,7 @@ function Gestione() {
           </div>
         ))}
       </div>
+      )}
       <div className="card"><h3>Richieste da gestire</h3>
         {coda.length===0 && <div className="muted">Nessuna richiesta aperta.</div>}
         {coda.map((r)=>(

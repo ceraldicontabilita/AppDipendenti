@@ -1036,6 +1036,21 @@ body, .dc-app, input, select, textarea, button { font-family: 'Plus Jakarta Sans
   }
   .dc-table--cards td:first-child::before { display: none; }
   .dc-table--cards .dc-table-actions { justify-content: flex-end; }
+
+  /* Griglia TURNI su mobile: il drag handle non serve al tocco; il nome resta
+     fisso mentre si scorrono i giorni della settimana */
+  .dc-turni-table .dc-drag-handle { display: none; }
+  .dc-turni-table tr > td:nth-child(2),
+  .dc-turni-table tr > th:nth-child(2) {
+    position: sticky; left: 0; z-index: 2; background: #fff;
+    box-shadow: 2px 0 4px rgba(0,0,0,.05);
+  }
+  /* Calendario FERIE/mensile: prima colonna (nome) fissa nello scroll */
+  .dc-scroll-x > table:not(.dc-turni-table) td:first-child,
+  .dc-scroll-x > table:not(.dc-turni-table) th:first-child {
+    position: sticky; left: 0; z-index: 2; background: #fff;
+    box-shadow: 2px 0 4px rgba(0,0,0,.05);
+  }
 }
 
 /* ===== Buste Paga: card responsive (no scroll laterale su mobile) ===== */
