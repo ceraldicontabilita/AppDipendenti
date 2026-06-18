@@ -1352,6 +1352,11 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                   Fogli presenze riconosciuti (non sono buste): {importMsg.presenze.map(p => `${p.dipendente}${p.mese ? ` ${mesi[p.mese - 1]} ${p.anno}` : ""}`).join("; ")}
                 </div>
               )}
+              {importMsg.duplicati?.length > 0 && (
+                <div style={{ marginTop: 8, fontSize: 13, color: "#8a6f47", background: "#f3ead9", border: "1px solid #e7d6b9", borderRadius: 8, padding: "6px 10px" }}>
+                  🔁 Duplicati scartati automaticamente ({importMsg.duplicati.length}): {importMsg.duplicati.map(x => `${x.file} — ${x.motivo}`).join("; ")}
+                </div>
+              )}
               {importMsg.da_controllare?.length > 0 && (
                 <div style={{ marginTop: 8, fontSize: 13, color: "#7d5526" }}>
                   Da controllare: {importMsg.da_controllare.map(x => `${x.nome || x.cf} (${x.motivo})`).join("; ")}

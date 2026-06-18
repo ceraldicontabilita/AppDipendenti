@@ -10,6 +10,7 @@ import re
 import os
 import io
 import zipfile
+import hashlib
 import tempfile
 from datetime import datetime, timezone
 
@@ -281,7 +282,7 @@ async def importa_excel_salari(file: UploadFile = File(...)):
         if not dip:
             non_trovati[nome] = non_trovati.get(nome, 0) + 1
             continue
-        if not mese or not anno or anno < 2023 or anno > anno_corrente + 1:
+        if not mese or not anno or anno not in ANNI_AMMESSI:
             scartati.append({"nome": nome, "motivo": f"periodo non valido ({row[1]} {row[2]})"})
             continue
 
@@ -313,6 +314,8 @@ async def importa_excel_salari(file: UploadFile = File(...)):
 _CF_RE = re.compile(r'\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b')
 _MESI = {"gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
          "luglio": 7, "agosto": 8, "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12}
+# Regola atomica: si importano SOLO questi anni. Tutto il resto è bloccato.
+ANNI_AMMESSI = {2023, 2024, 2025, 2026}
 
 def _lul_netto(text):
     m = re.findall(r'([\d]{1,3}(?:\.\d{3})*,\d{2})\s*€', text)
@@ -440,13 +443,37 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
             [("dipendente_id", 1), ("anno", 1), ("mese", 1)], unique=True, name="uniq_dip_anno_mese")
     except Exception:
         pass
+    # Registro documenti importati (anti-duplicazione): impronta del file + chiave logica
+    try:
+        await get_db().documenti_importati.create_index([("hash", 1)], unique=True, name="uniq_hash")
+        await get_db().documenti_importati.create_index([("chiave", 1)], name="idx_chiave")
+    except Exception:
+        pass
+
+    async def _registra_doc(h, tipo, chiave, origine):
+        try:
+            await get_db().documenti_importati.update_one(
+                {"hash": h},
+                {"$set": {"hash": h, "tipo": tipo, "chiave": chiave, "file": origine,
+                          "imported_at": now_iso()}}, upsert=True)
+        except Exception:
+            pass
 
     async def _processa_pdf(pdfbytes, origine):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(pdfbytes)
             path = tmp.name
-        ass, dac, bon, pres = [], [], [], []
-        anno_corrente = datetime.now(timezone.utc).year
+        ass, dac, bon, pres, dup = [], [], [], [], []
+        # Anti-duplicazione 1: stesso file già importato (impronta del contenuto)
+        h = hashlib.sha256(pdfbytes).hexdigest()
+        try:
+            if await get_db().documenti_importati.find_one({"hash": h}):
+                dup.append({"file": origine, "motivo": "documento già importato (stesso file)"})
+                try: os.unlink(path)
+                except Exception: pass
+                return ass, dac, bon, pres, dup
+        except Exception:
+            pass
         try:
             text = _estrai_testo(path)
             tipo = _classifica_doc(text)
@@ -477,33 +504,48 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
                                 "motivo": "bonifico: " + ", ".join(manca)})
                 else:
                     mese, anno = b["mese"], b["anno"]
-                    esist = await get_db().paghe_mensili.find_one(
-                        {"dipendente_id": dip["id"], "anno": anno, "mese": mese}, {"erogato_atteso": 1})
-                    atteso = (esist or {}).get("erogato_atteso")
-                    discrep = atteso if (atteso is not None and abs(atteso - b["importo"]) > 1) else None
-                    set_doc = {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
-                               "bonifico_importo": b["importo"], "bonifico_data": b.get("data"),
-                               "bonifico_ricevuto": True, "bonifico_causale": b.get("causale"),
-                               "bonifico_cro": b.get("cro"), "bonifico_pdf": origine,
-                               "bonifico_riconciliato": True, "updated_at": now_iso()}
-                    await get_db().paghe_mensili.update_one(
-                        {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
-                        {"$set": set_doc, "$setOnInsert": {"busta_riconciliata": False}}, upsert=True)
-                    bon.append({"dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
-                                "importo": b["importo"], "mese": mese, "anno": anno,
-                                "causale": b.get("causale"), "data": b.get("data"),
-                                "riconciliato": True, "discrepanza": discrep,
-                                "competenza_esplicita": b.get("competenza_esplicita")})
-                return ass, dac, bon, pres
+                    if anno not in ANNI_AMMESSI:
+                        dac.append({"nome": (b.get("causale") or "?")[:30], "origine": origine,
+                                    "motivo": f"anno {anno} non ammesso — bloccato (solo 2023-2026)"})
+                    else:
+                        cro = b.get("cro")
+                        gia = await get_db().documenti_importati.find_one({"chiave": f"cro:{cro}"}) if cro else None
+                        if gia:
+                            dup.append({"file": origine, "motivo": f"bonifico già importato (CRO {cro})"})
+                        else:
+                            esist = await get_db().paghe_mensili.find_one(
+                                {"dipendente_id": dip["id"], "anno": anno, "mese": mese}, {"erogato_atteso": 1})
+                            atteso = (esist or {}).get("erogato_atteso")
+                            discrep = atteso if (atteso is not None and abs(atteso - b["importo"]) > 1) else None
+                            set_doc = {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
+                                       "bonifico_importo": b["importo"], "bonifico_data": b.get("data"),
+                                       "bonifico_ricevuto": True, "bonifico_causale": b.get("causale"),
+                                       "bonifico_cro": cro, "bonifico_pdf": origine,
+                                       "bonifico_riconciliato": True, "updated_at": now_iso()}
+                            await get_db().paghe_mensili.update_one(
+                                {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
+                                {"$set": set_doc, "$setOnInsert": {"busta_riconciliata": False}}, upsert=True)
+                            await _registra_doc(h, "bonifico", f"cro:{cro}" if cro else f"bon:{dip['id']}:{anno}:{mese}", origine)
+                            bon.append({"dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
+                                        "importo": b["importo"], "mese": mese, "anno": anno,
+                                        "causale": b.get("causale"), "data": b.get("data"),
+                                        "riconciliato": True, "discrepanza": discrep,
+                                        "competenza_esplicita": b.get("competenza_esplicita")})
+                return ass, dac, bon, pres, dup
 
             # ---- FOGLIO PRESENZE (ore/timbrature, non è una busta) ----
             if tipo == "presenze":
                 cf = (_CF_RE.findall(text) or [None])[0]
                 mese, anno = _lul_periodo(text)
+                if anno and anno not in ANNI_AMMESSI:
+                    dac.append({"nome": cf or "?", "origine": origine,
+                                "motivo": f"presenze anno {anno} non ammesso — bloccato (solo 2023-2026)"})
+                    return ass, dac, bon, pres, dup
                 dip = by_cf.get((cf or "").upper())
+                await _registra_doc(h, "presenze", f"pres:{cf}:{anno}:{mese}", origine)
                 pres.append({"dipendente": (f"{dip.get('cognome')} {dip.get('nome')}".strip() if dip else (cf or "?")),
                              "mese": mese, "anno": anno, "origine": origine})
-                return ass, dac, bon, pres
+                return ass, dac, bon, pres, dup
 
             # ---- CEDOLINO / LIBRO UNICO multi-dipendente (netti) ----
             ced = _parse_lul(path)
@@ -523,9 +565,9 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
                     dac.append({"nome": info.get("nome"), "cf": cf, "netto": netto, "origine": origine,
                                 "motivo": "netto non rilevato (non salvato)"})
                     continue
-                if anno < 2023 or anno > anno_corrente + 1:
+                if anno not in ANNI_AMMESSI:
                     dac.append({"nome": info.get("nome"), "cf": cf, "netto": netto, "origine": origine,
-                                "motivo": f"anno fuori intervallo: {mese}/{anno} (non salvato)"})
+                                "motivo": f"anno {anno} non ammesso — bloccato (solo 2023-2026)"})
                     continue
                 esistente = await get_db().paghe_mensili.find_one(
                     {"dipendente_id": dip["id"], "anno": anno, "mese": mese}, {"netto_atteso": 1})
@@ -541,14 +583,16 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
                             "dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
                             "netto": netto, "metodo": metodo, "mese": mese, "anno": anno,
                             "riconciliata": True, "discrepanza": discrep})
+            if ass:
+                await _registra_doc(h, "cedolino", f"file:{origine}", origine)
         finally:
             try:
                 os.unlink(path)
             except Exception:
                 pass
-        return ass, dac, bon, pres
+        return ass, dac, bon, pres, dup
 
-    associati, da_controllare, errori, bonifici, presenze = [], [], [], [], []
+    associati, da_controllare, errori, bonifici, presenze, duplicati = [], [], [], [], [], []
     file_pdf = 0
     for uf in files:
         nome = uf.filename or ""
@@ -560,8 +604,8 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
             continue
         if low.endswith(".pdf"):
             try:
-                a, d, b, p = await _processa_pdf(data, nome)
-                associati += a; da_controllare += d; bonifici += b; presenze += p; file_pdf += 1
+                a, d, b, p, du = await _processa_pdf(data, nome)
+                associati += a; da_controllare += d; bonifici += b; presenze += p; duplicati += du; file_pdf += 1
             except Exception as e:
                 errori.append(f"{nome}: {e}")
         elif low.endswith(".zip"):
@@ -572,8 +616,8 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
                         errori.append(f"{nome}: ZIP senza PDF")
                     for zi in pdf_interni:
                         try:
-                            a, d, b, p = await _processa_pdf(z.read(zi), f"{nome} › {zi}")
-                            associati += a; da_controllare += d; bonifici += b; presenze += p; file_pdf += 1
+                            a, d, b, p, du = await _processa_pdf(z.read(zi), f"{nome} › {zi}")
+                            associati += a; da_controllare += d; bonifici += b; presenze += p; duplicati += du; file_pdf += 1
                         except Exception as e:
                             errori.append(f"{nome} › {zi}: {e}")
             except zipfile.BadZipFile:
@@ -600,7 +644,7 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
     return {"associati": associati, "da_controllare": da_controllare,
             "totale_associati": len(associati), "file_pdf": file_pdf,
             "mesi": mesi, "errori": errori,
-            "bonifici": bonifici, "presenze": presenze}
+            "bonifici": bonifici, "presenze": presenze, "duplicati": duplicati}
 
 # ============ PRESENZE ============
 
