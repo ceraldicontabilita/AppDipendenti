@@ -271,6 +271,13 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
     by_cf = {(d.get("codice_fiscale") or "").upper(): d for d in dips if d.get("codice_fiscale")}
     by_nome = {f"{(d.get('cognome') or '').upper()} {(d.get('nome') or '').upper()}".strip(): d for d in dips}
 
+    # Vincolo: una sola busta per (dipendente, anno, mese) — i duplicati diventano impossibili
+    try:
+        await get_db().paghe_mensili.create_index(
+            [("dipendente_id", 1), ("anno", 1), ("mese", 1)], unique=True, name="uniq_dip_anno_mese")
+    except Exception:
+        pass
+
     async def _processa_pdf(pdfbytes, origine):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(pdfbytes)
@@ -291,16 +298,26 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
                 metodo = "nome (CF non combacia)"
             netto = _to_float(info.get("netto"))
             mese, anno = info.get("mese"), info.get("anno")
+            anno_corrente = datetime.now(timezone.utc).year
             if not dip or not mese:
                 dac.append({"nome": info.get("nome"), "cf": cf, "netto": netto, "origine": origine,
                             "motivo": "dipendente non trovato" if not dip else "periodo non rilevato"})
+                continue
+            if not netto or netto <= 0:
+                dac.append({"nome": info.get("nome"), "cf": cf, "netto": netto, "origine": origine,
+                            "motivo": "netto non rilevato (non salvato)"})
+                continue
+            if anno < 2023 or anno > anno_corrente + 1:
+                dac.append({"nome": info.get("nome"), "cf": cf, "netto": netto, "origine": origine,
+                            "motivo": f"anno fuori intervallo: {mese}/{anno} (non salvato)"})
                 continue
             await get_db().paghe_mensili.update_one(
                 {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
                 {"$set": {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
                           "importo_busta": netto, "busta_da_lul": True, "updated_at": now_iso()}},
                 upsert=True)
-            ass.append({"dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
+            ass.append({"dipendente_id": dip["id"],
+                        "dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
                         "netto": netto, "metodo": metodo, "mese": mese, "anno": anno})
         return ass, dac
 
@@ -341,6 +358,13 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
 
     if file_pdf == 0:
         raise HTTPException(status_code=400, detail="Nessun PDF valido trovato nei file caricati. " + ("; ".join(errori) if errori else ""))
+
+    # Dedup: se lo stesso dipendente/mese è arrivato da più file, tieni una riga sola
+    # (nel DB l'upsert ha già un record unico). Così il riepilogo mostra i dati reali.
+    visti = {}
+    for a in associati:
+        visti[(a["dipendente_id"], a["anno"], a["mese"])] = a
+    associati = list(visti.values())
 
     mesi_set = sorted({(a["anno"], a["mese"]) for a in associati})
     mesi = [{"anno": y, "mese": m, "n": sum(1 for a in associati if a["anno"] == y and a["mese"] == m)}
