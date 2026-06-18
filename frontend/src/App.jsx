@@ -1335,20 +1335,20 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
           const acc = d.acconti || [];
           return (
             <div key={dip.id} className="dc-card" style={{ padding: 14 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                <div className="dc-table-user" style={{ minWidth: 190 }}>
+              <div className="dc-busta-row">
+                <div className="dc-table-user dc-busta-user">
                   <Avatar nome={dip.nome} cognome={dip.cognome} size="sm" />
                   <span style={{ fontWeight: 600 }}>{dip.cognome ? `${dip.cognome} ${dip.nome || ''}` : dip.nome}</span>
                 </div>
 
-                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                <div className="dc-busta-field">
                   <label style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>IMPORTO BUSTA €</label>
                   <input type="number" step="0.01" value={d.importo_busta} onChange={e => upd(dip.id, { importo_busta: e.target.value })} placeholder="0,00" style={{ ...inp, width: 120 }} />
                 </div>
 
-                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                <div className="dc-busta-field">
                   <label style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>BONIFICO</label>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div className="dc-busta-inputs" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap" }}>
                       <input type="checkbox" checked={d.bonifico_ricevuto} onChange={e => upd(dip.id, { bonifico_ricevuto: e.target.checked })} />
                       ricevuto
@@ -1358,11 +1358,11 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                   </div>
                 </div>
 
-                <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: 1, minWidth: 240 }}>
+                <div className="dc-busta-field dc-busta-acconti">
                   <label style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>ACCONTI (max 3)</label>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                  <div className="dc-busta-inputs" style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
                     {acc.map((a, i) => (
-                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 4, background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 8, padding: "4px 6px" }}>
+                      <div key={i} className="dc-busta-acconto" style={{ display: "flex", alignItems: "center", gap: 4, background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 8, padding: "4px 6px" }}>
                         <input type="number" step="0.01" value={a.importo} onChange={e => setAcc(dip.id, i, { importo: e.target.value })} placeholder="€" style={{ ...inp, width: 80, padding: "5px 7px" }} />
                         <input type="date" value={a.data || ""} onChange={e => setAcc(dip.id, i, { data: e.target.value })} style={{ ...inp, width: 140, padding: "5px 7px" }} />
                         <button type="button" onClick={() => delAcc(dip.id, i)} title="Rimuovi acconto" style={{ border: "none", background: "transparent", color: "#dc2626", cursor: "pointer", fontWeight: 700, fontSize: 16 }}>×</button>
@@ -1372,7 +1372,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                   </div>
                 </div>
 
-                <button type="button" onClick={() => salva(dip.id)} style={{ background: salvato[dip.id] ? "#16a34a" : "#5D29C7", color: "#fff", border: "none", borderRadius: 10, padding: "10px 16px", fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+                <button type="button" onClick={() => salva(dip.id)} className="dc-busta-salva" style={{ background: salvato[dip.id] ? "#16a34a" : "#5D29C7", color: "#fff", border: "none", borderRadius: 10, padding: "10px 16px", fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
                   {salvato[dip.id] ? "✓ Salvato" : "Salva"}
                 </button>
               </div>

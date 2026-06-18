@@ -986,3 +986,19 @@
     grid-template-columns: repeat(3, 1fr);
   }
 }
+
+/* ===== Buste Paga: card responsive (no scroll laterale su mobile) ===== */
+.dc-busta-row { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.dc-busta-user { min-width: 170px; }
+.dc-busta-field { display: flex; flex-direction: column; gap: 3px; }
+.dc-busta-acconti { flex: 1; min-width: 240px; }
+@media (max-width: 680px) {
+  .dc-busta-row { flex-direction: column; align-items: stretch; gap: 12px; }
+  .dc-busta-row > * { width: 100%; min-width: 0; }
+  .dc-busta-field input { width: 100% !important; box-sizing: border-box; }
+  .dc-busta-inputs { flex-wrap: wrap; width: 100%; }
+  .dc-busta-inputs > input { flex: 1 1 120px; min-width: 0; }
+  .dc-busta-acconto { width: 100%; box-sizing: border-box; }
+  .dc-busta-acconto input { flex: 1 1 90px; min-width: 0; }
+  .dc-busta-salva { width: 100%; }
+}
