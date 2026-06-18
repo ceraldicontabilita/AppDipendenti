@@ -214,6 +214,100 @@ async def delete_pagha(dipendente_id: str, anno: int, mese: int):
         {"dipendente_id": dipendente_id, "anno": int(anno), "mese": int(mese)})
     return {"ok": True, "eliminati": res.deleted_count}
 
+
+@router.post("/paghe/importa-excel-salari")
+async def importa_excel_salari(file: UploadFile = File(...)):
+    """Importa l'Excel 'prima nota salari' (colonne: DIPENDENTE, MESE, ANNO,
+    STIPENDIO NETTO, IMPORTO EROGATO). Il netto fissa il valore atteso della busta,
+    l'erogato il valore atteso del bonifico. I flag di riconciliazione partono a False
+    e diventano True quando arriva il PDF (busta o ricevuta bonifico) con importo che
+    combacia. I dipendenti non presenti in anagrafica vengono solo segnalati."""
+    import openpyxl
+    nome_file = (file.filename or "").lower()
+    if not nome_file.endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="Serve un file Excel (.xlsx)")
+
+    _MESI_IT = {"gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
+                "luglio": 7, "agosto": 8, "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12}
+
+    def _num(x):
+        if x in (None, ""):
+            return None
+        if isinstance(x, (int, float)):
+            return float(x)
+        try:
+            return float(str(x).strip().replace(".", "").replace(",", "."))
+        except Exception:
+            return None
+
+    data = await file.read()
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Excel non leggibile: {e}")
+    ws = wb.active
+
+    dips = await get_db().dipendenti.find({}, {"_id": 0}).to_list(1000)
+    anag = {}
+    for d in dips:
+        cg = (d.get("cognome") or "").upper().strip()
+        nm = (d.get("nome") or "").upper().strip()
+        if cg or nm:
+            anag[f"{cg} {nm}".strip()] = d   # Cognome Nome
+            anag[f"{nm} {cg}".strip()] = d   # Nome Cognome (ordine invertito)
+
+    try:
+        await get_db().paghe_mensili.create_index(
+            [("dipendente_id", 1), ("anno", 1), ("mese", 1)], unique=True, name="uniq_dip_anno_mese")
+    except Exception:
+        pass
+
+    anno_corrente = datetime.now(timezone.utc).year
+    importati, mesi_set = 0, set()
+    non_trovati, scartati = {}, []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or not row[0]:
+            continue
+        nome = str(row[0]).strip()
+        mese = _MESI_IT.get(str(row[1]).strip().lower()) if len(row) > 1 and row[1] else None
+        try:
+            anno = int(row[2]) if len(row) > 2 and row[2] else None
+        except Exception:
+            anno = None
+        netto = _num(row[3]) if len(row) > 3 else None
+        erogato = _num(row[4]) if len(row) > 4 else None
+
+        dip = anag.get(nome.upper())
+        if not dip:
+            non_trovati[nome] = non_trovati.get(nome, 0) + 1
+            continue
+        if not mese or not anno or anno < 2023 or anno > anno_corrente + 1:
+            scartati.append({"nome": nome, "motivo": f"periodo non valido ({row[1]} {row[2]})"})
+            continue
+
+        set_doc = {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
+                   "fonte_excel": True, "updated_at": now_iso()}
+        if netto is not None:
+            set_doc["importo_busta"] = netto
+            set_doc["netto_atteso"] = netto
+        if erogato is not None:
+            set_doc["bonifico_importo"] = erogato
+            set_doc["erogato_atteso"] = erogato
+        await get_db().paghe_mensili.update_one(
+            {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
+            {"$set": set_doc,
+             "$setOnInsert": {"busta_riconciliata": False, "bonifico_riconciliato": False}},
+            upsert=True)
+        importati += 1
+        mesi_set.add((anno, mese))
+
+    mesi = sorted([{"anno": y, "mese": m} for (y, m) in mesi_set], key=lambda x: (x["anno"], x["mese"]))
+    return {"importati": importati,
+            "mesi": mesi,
+            "dipendenti_non_in_anagrafica": [{"nome": k, "righe": v} for k, v in sorted(non_trovati.items())],
+            "scartati": scartati}
+
+
 # --- Import automatico Libro Unico (PDF) → divide per dipendente e memorizza i netti ---
 
 _CF_RE = re.compile(r'\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b')
@@ -311,14 +405,22 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
                 dac.append({"nome": info.get("nome"), "cf": cf, "netto": netto, "origine": origine,
                             "motivo": f"anno fuori intervallo: {mese}/{anno} (non salvato)"})
                 continue
+            # Riconciliazione: se il netto del PDF combacia con quello atteso (da Excel) → flag
+            esistente = await get_db().paghe_mensili.find_one(
+                {"dipendente_id": dip["id"], "anno": anno, "mese": mese}, {"netto_atteso": 1})
+            atteso = (esistente or {}).get("netto_atteso")
+            riconciliata = atteso is not None and abs(atteso - netto) <= 1
+            set_doc = {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
+                       "importo_busta": netto, "busta_da_lul": True, "updated_at": now_iso()}
+            if riconciliata:
+                set_doc["busta_riconciliata"] = True
             await get_db().paghe_mensili.update_one(
                 {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
-                {"$set": {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
-                          "importo_busta": netto, "busta_da_lul": True, "updated_at": now_iso()}},
-                upsert=True)
+                {"$set": set_doc}, upsert=True)
             ass.append({"dipendente_id": dip["id"],
                         "dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
-                        "netto": netto, "metodo": metodo, "mese": mese, "anno": anno})
+                        "netto": netto, "metodo": metodo, "mese": mese, "anno": anno,
+                        "riconciliata": riconciliata})
         return ass, dac
 
     associati, da_controllare, errori = [], [], []
