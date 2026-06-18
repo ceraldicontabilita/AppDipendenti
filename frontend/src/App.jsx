@@ -1339,11 +1339,22 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                     {importMsg.bonifici.map((b, i) => (
                       <span key={i}>
                         {b.dipendente}: € {eur(b.importo)} → {mesi[b.mese - 1]} {b.anno}
-                        {!b.competenza_esplicita ? " (competenza dedotta)" : ""}
+                        <span style={{ color: "#6b7669" }}> [{b.fonte}]</span>
                         <span style={{ color: "#234d3d", fontWeight: 700 }}> · ✓ riconciliato PDF</span>
                         {b.discrepanza != null && <span style={{ color: "#7d5526" }}> (Excel attendeva € {eur(b.discrepanza)})</span>}
                       </span>
                     ))}
+                  </div>
+                </div>
+              )}
+              {importMsg.tfr?.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4, color: "#56442d" }}>Anticipi TFR ({importMsg.tfr.length}) — fuori dal saldo stipendi</div>
+                  <div style={{ fontSize: 13, color: "#2a3329", display: "flex", flexDirection: "column", gap: 2 }}>
+                    {importMsg.tfr.map((t, i) => (
+                      <span key={i}>{t.dipendente}: € {eur(t.importo)} → {mesi[t.mese - 1]} {t.anno}</span>
+                    ))}
+                  </div>
                   </div>
                 </div>
               )}
