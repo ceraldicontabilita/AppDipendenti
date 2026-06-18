@@ -440,6 +440,7 @@ export default function PortaleDipendente() {
       <div className="pt-head">
         <h1>Portale Dipendenti</h1>
         <div className="sub">{localStorage.getItem("pt_name")}{isGestore?` · ${role==="admin"?"admin":"responsabile turni"}`:""}</div>
+        {role==="admin" && <button className="logout" style={{right:96,background:"#3f5a4e",color:"#fff"}} onClick={()=>{window.location.href="/dipendenti";}}><Settings size={13}/> Gestione</button>}
         <button className="logout" onClick={logout}><LogOut size={13}/> Esci</button>
       </div>
       <div className="pt-body">

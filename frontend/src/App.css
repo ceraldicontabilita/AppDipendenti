@@ -998,6 +998,44 @@ body, .dc-app, input, select, textarea, button { font-family: 'Plus Jakarta Sans
   .dc-giustificativo-grid {
     grid-template-columns: repeat(3, 1fr);
   }
+
+  /* Contenimento generale: niente sfondamento orizzontale della pagina */
+  .dc-content { padding: 12px; }
+  .dc-page { max-width: 100%; }
+  .dc-page-header { flex-direction: column; align-items: stretch; gap: 10px; }
+  .dc-page-actions { flex-wrap: wrap; }
+  .dc-page-actions > * { flex: 1 1 auto; min-width: 0; }
+  .dc-card { overflow-wrap: anywhere; }
+
+  /* Griglie calendario (presenze, turni, ferie): scroll orizzontale CONTENUTO */
+  .dc-scroll-x, .dc-presenze-grid-container {
+    max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  }
+
+  /* Tabelle-lista -> card impilate (una riga = una card) */
+  .dc-table--cards thead { display: none; }
+  .dc-table--cards, .dc-table--cards tbody, .dc-table--cards tr, .dc-table--cards td {
+    display: block; width: 100%; box-sizing: border-box;
+  }
+  .dc-table--cards tr {
+    background: #fff; border: 1px solid #e6e0d4; border-radius: 12px;
+    margin-bottom: 10px; padding: 10px 14px;
+  }
+  .dc-table--cards td {
+    border: none; padding: 5px 0; display: flex; justify-content: space-between;
+    align-items: center; gap: 12px; font-size: 0.9rem; text-align: right;
+  }
+  .dc-table--cards td::before {
+    content: attr(data-label); font-weight: 600; color: #6b7669;
+    font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em;
+    text-align: left; flex-shrink: 0;
+  }
+  .dc-table--cards td:first-child {
+    border-bottom: 1px solid #f0ece2; padding-bottom: 8px; margin-bottom: 4px;
+    text-align: left;
+  }
+  .dc-table--cards td:first-child::before { display: none; }
+  .dc-table--cards .dc-table-actions { justify-content: flex-end; }
 }
 
 /* ===== Buste Paga: card responsive (no scroll laterale su mobile) ===== */

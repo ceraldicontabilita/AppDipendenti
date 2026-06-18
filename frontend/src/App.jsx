@@ -420,7 +420,7 @@ function AnagraficaPage({ dipendenti, reload }) {
       </div>
 
       <div className="dc-card">
-        <table className="dc-table">
+        <table className="dc-table dc-table--cards">
           <thead>
             <tr>
               <th>DIPENDENTE</th>
@@ -442,10 +442,10 @@ function AnagraficaPage({ dipendenti, reload }) {
                     </div>
                   </div>
                 </td>
-                <td>{dip.ruolo || "-"}</td>
-                <td>{dip.contratto}</td>
-                <td><Badge variant={dip.stato === "attivo" ? "success" : "default"}>{dip.stato}</Badge></td>
-                <td className="dc-table-actions">
+                <td data-label="Ruolo">{dip.ruolo || "-"}</td>
+                <td data-label="Contratto">{dip.contratto}</td>
+                <td data-label="Stato"><Badge variant={dip.stato === "attivo" ? "success" : "default"}>{dip.stato}</Badge></td>
+                <td data-label="Azioni" className="dc-table-actions">
                   <button onClick={() => openModal(dip)} className="dc-btn-icon"><Edit2 size={16} /></button>
                   <button onClick={() => handleDelete(dip.id)} className="dc-btn-icon dc-btn-danger"><Trash2 size={16} /></button>
                 </td>
@@ -905,7 +905,7 @@ function FeriePage({ dipendenti, ferie, reload, getDipendente }) {
         </button>
       </div>
 
-      <div className="dc-card" style={{ overflowX: "auto", marginBottom: 16 }}>
+      <div className="dc-card dc-scroll-x" style={{ overflowX: "auto", marginBottom: 16 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
           <button onClick={() => setMese(new Date(mese.getFullYear(), mese.getMonth() - 1, 1))} className="dc-btn">‹</button>
           <strong style={{ textTransform: "capitalize", minWidth: 150, textAlign: "center" }}>{meseLabel}</strong>
@@ -948,7 +948,7 @@ function FeriePage({ dipendenti, ferie, reload, getDipendente }) {
       </div>
 
       <div className="dc-card">
-        <table className="dc-table">
+        <table className="dc-table dc-table--cards">
           <thead>
             <tr>
               <th>DIPENDENTE</th>
@@ -970,11 +970,11 @@ function FeriePage({ dipendenti, ferie, reload, getDipendente }) {
                       <span>{dip?.nome} {dip?.cognome}</span>
                     </div>
                   </td>
-                  <td>{f.tipo}</td>
-                  <td>{formatDate(f.data_inizio)} - {formatDate(f.data_fine)}</td>
-                  <td>{f.giorni}</td>
-                  <td><Badge variant={f.stato === 'approvata' ? 'success' : f.stato === 'rifiutata' ? 'danger' : 'warning'}>{f.stato}</Badge></td>
-                  <td className="dc-table-actions">
+                  <td data-label="Tipo">{f.tipo}</td>
+                  <td data-label="Periodo">{formatDate(f.data_inizio)} - {formatDate(f.data_fine)}</td>
+                  <td data-label="Giorni">{f.giorni}</td>
+                  <td data-label="Stato"><Badge variant={f.stato === 'approvata' ? 'success' : f.stato === 'rifiutata' ? 'danger' : 'warning'}>{f.stato}</Badge></td>
+                  <td data-label="Azioni" className="dc-table-actions">
                     {f.stato === 'in_attesa' && (
                       <>
                         <button onClick={() => handleApprova(f.id)} className="dc-btn-icon dc-btn-success"><Check size={16} /></button>
@@ -1164,7 +1164,7 @@ function TurniPage({ dipendenti, turni, reload }) {
         </button>
       </div>
 
-      <div className="dc-card">
+      <div className="dc-card dc-scroll-x">
         <table className="dc-table dc-turni-table">
           <thead>
             <tr>
@@ -1535,7 +1535,7 @@ function MissioniPage({ dipendenti, missioni, reload, getDipendente }) {
       </div>
 
       <div className="dc-card">
-        <table className="dc-table">
+        <table className="dc-table dc-table--cards">
           <thead>
             <tr>
               <th>DIPENDENTE</th>
@@ -1557,11 +1557,11 @@ function MissioniPage({ dipendenti, missioni, reload, getDipendente }) {
                       <span>{dip?.nome} {dip?.cognome}</span>
                     </div>
                   </td>
-                  <td>{m.destinazione}</td>
-                  <td>{formatDate(m.data_inizio)} - {formatDate(m.data_fine)}</td>
-                  <td>€ {m.rimborso?.toFixed(2)}</td>
-                  <td><Badge variant={m.stato === 'approvata' ? 'success' : 'warning'}>{m.stato}</Badge></td>
-                  <td className="dc-table-actions">
+                  <td data-label="Destinazione">{m.destinazione}</td>
+                  <td data-label="Periodo">{formatDate(m.data_inizio)} - {formatDate(m.data_fine)}</td>
+                  <td data-label="Rimborso">€ {m.rimborso?.toFixed(2)}</td>
+                  <td data-label="Stato"><Badge variant={m.stato === 'approvata' ? 'success' : 'warning'}>{m.stato}</Badge></td>
+                  <td data-label="Azioni" className="dc-table-actions">
                     {m.stato === 'in_attesa' && (
                       <button onClick={() => handleApprova(m.id)} className="dc-btn-icon dc-btn-success"><Check size={16} /></button>
                     )}

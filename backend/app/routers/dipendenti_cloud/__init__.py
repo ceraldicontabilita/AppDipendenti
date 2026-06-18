@@ -481,26 +481,6 @@ async def _importa_documenti(pdf_items, errori_iniziali=None):
         a, m = finestra[0]
         return m, a, "mese precedente (dedotta)"
 
-    async def _ricalcola_saldo_prestiti(dip_id):
-        """Riporto continuo: somma i prestiti del dipendente in ordine cronologico e
-        aggiorna ogni mese con erogato del mese e saldo cumulativo. Ritorna il saldo totale."""
-        movs = await get_db().prestiti_dipendenti.find({"dipendente_id": dip_id}).to_list(1000)
-        erog = {}
-        for mv in movs:
-            k = (mv["anno"], mv["mese"])
-            erog[k] = erog.get(k, 0) + (mv.get("importo") or 0)
-        saldo = 0
-        for (a, m) in sorted(erog.keys()):
-            saldo += erog[(a, m)]
-            await get_db().paghe_mensili.update_one(
-                {"dipendente_id": dip_id, "anno": a, "mese": m},
-                {"$set": {"dipendente_id": dip_id, "anno": a, "mese": m,
-                          "prestito_importo": erog[(a, m)], "prestito_saldo": saldo,
-                          "updated_at": now_iso()},
-                 "$setOnInsert": {"busta_riconciliata": False, "bonifico_riconciliato": False}},
-                upsert=True)
-        return saldo
-
     async def _processa_pdf(pdfbytes, origine):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(pdfbytes)
@@ -704,6 +684,60 @@ async def _importa_documenti(pdf_items, errori_iniziali=None):
             "totale_associati": len(associati), "file_pdf": file_pdf,
             "mesi": mesi, "errori": errori,
             "bonifici": bonifici, "presenze": presenze, "duplicati": duplicati, "tfr": tfr_list, "prestiti": prestiti_list}
+
+
+async def _ricalcola_saldo_prestiti(dip_id):
+    """Riporto continuo: azzera i campi prestito da tutti i mesi del dipendente, poi somma
+    i movimenti in ordine cronologico riscrivendo erogato del mese e saldo cumulativo.
+    Ritorna il saldo totale corrente."""
+    await get_db().paghe_mensili.update_many(
+        {"dipendente_id": dip_id},
+        {"$unset": {"prestito_importo": "", "prestito_saldo": ""}})
+    movs = await get_db().prestiti_dipendenti.find({"dipendente_id": dip_id}).to_list(2000)
+    erog = {}
+    for mv in movs:
+        k = (mv["anno"], mv["mese"])
+        erog[k] = erog.get(k, 0) + (mv.get("importo") or 0)
+    saldo = 0
+    for (a, m) in sorted(erog.keys()):
+        saldo += erog[(a, m)]
+        await get_db().paghe_mensili.update_one(
+            {"dipendente_id": dip_id, "anno": a, "mese": m},
+            {"$set": {"dipendente_id": dip_id, "anno": a, "mese": m,
+                      "prestito_importo": erog[(a, m)], "prestito_saldo": saldo,
+                      "updated_at": now_iso()},
+             "$setOnInsert": {"busta_riconciliata": False, "bonifico_riconciliato": False}},
+            upsert=True)
+    return saldo
+
+
+@router.get("/prestiti")
+async def lista_prestiti(dipendente_id: Optional[str] = None):
+    """Mastrino prestiti: movimenti con saldo progressivo. Filtrabile per dipendente."""
+    q = {"dipendente_id": dipendente_id} if dipendente_id else {}
+    movs = await get_db().prestiti_dipendenti.find(q, {"_id": 0}).to_list(2000)
+    movs.sort(key=lambda x: (x.get("anno", 0), x.get("mese", 0), x.get("data") or ""))
+    # saldo progressivo per dipendente
+    saldi = {}
+    for mv in movs:
+        d = mv["dipendente_id"]
+        saldi[d] = saldi.get(d, 0) + (mv.get("importo") or 0)
+        mv["saldo"] = saldi[d]
+    return movs
+
+
+@router.delete("/prestiti/{prestito_id}")
+async def elimina_prestito(prestito_id: str):
+    """Elimina un movimento di prestito e ricalcola il saldo progressivo del dipendente."""
+    mv = await get_db().prestiti_dipendenti.find_one({"id": prestito_id})
+    if not mv:
+        raise HTTPException(status_code=404, detail="Prestito non trovato")
+    await get_db().prestiti_dipendenti.delete_one({"id": prestito_id})
+    # libera anche l'anti-dup così un eventuale re-import è possibile
+    if mv.get("cro"):
+        await get_db().documenti_importati.delete_many({"chiave": f"cro:{mv['cro']}"})
+    saldo = await _ricalcola_saldo_prestiti(mv["dipendente_id"])
+    return {"ok": True, "saldo_aggiornato": saldo}
 
 
 def _espandi_in_pdf(nome, data):
