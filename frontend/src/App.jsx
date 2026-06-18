@@ -1236,6 +1236,11 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
       bonifico_importo: p.bonifico_importo ?? "",
       bonifico_data: p.bonifico_data ?? "",
       acconti: (p.acconti || []).map(a => ({ importo: a.importo ?? "", data: a.data ?? "" })),
+      busta_riconciliata: !!p.busta_riconciliata,
+      bonifico_riconciliato: !!p.bonifico_riconciliato,
+      bonifico_pdf: p.bonifico_pdf || "",
+      bonifico_causale: p.bonifico_causale || "",
+      busta_da_lul: !!p.busta_da_lul,
     }; });
     setRighe(map);
   };
@@ -1315,7 +1320,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
           ) : (
             <div>
               <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                ✓ Importati {importMsg.file_pdf} cedolini · {importMsg.totale_associati} buste memorizzate
+                ✓ Elaborati {importMsg.file_pdf} documenti · {importMsg.totale_associati} buste{importMsg.bonifici?.length ? ` · ${importMsg.bonifici.length} bonifici` : ""}{importMsg.presenze?.length ? ` · ${importMsg.presenze.length} presenze` : ""}
               </div>
               {importMsg.mesi?.length > 0 && (
                 <div style={{ fontSize: 13, marginBottom: 6, color: "#2a3329" }}>
@@ -1327,6 +1332,27 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                   <span key={i}>{a.dipendente}: € {eur(a.netto)}{importMsg.mesi?.length > 1 ? ` (${a.mese}/${a.anno})` : ""}{a.metodo !== "codice fiscale" ? " ⚠" : ""}</span>
                 ))}
               </div>
+              {importMsg.bonifici?.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4, color: "#234d3d" }}>Bonifici associati ({importMsg.bonifici.length})</div>
+                  <div style={{ fontSize: 13, color: "#2a3329", display: "flex", flexDirection: "column", gap: 2 }}>
+                    {importMsg.bonifici.map((b, i) => (
+                      <span key={i}>
+                        {b.dipendente}: € {eur(b.importo)} → {mesi[b.mese - 1]} {b.anno}
+                        {!b.competenza_esplicita ? " (competenza dedotta)" : ""}
+                        {b.riconciliato
+                          ? <span style={{ color: "#234d3d", fontWeight: 700 }}> · ✓ riconciliato</span>
+                          : <span style={{ color: "#7d5526" }}> · associato (no match Excel)</span>}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {importMsg.presenze?.length > 0 && (
+                <div style={{ marginTop: 8, fontSize: 13, color: "#56442d" }}>
+                  Fogli presenze riconosciuti (non sono buste): {importMsg.presenze.map(p => `${p.dipendente}${p.mese ? ` ${mesi[p.mese - 1]} ${p.anno}` : ""}`).join("; ")}
+                </div>
+              )}
               {importMsg.da_controllare?.length > 0 && (
                 <div style={{ marginTop: 8, fontSize: 13, color: "#7d5526" }}>
                   Da controllare: {importMsg.da_controllare.map(x => `${x.nome || x.cf} (${x.motivo})`).join("; ")}
@@ -1363,12 +1389,20 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                 </div>
 
                 <div className="dc-busta-field">
-                  <label style={{ fontSize: 11, color: "#6b7669", fontWeight: 600 }}>IMPORTO BUSTA €</label>
+                  <label style={{ fontSize: 11, color: "#6b7669", fontWeight: 600, display: "flex", gap: 6, alignItems: "center" }}>
+                    IMPORTO BUSTA €
+                    {d.busta_riconciliata && <span style={{ background: "#e2efe8", color: "#234d3d", border: "1px solid #c2ddd0", borderRadius: 6, padding: "1px 6px", fontSize: 10, fontWeight: 700 }}>✓ riconciliata PDF</span>}
+                  </label>
                   <input type="number" step="0.01" value={d.importo_busta} onChange={e => upd(dip.id, { importo_busta: e.target.value })} placeholder="0,00" style={{ ...inp, width: 120 }} />
                 </div>
 
                 <div className="dc-busta-field">
-                  <label style={{ fontSize: 11, color: "#6b7669", fontWeight: 600 }}>BONIFICO</label>
+                  <label style={{ fontSize: 11, color: "#6b7669", fontWeight: 600, display: "flex", gap: 6, alignItems: "center" }}>
+                    BONIFICO
+                    {d.bonifico_riconciliato
+                      ? <span title={d.bonifico_causale} style={{ background: "#e2efe8", color: "#234d3d", border: "1px solid #c2ddd0", borderRadius: 6, padding: "1px 6px", fontSize: 10, fontWeight: 700 }}>✓ riconciliato PDF</span>
+                      : (d.bonifico_pdf ? <span title={d.bonifico_causale} style={{ background: "#f3ead9", color: "#56442d", border: "1px solid #e7d6b9", borderRadius: 6, padding: "1px 6px", fontSize: 10, fontWeight: 700 }}>PDF allegato</span> : null)}
+                  </label>
                   <div className="dc-busta-inputs" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap" }}>
                       <input type="checkbox" checked={d.bonifico_ricevuto} onChange={e => upd(dip.id, { bonifico_ricevuto: e.target.checked })} />
