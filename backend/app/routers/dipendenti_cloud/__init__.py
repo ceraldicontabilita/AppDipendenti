@@ -480,19 +480,19 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
                     esist = await get_db().paghe_mensili.find_one(
                         {"dipendente_id": dip["id"], "anno": anno, "mese": mese}, {"erogato_atteso": 1})
                     atteso = (esist or {}).get("erogato_atteso")
-                    riconc = atteso is not None and abs(atteso - b["importo"]) <= 1
+                    discrep = atteso if (atteso is not None and abs(atteso - b["importo"]) > 1) else None
                     set_doc = {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
                                "bonifico_importo": b["importo"], "bonifico_data": b.get("data"),
                                "bonifico_ricevuto": True, "bonifico_causale": b.get("causale"),
                                "bonifico_cro": b.get("cro"), "bonifico_pdf": origine,
-                               "bonifico_riconciliato": bool(riconc), "updated_at": now_iso()}
+                               "bonifico_riconciliato": True, "updated_at": now_iso()}
                     await get_db().paghe_mensili.update_one(
                         {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
                         {"$set": set_doc, "$setOnInsert": {"busta_riconciliata": False}}, upsert=True)
                     bon.append({"dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
                                 "importo": b["importo"], "mese": mese, "anno": anno,
                                 "causale": b.get("causale"), "data": b.get("data"),
-                                "riconciliato": bool(riconc),
+                                "riconciliato": True, "discrepanza": discrep,
                                 "competenza_esplicita": b.get("competenza_esplicita")})
                 return ass, dac, bon, pres
 
@@ -530,18 +530,17 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
                 esistente = await get_db().paghe_mensili.find_one(
                     {"dipendente_id": dip["id"], "anno": anno, "mese": mese}, {"netto_atteso": 1})
                 atteso = (esistente or {}).get("netto_atteso")
-                riconciliata = atteso is not None and abs(atteso - netto) <= 1
+                discrep = atteso if (atteso is not None and abs(atteso - netto) > 1) else None
                 set_doc = {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
-                           "importo_busta": netto, "busta_da_lul": True, "updated_at": now_iso()}
-                if riconciliata:
-                    set_doc["busta_riconciliata"] = True
+                           "importo_busta": netto, "busta_da_lul": True,
+                           "busta_riconciliata": True, "updated_at": now_iso()}
                 await get_db().paghe_mensili.update_one(
                     {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
                     {"$set": set_doc}, upsert=True)
                 ass.append({"dipendente_id": dip["id"],
                             "dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
                             "netto": netto, "metodo": metodo, "mese": mese, "anno": anno,
-                            "riconciliata": riconciliata})
+                            "riconciliata": True, "discrepanza": discrep})
         finally:
             try:
                 os.unlink(path)

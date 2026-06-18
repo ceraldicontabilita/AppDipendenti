@@ -1340,9 +1340,8 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                       <span key={i}>
                         {b.dipendente}: € {eur(b.importo)} → {mesi[b.mese - 1]} {b.anno}
                         {!b.competenza_esplicita ? " (competenza dedotta)" : ""}
-                        {b.riconciliato
-                          ? <span style={{ color: "#234d3d", fontWeight: 700 }}> · ✓ riconciliato</span>
-                          : <span style={{ color: "#7d5526" }}> · associato (no match Excel)</span>}
+                        <span style={{ color: "#234d3d", fontWeight: 700 }}> · ✓ riconciliato PDF</span>
+                        {b.discrepanza != null && <span style={{ color: "#7d5526" }}> (Excel attendeva € {eur(b.discrepanza)})</span>}
                       </span>
                     ))}
                   </div>
