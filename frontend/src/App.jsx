@@ -1060,8 +1060,19 @@ function TurniPage({ dipendenti, turni, reload }) {
   const BASE_BAR = new Date(2026, 5, 15);
   const settimanaPari = ((Math.round((lunedi - BASE_BAR) / (7 * 86400000)) % 2) + 2) % 2 === 0;
   const [barChiusoDomPom, setBarChiusoDomPom] = useState(true);
-  useEffect(() => { axios.get(`${API}/impostazioni-turni`).then(r => setBarChiusoDomPom(r.data?.bar_chiuso_domenica_pomeriggio !== false)).catch(() => {}); }, []);
-  const salvaImpostazione = (v) => { setBarChiusoDomPom(v); axios.post(`${API}/impostazioni-turni`, { bar_chiuso_domenica_pomeriggio: v }).catch(() => {}); };
+  const [periodoInizio, setPeriodoInizio] = useState("2026-06-01");
+  const [periodoFine, setPeriodoFine] = useState("2026-08-31");
+  useEffect(() => { axios.get(`${API}/impostazioni-turni`).then(r => {
+    setBarChiusoDomPom(r.data?.bar_chiuso_domenica_pomeriggio !== false);
+    if (r.data?.periodo_inizio) setPeriodoInizio(r.data.periodo_inizio);
+    if (r.data?.periodo_fine) setPeriodoFine(r.data.periodo_fine);
+  }).catch(() => {}); }, []);
+  const salvaImpostazione = (patch) => {
+    const next = { bar_chiuso_domenica_pomeriggio: barChiusoDomPom, periodo_inizio: periodoInizio, periodo_fine: periodoFine, ...patch };
+    setBarChiusoDomPom(next.bar_chiuso_domenica_pomeriggio);
+    setPeriodoInizio(next.periodo_inizio); setPeriodoFine(next.periodo_fine);
+    axios.post(`${API}/impostazioni-turni`, next).catch(() => {});
+  };
 
   const caricaSettimana = (s) => axios.get(`${API}/assegnazioni-turni?settimana=${s}`).then(res => setAssegnazioni(res.data || [])).catch(() => {});
   useEffect(() => { caricaSettimana(settimana); }, [settimana]);
@@ -1125,22 +1136,32 @@ function TurniPage({ dipendenti, turni, reload }) {
       const row = BASE[(dip.nome || "").trim().toLowerCase()];
       if (row) row.forEach((nome, gi) => updates.push({ dipendente_id: dip.id, giorno: giorni[gi], turno_id: idTurno(nome) || null }));
     });
-    // Bar: due gruppi. Capezzuto+Vespa coprono la domenica (solo mattina, perché il
-    // pomeriggio è chiuso) e riposano un giorno feriale (lunedì). Parisi+Moscato
-    // riposano la domenica; nei feriali alternano mattina/pomeriggio settimana per settimana.
-    const ferB1 = settimanaPari ? "Bar 6:30-15" : "Bar 15-21";
-    const ferB2 = settimanaPari ? "Bar 15-21" : "Bar 6:30-15";
-    const assegnaRiga = (cognomi, riga) => {
+    // --- Gruppi bar ---
+    // Capezzuto+Vespa e Parisi+Moscato si alternano mattina/pomeriggio settimana per settimana.
+    // Ciascuno ha 1 giorno di riposo feriale a testa (giorni diversi, così il bar resta coperto).
+    // Capezzuto+Vespa lavorano la domenica (mattina); Parisi+Moscato riposano la domenica.
+    // Domenica solo mattina unicamente se la spunta è attiva E la domenica cade nel periodo impostato.
+    const mattinaT = "Bar 6:30-15", pomT = "Bar 15-21";
+    const ferB1 = settimanaPari ? mattinaT : pomT;   // Capezzuto+Vespa
+    const ferB2 = settimanaPari ? pomT : mattinaT;   // Parisi+Moscato
+    const domData = new Date(lunedi); domData.setDate(domData.getDate() + 6);
+    const domISO = `${domData.getFullYear()}-${String(domData.getMonth() + 1).padStart(2, "0")}-${String(domData.getDate()).padStart(2, "0")}`;
+    const inPeriodo = (!periodoInizio || !periodoFine) ? true : (domISO >= periodoInizio && domISO <= periodoFine);
+    const domCapVespa = (barChiusoDomPom && inPeriodo) ? mattinaT : ferB1;   // domenica: solo mattina nel periodo
+    // riposo feriale individuale per cognome (0=Lun … 5=Sab): giorni diversi
+    const riposoGiorno = { capezzuto: 0, vespa: 1, parisi: 2, moscato: 3 };
+    const assegnaPersona = (cognomi, turnoFeriale, turnoDomenica) => {
       dipendenti.filter(d => cognomi.some(c => (d.cognome || "").toLowerCase().includes(c))).forEach(dip => {
-        riga.forEach((nome, gi) => updates.push({ dipendente_id: dip.id, giorno: giorni[gi], turno_id: idTurno(nome) || null }));
+        const key = Object.keys(riposoGiorno).find(c => (dip.cognome || "").toLowerCase().includes(c));
+        const rday = key != null ? riposoGiorno[key] : -1;
+        for (let gi = 0; gi < 7; gi++) {
+          const nome = gi === 6 ? turnoDomenica : (gi === rday ? "Riposo" : turnoFeriale);
+          updates.push({ dipendente_id: dip.id, giorno: giorni[gi], turno_id: idTurno(nome) || null });
+        }
       });
     };
-    // indici: 0=Lun … 5=Sab … 6=Dom
-    const domB1 = barChiusoDomPom ? "Bar 6:30-15" : ferB1;          // domenica: solo mattina se pomeriggio chiuso
-    const rigaB1 = ["Riposo", ferB1, ferB1, ferB1, ferB1, ferB1, domB1];   // Capezzuto+Vespa
-    const rigaB2 = [ferB2, ferB2, ferB2, ferB2, ferB2, ferB2, "Riposo"];   // Parisi+Moscato
-    assegnaRiga(["vespa", "capezzuto"], rigaB1);
-    assegnaRiga(["parisi", "moscato"], rigaB2);
+    assegnaPersona(["vespa", "capezzuto"], ferB1, domCapVespa);   // lavorano domenica (mattina)
+    assegnaPersona(["parisi", "moscato"], ferB2, "Riposo");        // riposo domenica
     if (updates.length) await salva(updates);
   };
 
@@ -1173,9 +1194,15 @@ function TurniPage({ dipendenti, turni, reload }) {
         <button onClick={() => setLunedi(d => { const n = new Date(d); n.setDate(d.getDate() + 7); return n; })} className="dc-btn">›</button>
         <button onClick={() => setLunedi(lunOggi)} className="dc-btn" style={{ fontSize: 12 }}>Oggi</button>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#3b4a40", cursor: "pointer" }}>
-          <input type="checkbox" checked={barChiusoDomPom} onChange={(e) => salvaImpostazione(e.target.checked)} />
+          <input type="checkbox" checked={barChiusoDomPom} onChange={(e) => salvaImpostazione({ bar_chiuso_domenica_pomeriggio: e.target.checked })} />
           Bar chiuso la domenica pomeriggio
         </label>
+        {barChiusoDomPom && (
+          <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "#3b4a40" }}>
+            dal <input type="date" value={periodoInizio} onChange={(e) => salvaImpostazione({ periodo_inizio: e.target.value })} style={{ border: "1px solid #cdd8d0", borderRadius: 6, padding: "3px 6px", fontSize: 12 }} />
+            al <input type="date" value={periodoFine} onChange={(e) => salvaImpostazione({ periodo_fine: e.target.value })} style={{ border: "1px solid #cdd8d0", borderRadius: 6, padding: "3px 6px", fontSize: 12 }} />
+          </span>
+        )}
         <button onClick={generaProduzione} disabled={busy}
           style={{ marginLeft: "auto", background: "#5b7a6b", color: "#fff", border: "none", padding: "10px 18px", borderRadius: 10, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
           {busy ? "Attendi…" : "Genera settimana"}
