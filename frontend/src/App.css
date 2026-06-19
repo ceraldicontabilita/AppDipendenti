@@ -811,6 +811,15 @@ body, .dc-app, input, select, textarea, button { font-family: 'Plus Jakarta Sans
   padding: 0.5rem;
 }
 
+/* La griglia turni resta leggibile su smartphone/tablet: larghezza minima così
+   il wrapper .dc-scroll-x attiva lo scroll orizzontale invece di comprimere le
+   colonne; intestazioni e celle su una sola riga (niente testo verticale). */
+.dc-turni-table { min-width: 640px; }
+.dc-turni-table th, .dc-turni-table td { white-space: nowrap; overflow-wrap: normal; word-break: keep-all; }
+.dc-turni-table thead th { padding: 8px 10px; text-align: center; font-size: .72rem; }
+.dc-turni-table thead th:nth-child(2) { text-align: left; min-width: 120px; }
+.dc-turni-table thead th:nth-child(n+3) { min-width: 80px; }
+
 .dc-turno-select {
   width: 100%;
   padding: 0.375rem;
