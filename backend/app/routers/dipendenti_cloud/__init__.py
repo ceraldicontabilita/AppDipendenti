@@ -754,6 +754,67 @@ async def diagnostica_unificazione():
     }
 
 
+_RICON_FIELDS = ["bonifico_importo", "bonifico_data", "bonifico_ricevuto", "bonifico_causale",
+                 "bonifico_cro", "bonifico_pdf", "bonifico_riconciliato", "busta_riconciliata",
+                 "busta_da_lul", "acconti", "netto_atteso", "erogato_atteso", "fonte_excel",
+                 "tfr_anticipo_importo", "tfr_anticipo_data", "tfr_anticipo_pdf",
+                 "prestito_importo", "prestito_saldo"]
+
+
+@router.post("/_unif_esegui")
+async def esegui_unificazione(dry_run: bool = True):
+    """Unifica paghe_mensili dentro cedolini (fonte unica). NON tocca netto/lordo dei cedolini
+    esistenti (dato ufficiale): aggiunge solo i campi di riconciliazione. Per i record presenti
+    solo in paghe_mensili crea il cedolino mancante (netto = importo_busta). Idempotente.
+    Con dry_run=True (default) NON scrive nulla, riporta solo cosa farebbe. NON cancella
+    paghe_mensili (la rimozione è un passo separato dopo verifica."""
+    db = get_db()
+    dips = await db.dipendenti.find({}, {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "nome_completo": 1}).to_list(1000)
+    nome_di = {}
+    for d in dips:
+        nome_di[d.get("id")] = d.get("nome_completo") or f"{d.get('cognome','')} {d.get('nome','')}".strip()
+    ced = await db.cedolini.find({}, {"_id": 0, "id": 1, "dipendente_id": 1, "anno": 1, "mese": 1}).to_list(5000)
+    ced_idx = {}
+    for c in ced:
+        ced_idx.setdefault((c.get("dipendente_id"), c.get("anno"), c.get("mese")), c)
+    pm = await db.paghe_mensili.find({}, {"_id": 0}).to_list(5000)
+
+    arricchiti, creati, saltati = 0, 0, 0
+    note = []
+    for p in pm:
+        k = (p.get("dipendente_id"), p.get("anno"), p.get("mese"))
+        ricon = {f: p[f] for f in _RICON_FIELDS if f in p and p[f] is not None}
+        c = ced_idx.get(k)
+        if c:
+            if ricon and not dry_run:
+                await db.cedolini.update_one({"id": c["id"]}, {"$set": ricon})
+            if ricon:
+                arricchiti += 1
+        else:
+            netto = p.get("importo_busta")
+            if netto is None:
+                netto = p.get("netto_atteso")
+            if not netto or float(netto) <= 0:
+                saltati += 1
+                note.append(f"saltato (netto assente): {p.get('anno')}/{p.get('mese')} {str(p.get('dipendente_id'))[:8]}")
+                continue
+            if not dry_run:
+                nuovo = {"id": str(uuid.uuid4()), "dipendente_id": p.get("dipendente_id"),
+                         "dipendente_nome": nome_di.get(p.get("dipendente_id"), ""),
+                         "anno": p.get("anno"), "mese": p.get("mese"),
+                         "netto": float(netto), "stato": "importato",
+                         "origine_unificazione": True, "created_at": now_iso()}
+                nuovo.update(ricon)
+                await db.cedolini.insert_one(nuovo)
+            creati += 1
+    return {"dry_run": dry_run,
+            "cedolini_arricchiti_con_riconciliazione": arricchiti,
+            "cedolini_creati_dai_solo_paghe": creati,
+            "saltati_netto_assente": saltati,
+            "note": note[:40],
+            "messaggio": "DRY RUN: nessuna scrittura." if dry_run else "Migrazione eseguita. paghe_mensili NON ancora rimossa."}
+
+
 @router.get("/prestiti")
 async def lista_prestiti(dipendente_id: Optional[str] = None):
     """Mastrino prestiti: movimenti con saldo progressivo. Filtrabile per dipendente."""
