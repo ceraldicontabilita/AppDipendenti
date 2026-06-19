@@ -321,6 +321,20 @@ def _lul_netto(text):
     m = re.findall(r'([\d]{1,3}(?:\.\d{3})*,\d{2})\s*€', text)
     return m[-1] if m else None
 
+def _lul_acconto(text):
+    """Rileva acconti/anticipi erogati durante il mese e trattenuti nel cedolino
+    (righe con 'acconto', 'anticipo', 'rec. acconto', escluso il TFR). Serve a sapere
+    quanto è già stato dato, così il bonifico del solo saldo chiude comunque la busta.
+    Ritorna l'importo totale o None."""
+    tot = 0.0
+    for line in text.split("\n"):
+        low = line.lower()
+        if ("acconto" in low or "anticipo" in low) and "tfr" not in low and "trattamento fine" not in low:
+            nums = re.findall(r'([\d]{1,3}(?:\.\d{3})*,\d{2})', line)
+            if nums:
+                tot += _to_float(nums[-1]) or 0
+    return round(tot, 2) if tot > 0 else None
+
 def _lul_periodo(text):
     m = re.search(r'(Gennaio|Febbraio|Marzo|Aprile|Maggio|Giugno|Luglio|Agosto|Settembre|Ottobre|Novembre|Dicembre)\s+(\d{4})', text, re.I)
     if m:
@@ -351,6 +365,9 @@ def _parse_lul(pdf_path):
                 n = _lul_netto(t)
                 if n:
                     ced[cur]["netto"] = n
+                acc = _lul_acconto(t)
+                if acc:
+                    ced[cur]["acconto"] = round((ced[cur].get("acconto") or 0) + acc, 2)
                 if not ced[cur].get("mese") and mese:
                     ced[cur]["mese"], ced[cur]["anno"] = mese, anno
     return ced
@@ -475,9 +492,15 @@ async def _importa_documenti(pdf_items, errori_iniziali=None):
             if busta:
                 if abs(busta - b["importo"]) <= 1:
                     return m, a, "importo (= busta)"
-                gia = rec.get("bonifico_importo") or 0
+                # acconto già dato nel mese (rilevato nel cedolino o bonifico precedente):
+                # acconto + questo bonifico = busta  ->  saldo che chiude la busta
+                gia = (rec.get("bonifico_importo") or 0) + (rec.get("acconto_cedolino") or 0)
                 if abs((gia + b["importo"]) - busta) <= 1:
                     return m, a, "importo (acconto+saldo = busta)"
+                # il bonifico copre esattamente il saldo residuo dopo l'acconto
+                residuo = rec.get("saldo_residuo")
+                if residuo and abs(residuo - b["importo"]) <= 1:
+                    return m, a, "importo (= saldo dopo acconto)"
         a, m = finestra[0]
         return m, a, "mese precedente (dedotta)"
 
@@ -637,16 +660,21 @@ async def _importa_documenti(pdf_items, errori_iniziali=None):
                     {"dipendente_id": dip["id"], "anno": anno, "mese": mese}, {"netto_atteso": 1})
                 atteso = (esistente or {}).get("netto_atteso")
                 discrep = atteso if (atteso is not None and abs(atteso - netto) > 1) else None
+                acconto = info.get("acconto")
                 set_doc = {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
                            "importo_busta": netto, "busta_da_lul": True,
                            "busta_riconciliata": True, "updated_at": now_iso()}
+                if acconto and acconto > 0:
+                    set_doc["acconto_cedolino"] = acconto
+                    set_doc["saldo_residuo"] = round(netto - acconto, 2)
                 await get_db().paghe_mensili.update_one(
                     {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
                     {"$set": set_doc}, upsert=True)
                 ass.append({"dipendente_id": dip["id"],
                             "dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
                             "netto": netto, "metodo": metodo, "mese": mese, "anno": anno,
-                            "riconciliata": True, "discrepanza": discrep})
+                            "riconciliata": True, "discrepanza": discrep,
+                            "acconto": acconto, "saldo_residuo": (round(netto - acconto, 2) if acconto else None)})
             if ass:
                 await _registra_doc(h, "cedolino", f"file:{origine}", origine)
         finally:
@@ -756,9 +784,9 @@ async def diagnostica_unificazione():
 
 _RICON_FIELDS = ["bonifico_importo", "bonifico_data", "bonifico_ricevuto", "bonifico_causale",
                  "bonifico_cro", "bonifico_pdf", "bonifico_riconciliato", "busta_riconciliata",
-                 "busta_da_lul", "acconti", "netto_atteso", "erogato_atteso", "fonte_excel",
-                 "tfr_anticipo_importo", "tfr_anticipo_data", "tfr_anticipo_pdf",
-                 "prestito_importo", "prestito_saldo"]
+                 "busta_da_lul", "acconti", "acconto_cedolino", "saldo_residuo", "netto_atteso",
+                 "erogato_atteso", "fonte_excel", "tfr_anticipo_importo", "tfr_anticipo_data",
+                 "tfr_anticipo_pdf", "prestito_importo", "prestito_saldo"]
 
 
 @router.post("/_unif_esegui")

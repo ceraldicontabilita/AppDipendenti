@@ -1244,6 +1244,8 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
       prestito_importo: p.prestito_importo ?? "",
       prestito_saldo: p.prestito_saldo ?? "",
       tfr_anticipo_importo: p.tfr_anticipo_importo ?? "",
+      acconto_cedolino: p.acconto_cedolino ?? "",
+      saldo_residuo: p.saldo_residuo ?? "",
     }; });
     setRighe(map);
   };
@@ -1481,9 +1483,13 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                   {salvato[dip.id] ? "✓ Salvato" : "Salva"}
                 </button>
               </div>
-              {(d.prestito_importo !== "" || d.tfr_anticipo_importo !== "") && (
+              {(d.prestito_importo !== "" || d.tfr_anticipo_importo !== "" || d.acconto_cedolino !== "") && (
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8, paddingTop: 8, borderTop: "1px dashed #e6e0d4" }}>
-                  {d.prestito_importo !== "" && (
+                  {d.acconto_cedolino !== "" && (
+                    <span style={{ background: "#e8efe9", color: "#2a4d3a", border: "1px solid #cfe0d4", borderRadius: 8, padding: "3px 10px", fontSize: 12, fontWeight: 700 }}>
+                      Acconto dal cedolino: € {eur(d.acconto_cedolino)}{d.saldo_residuo !== "" ? ` · saldo da pagare € ${eur(d.saldo_residuo)}` : ""}
+                    </span>
+                  )}
                     <span style={{ background: "#efe9f6", color: "#6a4a86", border: "1px solid #ddd0ec", borderRadius: 8, padding: "3px 10px", fontSize: 12, fontWeight: 700 }}>
                       Prestito {mesi[mese - 1]}: € {eur(d.prestito_importo)} · saldo € {eur(d.prestito_saldo)}
                     </span>
