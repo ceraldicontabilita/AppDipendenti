@@ -448,7 +448,7 @@ def _parse_bonifico(text):
             "mese_causale": mese_c, "anno_causale": anno_c, "esplicita": esplicita, "is_tfr": is_tfr}
 
 
-async def _importa_documenti(pdf_items, errori_iniziali=None):
+async def _importa_documenti(pdf_items, errori_iniziali=None, forza=False):
     """Pipeline condivisa: riceve una lista di (origine, pdf_bytes) già espansi (da upload
     file o da posta elettronica), li classifica e li importa in paghe_mensili / prestiti.
     L'anti-duplicazione per hash evita di re-importare gli stessi documenti."""
@@ -530,7 +530,7 @@ async def _importa_documenti(pdf_items, errori_iniziali=None):
         # Anti-duplicazione 1: stesso file già importato (impronta del contenuto)
         h = hashlib.sha256(pdfbytes).hexdigest()
         try:
-            if await get_db().documenti_importati.find_one({"hash": h}):
+            if not forza and await get_db().documenti_importati.find_one({"hash": h}):
                 dup.append({"file": origine, "motivo": "documento già importato (stesso file)"})
                 try: os.unlink(path)
                 except Exception: pass
@@ -927,7 +927,7 @@ def _espandi_in_pdf(nome, data):
 
 
 @router.post("/paghe/importa-lul")
-async def importa_libro_unico(files: List[UploadFile] = File(...)):
+async def importa_libro_unico(files: List[UploadFile] = File(...), forza: bool = False):
     """Importa uno o più PDF (anche dentro ZIP) caricati dall'utente: buste paga,
     fogli presenze, bonifici (acconti, saldi, TFR, prestiti). Vedi _importa_documenti."""
     pdf_items, errori = [], []
@@ -944,7 +944,7 @@ async def importa_libro_unico(files: List[UploadFile] = File(...)):
     if not pdf_items:
         raise HTTPException(status_code=400,
             detail="Nessun PDF valido trovato. " + ("; ".join(errori) if errori else ""))
-    return await _importa_documenti(pdf_items, errori)
+    return await _importa_documenti(pdf_items, errori, forza=forza)
 
 
 @router.post("/paghe/importa-email")
