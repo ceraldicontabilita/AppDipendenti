@@ -10,7 +10,12 @@ Una richiesta 'ferie_programmate' approvata dall'admin genera automaticamente
 un blocco di indisponibilità per il generatore turni (collegamento ferie→turni).
 """
 import logging
+import os
+import ssl
+import smtplib
+import asyncio
 import uuid
+from email.message import EmailMessage
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, HTTPException, Body, Query, Depends
@@ -37,6 +42,50 @@ DESTINATARIO = {
     "contestazione_busta": "admin",
     "ferie_programmate": "admin",
 }
+
+# etichette leggibili per avvisi/email
+LABEL = {
+    "indisponibilita": "Indisponibilità",
+    "cambio_turno": "Cambio turno",
+    "acconto_stipendio": "Acconto stipendio",
+    "acconto_tfr": "Acconto TFR",
+    "anticipo_retribuzione": "Anticipo retribuzione",
+    "cambio_mansione": "Cambio mansione",
+    "reclamo": "Reclamo",
+    "contestazione_busta": "Contestazione busta paga",
+    "ferie_programmate": "Ferie programmate",
+}
+
+
+def _invia_email_richiesta(nome: str, label: str, doc: Dict[str, Any]) -> None:
+    """Avvisa l'azienda via email di una nuova richiesta. Credenziali da env Render."""
+    host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    port = int(os.getenv("SMTP_PORT", "465"))
+    user = os.getenv("SMTP_EMAIL") or os.getenv("SMTP_USER")
+    pwd = os.getenv("SMTP_PASSWORD")
+    dest = os.getenv("REQUEST_NOTIFY_EMAIL") or user
+    if not (user and pwd and dest):
+        logger.warning("Email richiesta non inviata: SMTP non configurato")
+        return
+    dati = doc.get("dati") or {}
+    righe = "\n".join(f"  {k}: {v}" for k, v in dati.items()) if dati else ""
+    msg = EmailMessage()
+    msg["From"] = user
+    msg["To"] = dest
+    msg["Subject"] = f"Nuova richiesta dal portale: {label} — {nome}"
+    msg.set_content(
+        f"Il dipendente {nome} ha inviato una richiesta dal Portale Dipendenti.\n\n"
+        f"Tipo: {label}\n"
+        f"Dettaglio: {doc.get('dettaglio') or '-'}\n"
+        f"{righe}\n\n"
+        f"Data: {doc.get('creato_il')}\n\n"
+        f"Accedi alla gestione per approvarla o rifiutarla.")
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context()) as s:
+            s.login(user, pwd); s.send_message(msg)
+    else:
+        with smtplib.SMTP(host, port) as s:
+            s.starttls(context=ssl.create_default_context()); s.login(user, pwd); s.send_message(msg)
 
 
 def _now() -> str:
@@ -76,6 +125,21 @@ async def crea_richiesta(
     }
     await db[COLL].insert_one(doc.copy())
     doc.pop("_id", None)
+
+    # Avviso nell'app (visibile al dipendente e all'azienda) + email all'azienda
+    label = LABEL.get(tipo, tipo)
+    try:
+        await crea_notifica(
+            db, identity["id"], "richiesta",
+            f"Richiesta: {label}",
+            f"{nome} · {doc['dettaglio'] or 'in attesa di risposta'}",
+            extra={"richiesta_id": doc["id"], "tipo": tipo, "dipendente_nome": nome})
+    except Exception:
+        logger.exception("notifica richiesta")
+    try:
+        await asyncio.to_thread(_invia_email_richiesta, nome, label, doc)
+    except Exception:
+        logger.exception("email richiesta")
     return doc
 
 
