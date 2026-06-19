@@ -711,6 +711,49 @@ async def _ricalcola_saldo_prestiti(dip_id):
     return saldo
 
 
+@router.get("/_unif_diag")
+async def diagnostica_unificazione():
+    """SOLA LETTURA. Fotografa cedolini vs paghe_mensili per pianificare l'unificazione:
+    conteggi, sovrapposizioni per (dipendente_id, anno, mese), confronto netto vs importo_busta,
+    record presenti solo in paghe_mensili, e dump completo di paghe_mensili per backup."""
+    db = get_db()
+    ced = await db.cedolini.find({}, {"_id": 0}).to_list(5000)
+    pm = await db.paghe_mensili.find({}, {"_id": 0}).to_list(5000)
+    ced_idx = {}
+    for c in ced:
+        ced_idx.setdefault((c.get("dipendente_id"), c.get("anno"), c.get("mese")), c)
+    solo_in_pm, con_match, mismatch_netto = [], 0, []
+    for p in pm:
+        k = (p.get("dipendente_id"), p.get("anno"), p.get("mese"))
+        c = ced_idx.get(k)
+        if not c:
+            solo_in_pm.append({"dipendente_id": p.get("dipendente_id"), "anno": p.get("anno"), "mese": p.get("mese")})
+        else:
+            con_match += 1
+            nb = p.get("importo_busta") or p.get("netto_atteso")
+            nc = c.get("netto")
+            if nb is not None and nc is not None and abs(float(nb) - float(nc)) > 1:
+                mismatch_netto.append({"dipendente_id": p.get("dipendente_id"), "anno": p.get("anno"),
+                                       "mese": p.get("mese"), "paghe_mensili": nb, "cedolini": nc})
+    # campi accessori presenti in paghe_mensili (riconciliazione)
+    campi = set()
+    for p in pm:
+        campi.update(p.keys())
+    pm_con_riconciliazione = [p for p in pm if any(p.get(k) for k in
+        ("bonifico_importo", "acconti", "prestito_importo", "tfr_anticipo_importo",
+         "busta_riconciliata", "bonifico_riconciliato"))]
+    return {
+        "cedolini_totali": len(ced),
+        "paghe_mensili_totali": len(pm),
+        "paghe_mensili_con_match_in_cedolini": con_match,
+        "paghe_mensili_solo_loro": solo_in_pm,
+        "mismatch_netto": mismatch_netto,
+        "campi_presenti_in_paghe_mensili": sorted(campi),
+        "paghe_mensili_con_dati_riconciliazione": len(pm_con_riconciliazione),
+        "backup_paghe_mensili": pm,
+    }
+
+
 @router.get("/prestiti")
 async def lista_prestiti(dipendente_id: Optional[str] = None):
     """Mastrino prestiti: movimenti con saldo progressivo. Filtrabile per dipendente."""
