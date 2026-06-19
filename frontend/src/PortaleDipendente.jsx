@@ -212,40 +212,45 @@ function Turni() {
 function Buste() {
   const [buste, setBuste] = useState(null);
   const [aperta, setAperta] = useState(null);
+  const [visionato, setVisionato] = useState(false);
   const load = useCallback(()=>{ api.get("/portale/buste").then((r)=>setBuste(r.data)).catch(()=>setBuste([])); },[]);
   useEffect(()=>{load();},[load]);
-  const scarica = async (b) => {
+  const apri = (b) => { setVisionato(false); setAperta(b); };
+  const chiudi = () => { setVisionato(false); setAperta(null); };
+  const mm = (b)=>String(b.mese).padStart(2,"0");
+  const visiona = async (b) => {
+    const win = window.open("", "_blank");        // aperto nel gesto utente: niente blocco popup
     try {
       const r = await api.get(`/portale/buste/${b.id}/pdf`, { responseType: "blob" });
       const url = URL.createObjectURL(r.data);
-      const a = document.createElement("a"); a.href = url;
-      a.download = b.filename || `busta_${b.mese}_${b.anno}.pdf`; a.click();
-      URL.revokeObjectURL(url);
-    } catch { alert("PDF non disponibile"); }
+      if (win) { win.location = url; }
+      else { const a=document.createElement("a"); a.href=url; a.download=b.filename||`busta_${b.mese}_${b.anno}.pdf`; a.click(); }
+      setVisionato(true);
+      setTimeout(()=>URL.revokeObjectURL(url), 60000);
+    } catch { if (win) win.close(); alert("PDF non disponibile"); }
   };
   const accetta = async (b) => {
     try { await api.post(`/portale/buste/${b.id}/presa-visione`); } catch {}
-    setAperta(null); load();
+    chiudi(); load();
     setTimeout(()=>alert("Presa visione registrata con data e ora."), 80);
   };
   const contesta = async (b) => {
     try { await api.post(`/portale/buste/${b.id}/contesta`); } catch {}
     try {
-      const r = await api.get(`/portale/documenti/modulo/contestazione`, { responseType: "blob" });
+      const r = await api.get(`/portale/buste/${b.id}/modulo-contestazione`, { responseType: "blob" });
       const url = URL.createObjectURL(r.data);
-      const a = document.createElement("a"); a.href=url; a.download="modulo_contestazione.pdf"; a.click();
+      const a = document.createElement("a"); a.href=url; a.download=`contestazione_busta_${mm(b)}_${b.anno}.pdf`; a.click();
       URL.revokeObjectURL(url);
     } catch {}
-    setAperta(null); load();
+    chiudi(); load();
     setTimeout(()=>alert(
       "Contestazione registrata e inviata all'azienda (PEC).\n\n" +
-      "Hai scaricato il modulo: compilalo e ricaricalo nella sezione Documenti. " +
-      "La busta resta NON accettata."
+      "Hai scaricato il modulo già intestato: barra le cause, compila le note e ricaricalo " +
+      "nella sezione Documenti. La busta resta NON accettata."
     ), 80);
   };
   if (!buste) return <div className="spin">Caricamento…</div>;
   if (buste.length === 0) return <div className="empty">Nessuna busta paga disponibile.</div>;
-  const mm = (b)=>String(b.mese).padStart(2,"0");
   return (
     <>
       {buste.map((b)=>(
@@ -257,14 +262,14 @@ function Buste() {
               : <span className="pill warn">Da leggere</span>}
           </div>
           <div className="row" style={{marginTop:10}}>
-            <button className="btn sm" style={{width:"100%",justifyContent:"center"}} onClick={()=>setAperta(b)}>
+            <button className="btn sm" style={{width:"100%",justifyContent:"center"}} onClick={()=>apri(b)}>
               <Eye size={14}/> Apri busta
             </button>
           </div>
         </div>
       ))}
       {aperta && (
-        <div onClick={()=>setAperta(null)}
+        <div onClick={chiudi}
              style={{position:"fixed",inset:0,background:"rgba(30,27,40,.5)",display:"flex",
                      alignItems:"center",justifyContent:"center",padding:18,zIndex:1000}}>
           <div onClick={(e)=>e.stopPropagation()}
@@ -282,19 +287,23 @@ function Buste() {
               Dichiaro di aver ricevuto e preso visione della busta paga relativa al mese
               di <b>{mm(aperta)}/{aperta.anno}</b>. La presente accettazione viene registrata
               con data e ora e ha valore di ricevuta. In caso di disaccordo posso contestare
-              la busta tramite il modulo nella sezione <b>Documenti</b>.
+              la busta tramite il modulo già intestato.
             </div>
             {aperta.presa_visione && (
               <div className="pill ok" style={{marginBottom:12}}><Check size={11}/> Già accettata il {aperta.presa_visione_il ? fmt(aperta.presa_visione_il) : ""}</div>
             )}
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
-              <button className="btn sec" onClick={()=>scarica(aperta)}><Download size={14}/> Apri / scarica la busta (PDF)</button>
+              <button className="btn sec" onClick={()=>visiona(aperta)}><Download size={14}/> Apri / visiona la busta (PDF)</button>
               {aperta.presa_visione
-                ? <button className="btn" onClick={()=>setAperta(null)}>Chiudi</button>
-                : <>
-                    <button className="btn" onClick={()=>accetta(aperta)}><Check size={14}/> Accetto la busta</button>
-                    <button className="btn gh" style={{color:"#a6531c",borderColor:"#e6c6a8"}} onClick={()=>contesta(aperta)}><AlertTriangle size={14}/> Contesta la busta</button>
-                  </>}
+                ? <button className="btn" onClick={chiudi}>Chiudi</button>
+                : (visionato
+                    ? <>
+                        <button className="btn" onClick={()=>accetta(aperta)}><Check size={14}/> Accetto la busta</button>
+                        <button className="btn gh" style={{color:"#a6531c",borderColor:"#e6c6a8"}} onClick={()=>contesta(aperta)}><AlertTriangle size={14}/> Contesta la busta</button>
+                      </>
+                    : <div className="muted" style={{textAlign:"center",fontSize:12,padding:"4px 0"}}>
+                        Apri prima la busta: i pulsanti <b>Accetto</b> / <b>Contesta</b> compaiono dopo la visione.
+                      </div>)}
             </div>
           </div>
         </div>

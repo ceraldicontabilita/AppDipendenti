@@ -311,6 +311,130 @@ async def contesta_busta(cedolino_id: str, request: Request,
     return {"ok": True, "contestata_il": quando}
 
 
+# Dati azienda destinataria della contestazione (configurabili da env Render).
+AZIENDA = {
+    "ragione_sociale": os.getenv("AZIENDA_RAGIONE_SOCIALE", "Ceraldi Group S.r.l."),
+    "sede": os.getenv("AZIENDA_SEDE", "Napoli (NA)"),
+    "piva": os.getenv("AZIENDA_PIVA", ""),
+}
+
+# Tutte le possibili cause di contestazione (spunta nel modulo).
+CAUSE_CONTESTAZIONE = [
+    "Ore lavorate non corrette / non corrispondenti a quelle effettive",
+    "Giorni lavorati non corretti",
+    "Mancata retribuzione di giornata festiva non retribuita",
+    "Errata applicazione del regime fiscale (redditi/imposte errati)",
+    "Straordinari non retribuiti o non corretti",
+    "Maggiorazioni (notturno / festivo / domenicale) non riconosciute",
+    "Ferie, permessi o ROL non corretti",
+    "Mancata o errata corresponsione di acconti / anticipi",
+    "Errato inquadramento o livello contrattuale",
+    "Importo netto non corrispondente",
+    "TFR o ratei (13ª / 14ª mensilità) errati",
+    "Trattenute non dovute o non giustificate",
+    "Mancato pagamento / pagamento parziale della retribuzione",
+    "Altro (specificare nelle note)",
+]
+
+
+def _genera_modulo_contestazione(doc: Dict[str, Any], dip: Dict[str, Any]) -> bytes:
+    """Modulo di contestazione busta paga precompilato: azienda + dipendente + busta + cause."""
+    import fitz
+    pdf = fitz.open()
+    page = pdf.new_page()
+    W = page.rect.width
+    y = 56
+
+    def txt(s, size=11, bold=False, gap=None, x=56, color=(0, 0, 0)):
+        nonlocal y
+        if s:
+            page.insert_text((x, y), s, fontsize=size,
+                             fontname="hebo" if bold else "helv", color=color)
+        y += (gap if gap is not None else size + 7)
+
+    def riga_firma(label_txt):
+        nonlocal y
+        page.insert_text((56, y), label_txt, fontsize=10, fontname="helv")
+        page.draw_line((150, y + 2), (W - 56, y + 2), color=(0.55, 0.55, 0.55))
+        y += 26
+
+    def checkbox(label_txt):
+        nonlocal y
+        page.draw_rect(fitz.Rect(56, y - 9, 67, y + 2), color=(0.3, 0.3, 0.3), width=0.8)
+        page.insert_text((74, y), label_txt, fontsize=10, fontname="helv")
+        y += 18
+
+    mese = str(doc.get("mese", "")).zfill(2)
+    anno = doc.get("anno", "")
+    netto = float(doc.get("netto") or 0)
+    nome_dip = (f"{dip.get('cognome', '')} {dip.get('nome', '')}".strip()
+                if dip else (doc.get("dipendente_nome") or ""))
+    cf_dip = (dip.get("codice_fiscale") if dip else "") or ""
+
+    # Intestazione azienda
+    txt(AZIENDA["ragione_sociale"], 15, True, gap=18)
+    sub = f"Sede: {AZIENDA['sede']}"
+    if AZIENDA["piva"]:
+        sub += f"   ·   P.IVA/C.F.: {AZIENDA['piva']}"
+    txt(sub, 9, color=(0.35, 0.35, 0.35), gap=8)
+    page.draw_line((56, y), (W - 56, y), color=(0.8, 0.8, 0.8))
+    y += 22
+
+    txt("MODULO DI CONTESTAZIONE DELLA BUSTA PAGA", 13, True, gap=22)
+
+    txt(f"Spett.le {AZIENDA['ragione_sociale']}", 11, gap=18)
+    txt("Il/La sottoscritto/a:", 10, gap=15)
+    txt(f"Nome e cognome: {nome_dip or '________________________'}", 11)
+    txt(f"Codice fiscale: {cf_dip or '________________________'}", 11, gap=20)
+
+    txt("in qualità di lavoratore/lavoratrice dipendente, contesta formalmente la", 10, gap=14)
+    txt("busta paga di seguito identificata:", 10, gap=18)
+    txt(f"Periodo (mese/anno): {mese}/{anno}", 11, True)
+    txt(f"Importo netto indicato in busta: € {netto:.2f}", 11, True, gap=22)
+
+    txt("Motivo/i della contestazione (barrare le caselle pertinenti):", 11, True, gap=18)
+    for c in CAUSE_CONTESTAZIONE:
+        checkbox(c)
+    y += 6
+
+    txt("Note / descrizione dettagliata:", 10, True, gap=16)
+    for _ in range(4):
+        page.draw_line((56, y), (W - 56, y), color=(0.7, 0.7, 0.7))
+        y += 20
+    y += 6
+
+    txt("Importo/i ritenuto/i errato/i (€): ____________________________", 10, gap=18)
+    txt("Richiesta del dipendente: ____________________________________", 10, gap=26)
+
+    riga_firma("Luogo e data:")
+    riga_firma("Firma del dipendente:")
+    y += 6
+    txt("Spazio riservato all'azienda", 9, True, color=(0.35, 0.35, 0.35), gap=15)
+    txt("Esito:  [ ] Accolta    [ ] Respinta    [ ] In valutazione", 10, gap=16)
+    riga_firma("Firma azienda:")
+    return pdf.tobytes()
+
+
+@router.get("/{cedolino_id}/modulo-contestazione", summary="Modulo di contestazione precompilato (PDF)")
+async def modulo_contestazione(cedolino_id: str,
+                               identity: Dict[str, Any] = Depends(get_identity)):
+    doc = await _carica_mia_busta(
+        cedolino_id, identity,
+        proj={"_id": 0, "id": 1, "mese": 1, "anno": 1, "netto": 1,
+              "dipendente_id": 1, "dipendente_nome": 1})
+    db = Database.get_db()
+    dip = await db[Collections.EMPLOYEES].find_one(
+        {"id": doc.get("dipendente_id")},
+        {"_id": 0, "nome": 1, "cognome": 1, "codice_fiscale": 1}) or {}
+    pdf_bytes = _genera_modulo_contestazione(doc, dip)
+    import io
+    mese = str(doc.get("mese", "")).zfill(2)
+    fname = f"contestazione_busta_{mese}_{doc.get('anno')}.pdf"
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
 @router.get("/{cedolino_id}/storico-accessi", summary="Storico accessi a questa busta (admin)")
 async def storico_accessi(cedolino_id: str,
                           identity: Dict[str, Any] = Depends(get_identity)):
