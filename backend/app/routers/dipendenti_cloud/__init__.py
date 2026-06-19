@@ -1253,6 +1253,20 @@ async def delete_ferie(ferie_id: str):
 
 # ============ TURNI ============
 
+@router.get("/impostazioni-turni")
+async def get_impostazioni_turni():
+    """Impostazioni della generazione turni (documento unico)."""
+    doc = await get_db().impostazioni_cloud.find_one({"chiave": "turni"}, {"_id": 0})
+    return (doc or {}).get("valore", {"bar_chiuso_domenica_pomeriggio": True})
+
+@router.post("/impostazioni-turni")
+async def set_impostazioni_turni(valore: dict):
+    await get_db().impostazioni_cloud.update_one(
+        {"chiave": "turni"},
+        {"$set": {"chiave": "turni", "valore": valore, "updated_at": now_iso()}},
+        upsert=True)
+    return {"ok": True, "valore": valore}
+
 @router.get("/turni")
 async def get_turni():
     turni = await get_db().turni_cloud.find({}, {"_id": 0}).to_list(100)

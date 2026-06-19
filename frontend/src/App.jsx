@@ -1059,6 +1059,9 @@ function TurniPage({ dipendenti, turni, reload }) {
   const meseLabel = (() => { const f = new Date(lunedi); const l = new Date(lunedi); l.setDate(l.getDate() + 6); return `${f.getDate()} ${f.toLocaleDateString('it-IT', { month: 'short' })} – ${l.getDate()} ${l.toLocaleDateString('it-IT', { month: 'short' })}`; })();
   const BASE_BAR = new Date(2026, 5, 15);
   const settimanaPari = ((Math.round((lunedi - BASE_BAR) / (7 * 86400000)) % 2) + 2) % 2 === 0;
+  const [barChiusoDomPom, setBarChiusoDomPom] = useState(true);
+  useEffect(() => { axios.get(`${API}/impostazioni-turni`).then(r => setBarChiusoDomPom(r.data?.bar_chiuso_domenica_pomeriggio !== false)).catch(() => {}); }, []);
+  const salvaImpostazione = (v) => { setBarChiusoDomPom(v); axios.post(`${API}/impostazioni-turni`, { bar_chiuso_domenica_pomeriggio: v }).catch(() => {}); };
 
   const caricaSettimana = (s) => axios.get(`${API}/assegnazioni-turni?settimana=${s}`).then(res => setAssegnazioni(res.data || [])).catch(() => {});
   useEffect(() => { caricaSettimana(settimana); }, [settimana]);
@@ -1122,16 +1125,22 @@ function TurniPage({ dipendenti, turni, reload }) {
       const row = BASE[(dip.nome || "").trim().toLowerCase()];
       if (row) row.forEach((nome, gi) => updates.push({ dipendente_id: dip.id, giorno: giorni[gi], turno_id: idTurno(nome) || null }));
     });
-    // Bar: due gruppi che si alternano mattina/pomeriggio a settimane alterne
-    const setBar = (cognomi, turnoNome) => {
+    // Bar: due gruppi. Capezzuto+Vespa coprono la domenica (solo mattina, perché il
+    // pomeriggio è chiuso) e riposano un giorno feriale (lunedì). Parisi+Moscato
+    // riposano la domenica; nei feriali alternano mattina/pomeriggio settimana per settimana.
+    const ferB1 = settimanaPari ? "Bar 6:30-15" : "Bar 15-21";
+    const ferB2 = settimanaPari ? "Bar 15-21" : "Bar 6:30-15";
+    const assegnaRiga = (cognomi, riga) => {
       dipendenti.filter(d => cognomi.some(c => (d.cognome || "").toLowerCase().includes(c))).forEach(dip => {
-        for (let gi = 0; gi < 6; gi++) updates.push({ dipendente_id: dip.id, giorno: giorni[gi], turno_id: idTurno(turnoNome) || null });
-        updates.push({ dipendente_id: dip.id, giorno: "Domenica", turno_id: idTurno("Riposo") || null });
+        riga.forEach((nome, gi) => updates.push({ dipendente_id: dip.id, giorno: giorni[gi], turno_id: idTurno(nome) || null }));
       });
     };
-    const g1 = ["vespa", "capezzuto"], g2 = ["parisi", "moscato"];
-    if (settimanaPari) { setBar(g1, "Bar 6:30-15"); setBar(g2, "Bar 15-21"); }
-    else { setBar(g1, "Bar 15-21"); setBar(g2, "Bar 6:30-15"); }
+    // indici: 0=Lun … 5=Sab … 6=Dom
+    const domB1 = barChiusoDomPom ? "Bar 6:30-15" : ferB1;          // domenica: solo mattina se pomeriggio chiuso
+    const rigaB1 = ["Riposo", ferB1, ferB1, ferB1, ferB1, ferB1, domB1];   // Capezzuto+Vespa
+    const rigaB2 = [ferB2, ferB2, ferB2, ferB2, ferB2, ferB2, "Riposo"];   // Parisi+Moscato
+    assegnaRiga(["vespa", "capezzuto"], rigaB1);
+    assegnaRiga(["parisi", "moscato"], rigaB2);
     if (updates.length) await salva(updates);
   };
 
@@ -1163,6 +1172,10 @@ function TurniPage({ dipendenti, turni, reload }) {
         <strong style={{ minWidth: 150, textAlign: "center" }}>{meseLabel}{settimanaPari ? "" : " · bar invertito"}</strong>
         <button onClick={() => setLunedi(d => { const n = new Date(d); n.setDate(d.getDate() + 7); return n; })} className="dc-btn">›</button>
         <button onClick={() => setLunedi(lunOggi)} className="dc-btn" style={{ fontSize: 12 }}>Oggi</button>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#3b4a40", cursor: "pointer" }}>
+          <input type="checkbox" checked={barChiusoDomPom} onChange={(e) => salvaImpostazione(e.target.checked)} />
+          Bar chiuso la domenica pomeriggio
+        </label>
         <button onClick={generaProduzione} disabled={busy}
           style={{ marginLeft: "auto", background: "#5b7a6b", color: "#fff", border: "none", padding: "10px 18px", borderRadius: 10, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
           {busy ? "Attendi…" : "Genera settimana"}
