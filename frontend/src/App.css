@@ -1046,9 +1046,10 @@ body, .dc-app, input, select, textarea, button { font-family: 'Plus Jakarta Sans
   .dc-table--cards td:first-child::before { display: none; }
   .dc-table--cards .dc-table-actions { justify-content: flex-end; }
 
-  /* Griglia TURNI su mobile: il drag handle non serve al tocco; il nome resta
-     fisso mentre si scorrono i giorni della settimana */
-  .dc-turni-table .dc-drag-handle { display: none; }
+  /* Griglia TURNI su mobile: la colonna maniglia (drag) sparisce del tutto, così
+     non sfasa il layout; il nome diventa la prima colonna e resta fisso. */
+  .dc-turni-table tr > th:first-child,
+  .dc-turni-table tr > td:first-child { display: none; }
   .dc-turni-table tr > td:nth-child(2),
   .dc-turni-table tr > th:nth-child(2) {
     position: sticky; left: 0; z-index: 2; background: #fff;
