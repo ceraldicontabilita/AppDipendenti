@@ -203,7 +203,7 @@ async def _nome_dipendente(identity, fallback=""):
 async def _invia_pec(oggetto: str, testo: str) -> bool:
     """Invia una mail alla PEC aziendale per lasciare traccia (data certa) di
     accettazione/contestazione busta. Credenziali SOLO da env Render."""
-    host = os.environ.get("PEC_HOST") or os.environ.get("SMTP_HOST") or "smtps.pec.aruba.it"
+    host = os.environ.get("PEC_HOST") or os.environ.get("SMTP_HOST") or "sendm.cert.legalmail.it"
     port = int(os.environ.get("PEC_PORT") or os.environ.get("SMTP_PORT") or 465)
     user = os.environ.get("PEC_USER") or os.environ.get("SMTP_EMAIL") or os.environ.get("SMTP_USER")
     pwd = os.environ.get("PEC_PASSWORD") or os.environ.get("SMTP_PASSWORD")
