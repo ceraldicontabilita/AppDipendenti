@@ -11,7 +11,12 @@ NB: le meccaniche di tracciamento e consegna sono complete; la validità formale
 """
 import base64
 import logging
+import os
+import ssl
+import smtplib
+import asyncio
 import uuid
+from email.message import EmailMessage
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Request, Depends
@@ -187,10 +192,55 @@ def _genera_pdf_riepilogo(doc: Dict[str, Any]) -> bytes:
     return pdf.tobytes()
 
 
+async def _nome_dipendente(identity, fallback=""):
+    db = Database.get_db()
+    dip = await db["dipendenti"].find_one({"id": identity["id"]}, {"_id": 0, "nome": 1, "cognome": 1})
+    if dip:
+        return f"{dip.get('cognome','')} {dip.get('nome','')}".strip() or fallback
+    return fallback
+
+
+async def _invia_pec(oggetto: str, testo: str) -> bool:
+    """Invia una mail alla PEC aziendale per lasciare traccia (data certa) di
+    accettazione/contestazione busta. Credenziali SOLO da env Render."""
+    host = os.environ.get("PEC_HOST") or os.environ.get("SMTP_HOST") or "smtps.pec.aruba.it"
+    port = int(os.environ.get("PEC_PORT") or os.environ.get("SMTP_PORT") or 465)
+    user = os.environ.get("PEC_USER") or os.environ.get("SMTP_EMAIL") or os.environ.get("SMTP_USER")
+    pwd = os.environ.get("PEC_PASSWORD") or os.environ.get("SMTP_PASSWORD")
+    dest = os.environ.get("PEC_DEST") or "ceraldigroupsrl@legalmail.it"
+    if not (user and pwd):
+        logger.warning("PEC non inviata (credenziali PEC/SMTP mancanti nelle env): %s", oggetto)
+        return False
+
+    def _send():
+        msg = EmailMessage()
+        msg["From"] = user
+        msg["To"] = dest
+        msg["Subject"] = oggetto
+        msg.set_content(testo)
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, timeout=20) as s:
+                s.login(user, pwd)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=20) as s:
+                s.starttls(context=ssl.create_default_context())
+                s.login(user, pwd)
+                s.send_message(msg)
+
+    try:
+        await asyncio.to_thread(_send)
+        logger.info("PEC inviata: %s", oggetto)
+        return True
+    except Exception as e:
+        logger.warning("PEC invio fallito (%s): %s", oggetto, e)
+        return False
+
+
 @router.post("/{cedolino_id}/presa-visione", summary="Conferma presa visione/accettazione")
 async def presa_visione(cedolino_id: str, request: Request,
                         identity: Dict[str, Any] = Depends(get_identity)):
-    doc = await _carica_mia_busta(cedolino_id, identity, proj={"_id": 0, "id": 1, "mese": 1, "anno": 1})
+    doc = await _carica_mia_busta(cedolino_id, identity, proj={"_id": 0, "id": 1, "mese": 1, "anno": 1, "netto": 1, "dipendente_nome": 1})
     db = Database.get_db()
     esistente = await db[COLL_ACCETT].find_one(
         {"dipendente_id": identity["id"], "cedolino_id": cedolino_id}, {"_id": 0})
@@ -204,6 +254,7 @@ async def presa_visione(cedolino_id: str, request: Request,
         "id": f"acc_{uuid.uuid4().hex[:12]}",
         "dipendente_id": identity["id"],
         "cedolino_id": cedolino_id,
+        "esito": "accettata",
         "accettata_il": quando, "ip": ip, "user_agent": ua,
     })
     await log_evento(
@@ -213,7 +264,51 @@ async def presa_visione(cedolino_id: str, request: Request,
         dettaglio=f"Presa visione/accettazione busta {doc.get('mese')}/{doc.get('anno')}",
         extra={"ip": ip, "user_agent": ua},
     )
+    nome = await _nome_dipendente(identity, doc.get("dipendente_nome", ""))
+    periodo = f"{str(doc.get('mese')).zfill(2)}/{doc.get('anno')}"
+    await _invia_pec(
+        f"Accettazione busta paga {periodo} — {nome}",
+        f"Il dipendente {nome} ha ACCETTATO la busta paga di {periodo}.\n"
+        f"Netto: € {float(doc.get('netto') or 0):.2f}\n"
+        f"Data e ora accettazione: {quando}\nIP: {ip}\n\n"
+        f"Messaggio generato automaticamente dal Portale Dipendenti.")
     return {"ok": True, "gia_accettata": False, "accettata_il": quando}
+
+
+@router.post("/{cedolino_id}/contesta", summary="Contesta la busta (traccia + PEC)")
+async def contesta_busta(cedolino_id: str, request: Request,
+                         motivo: Optional[str] = None,
+                         identity: Dict[str, Any] = Depends(get_identity)):
+    doc = await _carica_mia_busta(cedolino_id, identity, proj={"_id": 0, "id": 1, "mese": 1, "anno": 1, "netto": 1, "dipendente_nome": 1})
+    db = Database.get_db()
+    ip = _client_ip(request)
+    ua = request.headers.get("user-agent", "")
+    quando = _now()
+    await db[COLL_ACCETT].insert_one({
+        "id": f"con_{uuid.uuid4().hex[:12]}",
+        "dipendente_id": identity["id"],
+        "cedolino_id": cedolino_id,
+        "esito": "contestata",
+        "motivo": motivo or "",
+        "contestata_il": quando, "ip": ip, "user_agent": ua,
+    })
+    await log_evento(
+        modulo="cedolini", azione="contestazione",
+        entita_id=cedolino_id, entita_collection=COLL_CED, db=db,
+        fonte="portale", utente=identity["id"],
+        dettaglio=f"Contestazione busta {doc.get('mese')}/{doc.get('anno')}",
+        extra={"ip": ip, "user_agent": ua, "motivo": motivo or ""},
+    )
+    nome = await _nome_dipendente(identity, doc.get("dipendente_nome", ""))
+    periodo = f"{str(doc.get('mese')).zfill(2)}/{doc.get('anno')}"
+    await _invia_pec(
+        f"CONTESTAZIONE busta paga {periodo} — {nome}",
+        f"Il dipendente {nome} ha CONTESTATO la busta paga di {periodo}.\n"
+        f"Netto: € {float(doc.get('netto') or 0):.2f}\n"
+        f"Data e ora contestazione: {quando}\nIP: {ip}\n"
+        f"Motivo indicato: {motivo or '(da modulo allegato)'}\n\n"
+        f"Messaggio generato automaticamente dal Portale Dipendenti.")
+    return {"ok": True, "contestata_il": quando}
 
 
 @router.get("/{cedolino_id}/storico-accessi", summary="Storico accessi a questa busta (admin)")

@@ -229,16 +229,18 @@ function Buste() {
     setTimeout(()=>alert("Presa visione registrata con data e ora."), 80);
   };
   const contesta = async (b) => {
+    try { await api.post(`/portale/buste/${b.id}/contesta`); } catch {}
     try {
       const r = await api.get(`/portale/documenti/modulo/contestazione`, { responseType: "blob" });
       const url = URL.createObjectURL(r.data);
       const a = document.createElement("a"); a.href=url; a.download="modulo_contestazione.pdf"; a.click();
       URL.revokeObjectURL(url);
     } catch {}
-    setAperta(null);
+    setAperta(null); load();
     setTimeout(()=>alert(
-      "Hai scaricato il modulo di contestazione.\n\nCompilalo e ricaricalo nella sezione Documenti. " +
-      "La busta resta NON accettata finché non decidi."
+      "Contestazione registrata e inviata all'azienda (PEC).\n\n" +
+      "Hai scaricato il modulo: compilalo e ricaricalo nella sezione Documenti. " +
+      "La busta resta NON accettata."
     ), 80);
   };
   if (!buste) return <div className="spin">Caricamento…</div>;
