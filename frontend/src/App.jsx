@@ -123,6 +123,7 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     { id: "turni", label: "Turni", icon: Grid3X3, section: "DIPENDENTI" },
     { id: "buste-paga", label: "Buste Paga", icon: Euro, section: "DIPENDENTI" },
     { id: "documenti", label: "Documenti", icon: FolderOpen, section: "DIPENDENTI" },
+    { id: "assunzione", label: "Assunzione & Contratti", icon: Briefcase, section: "DIPENDENTI" },
   ];
 
   const pageLabels = {
@@ -134,6 +135,7 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     "buste-paga": "Buste Paga",
     missioni: "Missioni",
     documenti: "Documenti",
+    assunzione: "Assunzione & Contratti",
   };
 
   if (loading) {
@@ -163,6 +165,8 @@ export default function DipendentiCloudApp({ page: pageProp }) {
         return <MissioniPage dipendenti={activeDipendenti} missioni={missioni} reload={loadData} getDipendente={getDipendente} />;
       case "documenti":
         return <DocumentiPage dipendenti={dipendenti} documenti={documenti} reload={loadData} getDipendente={getDipendente} />;
+      case "assunzione":
+        return <AssunzionePage dipendenti={dipendenti} reload={loadData} />;
       default:
         return <DashboardPage stats={stats} dipendenti={dipendenti} ferie={ferie} missioni={missioni} getDipendente={getDipendente} />;
     }
@@ -1768,6 +1772,127 @@ function DocumentiPage({ dipendenti, documenti, reload, getDipendente }) {
               </div>
             </form>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ===== Assunzione & Contratti =====
+function AssunzionePage({ dipendenti, reload }) {
+  const C = "/api/contracts";
+  const [tipi, setTipi] = useState([]);
+  const [templates, setTemplates] = useState([]);
+  const [dipId, setDipId] = useState("");
+  const [tipo, setTipo] = useState("");
+  const [extra, setExtra] = useState({ livello: "", qualifica: "", stipendio_orario: "", data_inizio: "", data_fine: "" });
+  const [contratti, setContratti] = useState([]);
+  const [busy, setBusy] = useState("");
+  const [msg, setMsg] = useState("");
+
+  const loadTemplates = () => axios.get(`${C}/templates`).then(r => setTemplates(r.data || [])).catch(() => {});
+  useEffect(() => {
+    axios.get(`${C}/types`).then(r => { setTipi(r.data || []); if (r.data?.[0]) setTipo(r.data[0].id); }).catch(() => {});
+    loadTemplates();
+  }, []);
+  const loadContratti = (id) => { if (id) axios.get(`${C}/employee/${id}`).then(r => setContratti(r.data || [])).catch(() => setContratti([])); else setContratti([]); };
+  useEffect(() => { loadContratti(dipId); }, [dipId]);
+
+  const dispTemplate = (id) => (templates.find(t => t.id === id) || {}).available;
+
+  const uploadTemplate = async (tid, ev) => {
+    const file = ev.target.files?.[0]; if (!file) return;
+    const fd = new FormData(); fd.append("file", file);
+    setBusy("tpl-" + tid);
+    try { await axios.post(`${C}/template/${tid}`, fd, { headers: { "Content-Type": "multipart/form-data" } }); await loadTemplates(); setMsg("Template caricato."); }
+    catch (e) { setMsg(e?.response?.data?.detail || "Errore caricamento template"); }
+    setBusy(""); ev.target.value = "";
+  };
+  const genera = async () => {
+    if (!dipId || !tipo) { setMsg("Seleziona dipendente e tipo contratto."); return; }
+    if (!dispTemplate(tipo)) { setMsg("Carica prima il template di questo tipo."); return; }
+    setBusy("gen"); setMsg("");
+    try {
+      await axios.post(`${C}/generate/${dipId}`, { contract_type: tipo, additional_data: extra });
+      setMsg("Contratto generato."); loadContratti(dipId);
+    } catch (e) { setMsg(e?.response?.data?.detail || "Errore generazione"); }
+    setBusy("");
+  };
+  const scarica = async (cid, fname) => {
+    try { const r = await axios.get(`${C}/download/${cid}`, { responseType: "blob" });
+      const url = URL.createObjectURL(r.data); const a = document.createElement("a"); a.href = url; a.download = fname || "contratto.docx"; a.click(); URL.revokeObjectURL(url);
+    } catch { setMsg("Download non disponibile"); }
+  };
+  const invia = async (cid) => {
+    const reg = window.confirm("Allegare anche il Regolamento Interno? (OK = sì, Annulla = solo contratto)");
+    setBusy("send-" + cid); setMsg("");
+    try { const r = await axios.post(`${C}/send/${cid}`, { includi_regolamento: reg });
+      setMsg(`Inviato a ${r.data.inviato_a} (${r.data.allegati} allegati).`); loadContratti(dipId);
+    } catch (e) { setMsg(e?.response?.data?.detail || "Errore invio email"); }
+    setBusy("");
+  };
+
+  const dip = dipendenti.find(d => d.id === dipId);
+  return (
+    <div className="dc-page">
+      <div className="dc-page-header"><div><h1>Assunzione & Contratti</h1>
+        <p>Carica i modelli, genera il contratto per il dipendente e invialo via email</p></div></div>
+
+      {msg && <div style={{ background: "#eef3ef", border: "1px solid #d9e4dc", borderRadius: 10, padding: "10px 14px", marginBottom: 14 }}>{msg}</div>}
+
+      <div className="dc-card" style={{ marginBottom: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Modelli contratto (.docx)</h3>
+        <p className="dc-muted" style={{ fontSize: 13 }}>Caricali una volta: restano salvati. I segnaposto (…) vengono compilati con i dati del dipendente.</p>
+        <div style={{ display: "grid", gap: 8 }}>
+          {tipi.map(t => (
+            <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "space-between", borderTop: "1px solid #eee", paddingTop: 8 }}>
+              <span>{dispTemplate(t.id) ? "✓" : "—"} {t.name}</span>
+              <label className="dc-btn" style={{ cursor: "pointer", fontSize: 13 }}>
+                {busy === "tpl-" + t.id ? "Carico…" : (dispTemplate(t.id) ? "Sostituisci" : "Carica")}
+                <input type="file" accept=".docx" style={{ display: "none" }} onChange={(e) => uploadTemplate(t.id, e)} />
+              </label>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="dc-card" style={{ marginBottom: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Genera contratto</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <label>Dipendente
+            <select value={dipId} onChange={(e) => setDipId(e.target.value)} className="dc-input">
+              <option value="">— seleziona —</option>
+              {dipendenti.map(d => <option key={d.id} value={d.id}>{d.cognome} {d.nome}</option>)}
+            </select></label>
+          <label>Tipo contratto
+            <select value={tipo} onChange={(e) => setTipo(e.target.value)} className="dc-input">
+              {tipi.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select></label>
+          <label>Livello<input className="dc-input" value={extra.livello} onChange={(e) => setExtra({ ...extra, livello: e.target.value })} /></label>
+          <label>Qualifica / mansione<input className="dc-input" value={extra.qualifica} onChange={(e) => setExtra({ ...extra, qualifica: e.target.value })} /></label>
+          <label>Paga oraria (€)<input className="dc-input" value={extra.stipendio_orario} onChange={(e) => setExtra({ ...extra, stipendio_orario: e.target.value })} /></label>
+          <label>Data inizio<input type="date" className="dc-input" value={extra.data_inizio} onChange={(e) => setExtra({ ...extra, data_inizio: e.target.value })} /></label>
+          <label>Data fine (se determinato)<input type="date" className="dc-input" value={extra.data_fine} onChange={(e) => setExtra({ ...extra, data_fine: e.target.value })} /></label>
+        </div>
+        {dip && !dip.email && <p className="dc-muted" style={{ fontSize: 12, marginTop: 8 }}>⚠ Questo dipendente non ha email in anagrafica: non potrai inviare il contratto.</p>}
+        <button onClick={genera} disabled={busy === "gen"} className="dc-btn-primary" style={{ marginTop: 12 }}>
+          {busy === "gen" ? "Genero…" : "Genera contratto"}
+        </button>
+      </div>
+
+      {dipId && (
+        <div className="dc-card">
+          <h3 style={{ marginTop: 0 }}>Contratti di {dip?.cognome} {dip?.nome}</h3>
+          {contratti.length === 0 ? <p className="dc-muted">Nessun contratto generato.</p> :
+            contratti.map(c => (
+              <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "space-between", borderTop: "1px solid #eee", padding: "8px 0" }}>
+                <div><b>{c.contract_name}</b><div className="dc-muted" style={{ fontSize: 12 }}>{c.filename}{c.inviato_a ? ` · inviato a ${c.inviato_a}` : ""}</div></div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button className="dc-btn" onClick={() => scarica(c.id, c.filename)}>Scarica</button>
+                  <button className="dc-btn-primary" disabled={busy === "send-" + c.id} onClick={() => invia(c.id)}>{busy === "send-" + c.id ? "Invio…" : "Invia email"}</button>
+                </div>
+              </div>
+            ))}
         </div>
       )}
     </div>

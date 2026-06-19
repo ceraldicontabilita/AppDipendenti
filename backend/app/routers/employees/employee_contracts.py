@@ -1,14 +1,19 @@
 """
 Employee Contracts Router - Gestione contratti dipendenti.
 """
-from fastapi import APIRouter, HTTPException, Body
-from fastapi.responses import FileResponse
-from typing import Dict, Any, List
+from fastapi import APIRouter, HTTPException, Body, UploadFile, File, Depends
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 import logging
 import os
+import io
+import ssl
+import smtplib
+import base64
 import uuid
 import shutil
+from email.message import EmailMessage
 from docx import Document
 import tempfile
 
@@ -17,6 +22,8 @@ from backend.app.utils.error_handler import handle_errors
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+COLL_TEMPLATES = "contract_templates"   # template .docx persistenti (MongoDB-first)
 
 # Contract templates directory
 CONTRACTS_DIR = "/app/uploads/contracts"
@@ -39,6 +46,27 @@ def ensure_dirs():
     """Create directories if they don't exist."""
     os.makedirs(CONTRACTS_DIR, exist_ok=True)
     os.makedirs(TEMPLATES_DIR, exist_ok=True)
+
+
+async def _resolve_template(ct: Dict[str, str]) -> str:
+    """Risolve il percorso del template .docx.
+
+    Priorità MongoDB-first: se il template è salvato in `contract_templates`
+    (persistente tra i deploy), lo scrive in un file temporaneo e ritorna quel
+    path; altrimenti usa il file su disco in TEMPLATES_DIR (effimero su Render).
+    """
+    ensure_dirs()
+    db = Database.get_db()
+    doc = await db[COLL_TEMPLATES].find_one({"tipo": ct["id"]}, {"_id": 0, "file_data": 1})
+    if doc and doc.get("file_data"):
+        tmp = tempfile.mktemp(suffix=".docx")
+        with open(tmp, "wb") as f:
+            f.write(base64.b64decode(doc["file_data"]))
+        return tmp
+    disk = os.path.join(TEMPLATES_DIR, ct["filename"])
+    if os.path.exists(disk):
+        return disk
+    raise HTTPException(404, f"Template non caricato: {ct['name']}. Caricalo dalla sezione Assunzione.")
 
 
 def fill_contract_template(template_path: str, employee_data: Dict[str, Any]) -> str:
@@ -187,21 +215,46 @@ async def get_contract_types() -> List[Dict[str, str]]:
 @router.get("/templates")
 @handle_errors
 async def list_templates() -> List[Dict[str, Any]]:
-    """List available contract templates."""
+    """Elenco template con disponibilità (MongoDB-first, poi disco)."""
     ensure_dirs()
-    
+    db = Database.get_db()
+    in_mongo = {d["tipo"] async for d in db[COLL_TEMPLATES].find({}, {"_id": 0, "tipo": 1})}
     templates = []
     for ct in CONTRACT_TYPES:
-        template_path = os.path.join(TEMPLATES_DIR, ct["filename"])
-        exists = os.path.exists(template_path)
+        exists = (ct["id"] in in_mongo) or os.path.exists(os.path.join(TEMPLATES_DIR, ct["filename"]))
         templates.append({
             "id": ct["id"],
             "name": ct["name"],
             "filename": ct["filename"],
-            "available": exists
+            "available": exists,
         })
-    
     return templates
+
+
+@router.post("/template/{contract_type}")
+@handle_errors
+async def upload_template(contract_type: str, file: UploadFile = File(...)) -> Dict[str, Any]:
+    """Carica/sostituisce un template .docx (salvato su MongoDB, persistente)."""
+    ct = next((c for c in CONTRACT_TYPES if c["id"] == contract_type), None)
+    if not ct:
+        raise HTTPException(400, f"Tipo contratto non valido: {contract_type}")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "File vuoto")
+    if len(raw) > 12 * 1024 * 1024:
+        raise HTTPException(400, "File troppo grande (max 12MB)")
+    db = Database.get_db()
+    await db[COLL_TEMPLATES].update_one(
+        {"tipo": contract_type},
+        {"$set": {
+            "tipo": contract_type,
+            "name": ct["name"],
+            "filename": file.filename or ct["filename"],
+            "file_data": base64.b64encode(raw).decode("utf-8"),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+        upsert=True)
+    return {"ok": True, "tipo": contract_type, "name": ct["name"]}
 
 
 @router.post("/generate/{employee_id}")
@@ -237,15 +290,8 @@ async def generate_contract(employee_id: str, data: Dict[str, Any] = Body(...)) 
     if not employee:
         raise HTTPException(status_code=404, detail="Dipendente non trovato")
     
-    # Check template exists
-    template_path = os.path.join(TEMPLATES_DIR, ct["filename"])
-    if not os.path.exists(template_path):
-        # Try fallback path
-        fallback_path = f"/tmp/documenti contratti dipendente/{ct['filename']}"
-        if os.path.exists(fallback_path):
-            template_path = fallback_path
-        else:
-            raise HTTPException(status_code=404, detail=f"Template non trovato: {ct['filename']}")
+    # Risolvi template (MongoDB-first, fallback su disco)
+    template_path = await _resolve_template(ct)
     
     # Merge employee data with additional data
     employee_data = {**employee, **additional_data}
@@ -386,3 +432,79 @@ async def delete_contract(contract_id: str) -> Dict[str, Any]:
             pass  # Ignora errori filesystem, il dato importante è su MongoDB
     
     return {"success": True, "message": "Contratto eliminato"}
+
+
+# ---------------------------------------------------------------------------
+# Invio del contratto/regolamento per email al dipendente + presa visione
+# ---------------------------------------------------------------------------
+def _smtp_send(to_addr: str, subject: str, body: str, allegati: List[Dict[str, Any]]) -> None:
+    """Invio email con allegati via SMTP. Credenziali SOLO da env Render."""
+    host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    port = int(os.getenv("SMTP_PORT", "465"))
+    user = os.getenv("SMTP_EMAIL") or os.getenv("SMTP_USER")
+    pwd = os.getenv("SMTP_PASSWORD")
+    if not (user and pwd):
+        raise HTTPException(503, "Email non configurata: imposta SMTP_EMAIL e SMTP_PASSWORD in env Render.")
+    msg = EmailMessage()
+    msg["From"] = user
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    msg.set_content(body)
+    for a in allegati:
+        msg.add_attachment(a["data"], maintype="application",
+                           subtype="vnd.openxmlformats-officedocument.wordprocessingml.document",
+                           filename=a["filename"])
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context()) as s:
+            s.login(user, pwd)
+            s.send_message(msg)
+    else:
+        with smtplib.SMTP(host, port) as s:
+            s.starttls(context=ssl.create_default_context())
+            s.login(user, pwd)
+            s.send_message(msg)
+
+
+@router.post("/send/{contract_id}")
+@handle_errors
+async def send_contract(contract_id: str, data: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """Invia il contratto al dipendente via email. Se `includi_regolamento` è
+    true e il regolamento è generato per quel dipendente, lo allega anch'esso."""
+    db = Database.get_db()
+    contract = await db["employee_contracts"].find_one({"id": contract_id}, {"_id": 0})
+    if not contract:
+        raise HTTPException(404, "Contratto non trovato")
+    emp = await db[Collections.EMPLOYEES].find_one(
+        {"id": contract.get("employee_id")},
+        {"_id": 0, "nome": 1, "cognome": 1, "email": 1}) or {}
+    to_addr = (data.get("email") or emp.get("email") or "").strip()
+    if not to_addr:
+        raise HTTPException(400, "Email del dipendente mancante: inseriscila in anagrafica.")
+    if not contract.get("file_data"):
+        raise HTTPException(404, "File del contratto non disponibile")
+
+    allegati = [{"filename": contract.get("filename", "contratto.docx"),
+                 "data": base64.b64decode(contract["file_data"])}]
+    if data.get("includi_regolamento"):
+        reg = await db["employee_contracts"].find_one(
+            {"employee_id": contract.get("employee_id"), "contract_type": "regolamento"},
+            {"_id": 0, "file_data": 1, "filename": 1}, sort=[("generated_at", -1)])
+        if reg and reg.get("file_data"):
+            allegati.append({"filename": reg.get("filename", "regolamento.docx"),
+                             "data": base64.b64decode(reg["file_data"])})
+
+    nome = f"{emp.get('nome','')} {emp.get('cognome','')}".strip() or "Gentile collaboratore"
+    corpo = (
+        f"Gentile {nome},\n\n"
+        f"in allegato trova il contratto ({contract.get('contract_name','')}) e l'eventuale "
+        f"regolamento interno. La preghiamo di prenderne visione.\n\n"
+        f"È possibile accettare il regolamento dal portale dipendenti.\n\n"
+        f"Ceraldi Group S.r.l."
+    )
+    import asyncio
+    await asyncio.to_thread(_smtp_send, to_addr,
+                            f"Contratto di assunzione — {contract.get('contract_name','')}", corpo, allegati)
+    await db["employee_contracts"].update_one(
+        {"id": contract_id},
+        {"$set": {"inviato_il": datetime.now(timezone.utc).isoformat(), "inviato_a": to_addr}})
+    return {"ok": True, "inviato_a": to_addr, "allegati": len(allegati)}

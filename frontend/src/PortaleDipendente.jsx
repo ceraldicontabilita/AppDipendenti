@@ -490,8 +490,10 @@ function Gestione() {
 function Documenti() {
   const [docs, setDocs] = useState(null);
   const [busy, setBusy] = useState("");
+  const [reg, setReg] = useState(null);
   const load = useCallback(()=>{ api.get("/portale/documenti").then((r)=>setDocs(r.data)).catch(()=>setDocs([])); },[]);
-  useEffect(()=>{load();},[load]);
+  const loadReg = useCallback(()=>{ api.get("/portale/documenti/regolamento/stato").then((r)=>setReg(r.data)).catch(()=>setReg({disponibile:false})); },[]);
+  useEffect(()=>{load();loadReg();},[load,loadReg]);
   const perTipo = (t)=> (docs||[]).filter((d)=>d.tipo===t);
 
   const blobDownload = (data, nome) => {
@@ -520,6 +522,16 @@ function Documenti() {
   const elimina = async (d) => {
     if(!window.confirm("Eliminare questo documento?")) return;
     try { await api.delete(`/portale/documenti/${d.id}`); load(); } catch {}
+  };
+  const scaricaRegolamento = async () => {
+    try { const r = await api.get("/portale/documenti/regolamento/file", {responseType:"blob"});
+      blobDownload(r.data, "regolamento_interno.docx");
+    } catch { alert("Regolamento non ancora pubblicato dall'azienda."); }
+  };
+  const accettaRegolamento = async () => {
+    if(!window.confirm("Confermi di aver letto e di accettare il Regolamento Interno Aziendale?")) return;
+    try { await api.post("/portale/documenti/regolamento/accetta"); loadReg(); }
+    catch(e){ alert(e?.response?.data?.detail || "Errore"); }
   };
 
   if (!docs) return <div className="spin">Caricamento…</div>;
@@ -552,6 +564,22 @@ function Documenti() {
 
   return (
     <>
+      {reg && reg.disponibile && (
+        <div className="card" style={{borderLeft:"3px solid #5b7a6b"}}>
+          <h3 style={{marginTop:0}}><FolderOpen size={16}/> Regolamento interno aziendale</h3>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
+            <button className="btn gh sm" onClick={scaricaRegolamento}><Download size={14}/> Scarica e leggi</button>
+          </div>
+          {reg.accettato
+            ? <div className="pill ok"><Check size={11}/> Accettato il {reg.accettato_il ? fmt(reg.accettato_il) : ""}</div>
+            : <>
+                <div className="muted" style={{fontSize:13,marginBottom:8}}>
+                  Dopo averlo letto, conferma l'accettazione: viene registrata con data e ora.
+                </div>
+                <button className="btn" onClick={accettaRegolamento}><Check size={14}/> Dichiaro di aver letto e accetto</button>
+              </>}
+        </div>
+      )}
       <div className="card">
         <h3 style={{marginTop:0}}><FolderOpen size={16}/> Moduli da compilare</h3>
         <div className="muted" style={{fontSize:13,marginBottom:6}}>

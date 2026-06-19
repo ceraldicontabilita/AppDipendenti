@@ -239,3 +239,57 @@ def _genera_modulo(tipo: str, label: str, nome_dip: str) -> bytes:
     line("Esito: [ ] Accolta   [ ] Respinta   [ ] In valutazione", 10)
     line("Firma azienda: ______________________________", 11)
     return pdf.tobytes()
+
+
+# ---------------------------------------------------------------------------
+# Regolamento interno aziendale: il dipendente lo scarica e lo accetta (data certa)
+# ---------------------------------------------------------------------------
+COLL_TEMPLATES = "contract_templates"
+COLL_REG_ACC = "regolamento_accettazioni"
+
+
+@router.get("/regolamento/stato")
+async def regolamento_stato(identity: Dict[str, Any] = Depends(get_identity)):
+    db = Database.get_db()
+    acc = await db[COLL_REG_ACC].find_one({"dipendente_id": identity["id"]}, {"_id": 0})
+    disp = await db[COLL_TEMPLATES].find_one({"tipo": "regolamento"}, {"_id": 0, "tipo": 1})
+    return {
+        "disponibile": bool(disp),
+        "accettato": bool(acc),
+        "accettato_il": acc.get("accettato_il") if acc else None,
+    }
+
+
+@router.get("/regolamento/file")
+async def regolamento_file(identity: Dict[str, Any] = Depends(get_identity)):
+    db = Database.get_db()
+    doc = await db[COLL_TEMPLATES].find_one({"tipo": "regolamento"}, {"_id": 0, "file_data": 1, "filename": 1})
+    if not doc or not doc.get("file_data"):
+        raise HTTPException(404, "Regolamento non ancora pubblicato dall'azienda.")
+    data = base64.b64decode(doc["file_data"])
+    fname = doc.get("filename", "regolamento.docx")
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@router.post("/regolamento/accetta")
+async def regolamento_accetta(request: Request, identity: Dict[str, Any] = Depends(get_identity)):
+    db = Database.get_db()
+    disp = await db[COLL_TEMPLATES].find_one({"tipo": "regolamento"}, {"_id": 0, "tipo": 1})
+    if not disp:
+        raise HTTPException(404, "Regolamento non ancora pubblicato dall'azienda.")
+    quando = datetime.now(timezone.utc).isoformat()
+    xff = request.headers.get("x-forwarded-for")
+    ip = (xff.split(",")[0].strip() if xff else (request.client.host if request.client else "unknown"))
+    await db[COLL_REG_ACC].update_one(
+        {"dipendente_id": identity["id"]},
+        {"$set": {
+            "dipendente_id": identity["id"],
+            "accettato_il": quando,
+            "ip": ip,
+            "user_agent": request.headers.get("user-agent", ""),
+        }},
+        upsert=True)
+    return {"ok": True, "accettato_il": quando}
