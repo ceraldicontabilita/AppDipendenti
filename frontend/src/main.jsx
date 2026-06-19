@@ -6,10 +6,11 @@ import PortaleDipendente from './PortaleDipendente.jsx'
 import Landing from './Landing.jsx'
 import './index.css'
 
-// L'area gestione è riservata all'admin: chi non è admin loggato va al portale.
-function RequireAdmin({ children }) {
+// L'area gestione è riservata all'admin. Eccezione: il responsabile turni può
+// entrare SOLO nella pagina Turni dell'azienda (nient'altro).
+function RequireRole({ children, roles }) {
   const role = typeof window !== 'undefined' ? localStorage.getItem('pt_role') : null
-  if (role !== 'admin') return <Navigate to="/portale" replace />
+  if (!roles.includes(role)) return <Navigate to="/portale" replace />
   return children
 }
 
@@ -18,8 +19,9 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     <Routes>
       <Route path="/" element={<Landing />} />
       <Route path="/portale" element={<PortaleDipendente />} />
-      <Route path="/dipendenti" element={<RequireAdmin><App page="dashboard" /></RequireAdmin>} />
-      <Route path="/dipendenti/:page" element={<RequireAdmin><App /></RequireAdmin>} />
+      <Route path="/dipendenti/turni" element={<RequireRole roles={['admin','responsabile_turni']}><App page="turni" /></RequireRole>} />
+      <Route path="/dipendenti" element={<RequireRole roles={['admin']}><App page="dashboard" /></RequireRole>} />
+      <Route path="/dipendenti/:page" element={<RequireRole roles={['admin']}><App /></RequireRole>} />
     </Routes>
   </BrowserRouter>
 )

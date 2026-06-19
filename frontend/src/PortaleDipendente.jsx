@@ -3,7 +3,7 @@ import axios from "axios";
 import {
   Calendar, FileText, Inbox, Bell, Users, LogOut, Download,
   Check, ChevronLeft, Send, Eye, ClipboardList, Settings,
-  FolderOpen, Upload, Trash2, AlertTriangle,
+  FolderOpen, Upload, Trash2, AlertTriangle, Grid3X3,
 } from "lucide-react";
 import "./portale.css";
 
@@ -601,6 +601,7 @@ export default function PortaleDipendente() {
         <h1>Portale Dipendenti</h1>
         <div className="sub">{localStorage.getItem("pt_name")}{isGestore?` · ${role==="admin"?"admin":"responsabile turni"}`:""}</div>
         {role==="admin" && <button className="logout" style={{right:96,background:"#3f5a4e",color:"#fff"}} onClick={()=>{window.location.href="/dipendenti";}}><Settings size={13}/> Gestione</button>}
+        {role==="responsabile_turni" && <button className="logout" style={{right:96,background:"#3f5a4e",color:"#fff"}} onClick={()=>{window.location.href="/dipendenti/turni";}}><Grid3X3 size={13}/> Turni azienda</button>}
         <button className="logout" onClick={logout}><LogOut size={13}/> Esci</button>
       </div>
       <div className="pt-body">

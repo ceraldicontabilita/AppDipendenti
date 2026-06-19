@@ -56,10 +56,13 @@ const Avatar = ({ nome, cognome, size = "md" }) => {
 };
 
 // Main App Component with Router
-export default function DipendentiCloudApp() {
-  const { page } = useParams();
+export default function DipendentiCloudApp({ page: pageProp }) {
+  const { page: pageParam } = useParams();
   const navigate = useNavigate();
-  const currentPage = page || "dashboard";
+  const role = typeof window !== "undefined" ? localStorage.getItem("pt_role") : null;
+  // Il responsabile turni entra in azienda ma può stare SOLO sulla pagina Turni.
+  const soloTurni = role === "responsabile_turni";
+  const currentPage = soloTurni ? "turni" : (pageProp || pageParam || "dashboard");
 
   const [dipendenti, setDipendenti] = useState([]);
   const [presenze, setPresenze] = useState([]);
@@ -110,7 +113,9 @@ export default function DipendentiCloudApp() {
   })();
 
   // Menu items
-  const menuItems = [
+  const menuItems = soloTurni ? [
+    { id: "turni", label: "Turni", icon: Grid3X3, section: "TURNI" },
+  ] : [
     { id: "dashboard", label: "Pannello di controllo", icon: Home, section: "GESTIONE" },
     { id: "anagrafica", label: "Anagrafica", icon: User, section: "DIPENDENTI" },
     { id: "presenze", label: "Presenze", icon: Calendar, section: "DIPENDENTI" },
