@@ -3,6 +3,7 @@ import axios from "axios";
 import {
   Calendar, FileText, Inbox, Bell, Users, LogOut, Download,
   Check, ChevronLeft, Send, Eye, ClipboardList, Settings,
+  FolderOpen, Upload, Trash2, AlertTriangle,
 } from "lucide-react";
 import "./portale.css";
 
@@ -225,6 +226,11 @@ function Buste() {
   const accetta = async (b) => {
     try { await api.post(`/portale/buste/${b.id}/presa-visione`); } catch {}
     setAperta(null); load();
+    setTimeout(()=>alert(
+      "Presa visione registrata con data e ora.\n\n" +
+      "Se non sei d'accordo con questa busta puoi contestarla: vai nella sezione " +
+      "Documenti e scarica il «Modulo di contestazione busta paga»."
+    ), 80);
   };
   if (!buste) return <div className="spin">Caricamento…</div>;
   if (buste.length === 0) return <div className="empty">Nessuna busta paga disponibile.</div>;
@@ -264,16 +270,17 @@ function Buste() {
                          padding:12,fontSize:13,lineHeight:1.55,margin:"12px 0"}}>
               Dichiaro di aver ricevuto e preso visione della busta paga relativa al mese
               di <b>{mm(aperta)}/{aperta.anno}</b>. La presente accettazione viene registrata
-              con data e ora e ha valore di ricevuta.
+              con data e ora e ha valore di ricevuta. In caso di disaccordo posso contestare
+              la busta tramite il modulo nella sezione <b>Documenti</b>.
             </div>
             {aperta.presa_visione && (
-              <div className="pill ok" style={{marginBottom:12}}><Check size={11}/> Già accettata</div>
+              <div className="pill ok" style={{marginBottom:12}}><Check size={11}/> Già accettata il {aperta.presa_visione_il ? fmt(aperta.presa_visione_il) : ""}</div>
             )}
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
               <button className="btn sec" onClick={()=>scarica(aperta)}><Download size={14}/> Scarica PDF</button>
               {aperta.presa_visione
                 ? <button className="btn" onClick={()=>setAperta(null)}>Chiudi</button>
-                : <button className="btn" onClick={()=>accetta(aperta)}><Check size={14}/> Accetto e conferma presa visione</button>}
+                : <button className="btn" onClick={()=>accetta(aperta)}><Check size={14}/> Chiudi e conferma presa visione</button>}
             </div>
           </div>
         </div>
@@ -456,6 +463,115 @@ function Gestione() {
   );
 }
 
+/* ---------------- DOCUMENTI ---------------- */
+function Documenti() {
+  const [docs, setDocs] = useState(null);
+  const [busy, setBusy] = useState("");
+  const load = useCallback(()=>{ api.get("/portale/documenti").then((r)=>setDocs(r.data)).catch(()=>setDocs([])); },[]);
+  useEffect(()=>{load();},[load]);
+  const perTipo = (t)=> (docs||[]).filter((d)=>d.tipo===t);
+
+  const blobDownload = (data, nome) => {
+    const url = URL.createObjectURL(data);
+    const a = document.createElement("a"); a.href=url; a.download=nome; a.click();
+    URL.revokeObjectURL(url);
+  };
+  const scaricaModulo = async (tipo) => {
+    try { const r = await api.get(`/portale/documenti/modulo/${tipo}`, {responseType:"blob"});
+      blobDownload(r.data, `modulo_${tipo}.pdf`);
+    } catch { alert("Modulo non disponibile"); }
+  };
+  const scaricaFile = async (d) => {
+    try { const r = await api.get(`/portale/documenti/${d.id}/file`, {responseType:"blob"});
+      blobDownload(r.data, d.nome_file || "documento");
+    } catch { alert("Documento non disponibile"); }
+  };
+  const carica = async (tipo, ev) => {
+    const file = ev.target.files?.[0]; if(!file) return;
+    const fd = new FormData(); fd.append("tipo", tipo); fd.append("file", file);
+    setBusy(tipo);
+    try { await api.post("/portale/documenti/upload", fd, {headers:{"Content-Type":"multipart/form-data"}}); load(); }
+    catch(e){ alert(e?.response?.data?.detail || "Errore nel caricamento"); }
+    setBusy(""); ev.target.value="";
+  };
+  const elimina = async (d) => {
+    if(!window.confirm("Eliminare questo documento?")) return;
+    try { await api.delete(`/portale/documenti/${d.id}`); load(); } catch {}
+  };
+
+  if (!docs) return <div className="spin">Caricamento…</div>;
+
+  const FileRow = ({d, eliminabile}) => (
+    <div className="row" style={{padding:"8px 0",borderTop:"1px solid #efeae0"}}>
+      <div style={{minWidth:0}}>
+        <div style={{fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{d.nome_file}</div>
+        <div className="muted" style={{fontSize:12}}>{fmt(d.caricato_il)} · {d.caricato_da==="azienda"?"dall'azienda":"caricato da te"}</div>
+      </div>
+      <div style={{display:"flex",gap:6}}>
+        <button className="btn gh sm" onClick={()=>scaricaFile(d)}><Download size={14}/></button>
+        {eliminabile && <button className="btn gh sm" onClick={()=>elimina(d)}><Trash2 size={14}/></button>}
+      </div>
+    </div>
+  );
+  const UploadBtn = ({tipo, label}) => (
+    <label className="btn sec sm" style={{cursor:"pointer",margin:0}}>
+      <Upload size={14}/> {busy===tipo ? "Carico…" : (label||"Carica file")}
+      <input type="file" style={{display:"none"}} disabled={busy===tipo}
+             onChange={(e)=>carica(tipo,e)} />
+    </label>
+  );
+
+  const moduli = [
+    { t:"contestazione", l:"Contestazione busta paga" },
+    { t:"richiesta_ferie", l:"Richiesta ferie / permessi" },
+    { t:"richiesta_acconto_tfr", l:"Richiesta acconto TFR" },
+  ];
+
+  return (
+    <>
+      <div className="card">
+        <h3 style={{marginTop:0}}><FolderOpen size={16}/> Moduli da compilare</h3>
+        <div className="muted" style={{fontSize:13,marginBottom:6}}>
+          Scarica il modulo, compilalo e ricaricalo qui. L'azienda lo riceverà.
+        </div>
+        {moduli.map((m)=>(
+          <div key={m.t} style={{borderTop:"1px solid #efeae0",padding:"10px 0"}}>
+            <div style={{fontWeight:700,marginBottom:6}}>{m.l}</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <button className="btn gh sm" onClick={()=>scaricaModulo(m.t)}><Download size={14}/> Scarica modulo</button>
+              <UploadBtn tipo={m.t} label="Invia compilato"/>
+            </div>
+            {perTipo(m.t).map((d)=><FileRow key={d.id} d={d} eliminabile={d.categoria==="caricato_dipendente"}/>)}
+          </div>
+        ))}
+      </div>
+
+      <div className="card">
+        <h3 style={{marginTop:0}}>Certificazione Unica (CU)</h3>
+        {perTipo("certificazione_unica").length===0
+          ? <div className="muted" style={{fontSize:13}}>Nessuna CU caricata dall'azienda.</div>
+          : perTipo("certificazione_unica").map((d)=><FileRow key={d.id} d={d}/>)}
+      </div>
+
+      <div className="card">
+        <h3 style={{marginTop:0}}>Unilav</h3>
+        {perTipo("unilav").length===0
+          ? <div className="muted" style={{fontSize:13}}>Nessun Unilav caricato dall'azienda.</div>
+          : perTipo("unilav").map((d)=><FileRow key={d.id} d={d}/>)}
+      </div>
+
+      <div className="card">
+        <h3 style={{marginTop:0}}>Documenti di riconoscimento</h3>
+        <div className="muted" style={{fontSize:13,marginBottom:8}}>
+          Carica carta d'identità, codice fiscale o patente.
+        </div>
+        <UploadBtn tipo="documento_riconoscimento" label="Carica documento"/>
+        {perTipo("documento_riconoscimento").map((d)=><FileRow key={d.id} d={d} eliminabile={d.categoria==="caricato_dipendente"}/>)}
+      </div>
+    </>
+  );
+}
+
 /* ---------------- SHELL ---------------- */
 export default function PortaleDipendente() {
   const [logged, setLogged] = useState(!!localStorage.getItem(TK));
@@ -473,6 +589,7 @@ export default function PortaleDipendente() {
   const tabs = [
     { k:"turni", l:"Turni", icon:Calendar },
     { k:"buste", l:"Buste", icon:FileText },
+    { k:"documenti", l:"Documenti", icon:FolderOpen },
     { k:"richieste", l:"Richieste", icon:Inbox },
     { k:"notifiche", l:"Avvisi", icon:Bell },
     ...(isGestore ? [{ k:"gestione", l:"Gestione", icon:Settings }] : []),
@@ -489,6 +606,7 @@ export default function PortaleDipendente() {
       <div className="pt-body">
         {tab==="turni" && <Turni/>}
         {tab==="buste" && <Buste/>}
+        {tab==="documenti" && <Documenti/>}
         {tab==="richieste" && <Richieste/>}
         {tab==="notifiche" && <Notifiche onChange={refreshBadge}/>}
         {tab==="gestione" && isGestore && <Gestione/>}

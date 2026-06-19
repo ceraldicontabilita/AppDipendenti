@@ -48,8 +48,10 @@ def register_routers():
 
     from .routers import cedolini, cedolini_riconciliazione, tfr, attendance, dimissioni, richieste, portale_buste, turni, notifiche
     from .routers import dipendenti_cloud
+    from .routers import portale_documenti
     app.include_router(richieste.router, prefix="/api/richieste", tags=["Richieste"])
     app.include_router(portale_buste.router, prefix="/api/portale/buste", tags=["Portale Buste"])
+    app.include_router(portale_documenti.router, prefix="/api/portale/documenti", tags=["Portale Documenti"])
     app.include_router(turni.router, prefix="/api/turni", tags=["Turni"])
     app.include_router(notifiche.router, prefix="/api/notifiche", tags=["Notifiche"])
     # App "Dipendenti in Cloud" (8 pagine HR) -> /api/dipendenti-cloud
