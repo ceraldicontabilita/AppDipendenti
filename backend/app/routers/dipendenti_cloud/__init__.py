@@ -762,42 +762,23 @@ _RICON_FIELDS = ["bonifico_importo", "bonifico_data", "bonifico_ricevuto", "boni
 
 
 @router.post("/_unif_esegui")
-async def esegui_unificazione(dry_run: bool = True, limit: int = 60):
-    """Unifica paghe_mensili dentro cedolini, A BATCH per non superare il timeout HTTP.
-    Marca i cedolini toccati con unif_arricchito=True così le chiamate successive non rifanno
-    il lavoro. Chiamare ripetutamente finché restanti=0. NON cancella paghe_mensili."""
+async def esegui_unificazione(dry_run: bool = True, limit: int = 25):
+    """Unifica paghe_mensili dentro cedolini, A PICCOLI BATCH leggeri: processa solo i record
+    non ancora migrati (flag _migrato sul documento paghe_mensili), così ogni chiamata è veloce.
+    Chiamare ripetutamente finché completato=True. NON cancella paghe_mensili."""
     db = get_db()
-    dips = await db.dipendenti.find({}, {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "nome_completo": 1}).to_list(1000)
-    nome_di = {}
-    for d in dips:
-        nome_di[d.get("id")] = d.get("nome_completo") or f"{d.get('cognome','')} {d.get('nome','')}".strip()
-    ced = await db.cedolini.find({}, {"_id": 0, "id": 1, "dipendente_id": 1, "anno": 1, "mese": 1, "unif_arricchito": 1}).to_list(6000)
-    ced_idx = {}
-    for c in ced:
-        ced_idx.setdefault((c.get("dipendente_id"), c.get("anno"), c.get("mese")), c)
-    pm = await db.paghe_mensili.find({}, {"_id": 0}).to_list(6000)
-
-    arricchiti, creati, saltati, restanti = 0, 0, 0, 0
-    for p in pm:
-        k = (p.get("dipendente_id"), p.get("anno"), p.get("mese"))
+    pendenti = await db.paghe_mensili.find({"_migrato": {"$ne": True}}).to_list(limit)
+    if not pendenti:
+        return {"dry_run": dry_run, "fatti_ora": 0, "restanti_da_fare": 0, "completato": True}
+    arricchiti = creati = saltati = 0
+    for p in pendenti:
+        k = {"dipendente_id": p.get("dipendente_id"), "anno": p.get("anno"), "mese": p.get("mese")}
         ricon = {f: p[f] for f in _RICON_FIELDS if f in p and p[f] is not None}
-        c = ced_idx.get(k)
-        if c and c.get("unif_arricchito"):
-            continue  # già fatto
-        if c is None:
-            netto = p.get("importo_busta")
-            if netto is None:
-                netto = p.get("netto_atteso")
-            if not netto or float(netto) <= 0:
-                saltati += 1
-                continue
-        # da fare: conta verso il limite
-        if limit and (arricchiti + creati) >= limit:
-            restanti += 1
-            continue
+        c = await db.cedolini.find_one(k, {"_id": 0, "id": 1})
         if dry_run:
             if c: arricchiti += 1
-            else: creati += 1
+            elif (p.get("importo_busta") or p.get("netto_atteso") or 0) > 0: creati += 1
+            else: saltati += 1
             continue
         if c:
             upd = dict(ricon); upd["unif_arricchito"] = True
@@ -805,17 +786,25 @@ async def esegui_unificazione(dry_run: bool = True, limit: int = 60):
             arricchiti += 1
         else:
             netto = p.get("importo_busta") or p.get("netto_atteso")
-            nuovo = {"id": str(uuid.uuid4()), "dipendente_id": p.get("dipendente_id"),
-                     "dipendente_nome": nome_di.get(p.get("dipendente_id"), ""),
-                     "anno": p.get("anno"), "mese": p.get("mese"),
-                     "netto": float(netto), "stato": "importato",
-                     "origine_unificazione": True, "unif_arricchito": True, "created_at": now_iso()}
-            nuovo.update(ricon)
-            await db.cedolini.insert_one(nuovo)
-            creati += 1
+            if not netto or float(netto) <= 0:
+                saltati += 1
+            else:
+                dip = await db.dipendenti.find_one({"id": p.get("dipendente_id")},
+                                                   {"_id": 0, "nome": 1, "cognome": 1, "nome_completo": 1})
+                nome = (dip or {}).get("nome_completo") or (f"{(dip or {}).get('cognome','')} {(dip or {}).get('nome','')}".strip() if dip else "")
+                nuovo = {"id": str(uuid.uuid4()), "dipendente_id": p.get("dipendente_id"),
+                         "dipendente_nome": nome, "anno": p.get("anno"), "mese": p.get("mese"),
+                         "netto": float(netto), "stato": "importato",
+                         "origine_unificazione": True, "unif_arricchito": True, "created_at": now_iso()}
+                nuovo.update(ricon)
+                await db.cedolini.insert_one(nuovo)
+                creati += 1
+        await db.paghe_mensili.update_one(
+            {"dipendente_id": p.get("dipendente_id"), "anno": p.get("anno"), "mese": p.get("mese")},
+            {"$set": {"_migrato": True}})
+    restanti = await db.paghe_mensili.count_documents({"_migrato": {"$ne": True}})
     return {"dry_run": dry_run, "arricchiti_ora": arricchiti, "creati_ora": creati,
-            "saltati_netto_assente": saltati, "restanti_da_fare": restanti,
-            "completato": restanti == 0}
+            "saltati_ora": saltati, "restanti_da_fare": restanti, "completato": restanti == 0}
 
 
 @router.get("/prestiti")
