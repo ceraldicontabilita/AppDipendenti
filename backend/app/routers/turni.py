@@ -3,7 +3,7 @@ Turni settimanali: generazione con vincoli, bozza→pubblicato, modifica con
 rivalidazione, pubblicazione con notifica al dipendente.
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, HTTPException, Body, Depends
 
@@ -262,12 +262,17 @@ async def salva_griglia(
     return {"ok": True, "settimana_inizio": settimana, "dipendenti_notificati": notificati}
 
 
-@router.get("/griglia/corrente", summary="Ultima griglia turni pubblicata (tutti)")
+@router.get("/griglia/corrente", summary="Griglia turni della settimana corrente (tutti)")
 async def griglia_corrente(identity: Dict[str, Any] = Depends(get_identity)):
     db = Database.get_db()
+    # Settimana che contiene oggi (lunedì corrente); fallback all'ultima pubblicata.
+    oggi = datetime.now(timezone.utc).date()
+    lunedi = (oggi - timedelta(days=oggi.weekday())).isoformat()
     doc = await db[COLL_GRIGLIA].find_one(
-        {"stato": "pubblicato"}, {"_id": 0}, sort=[("settimana_inizio", -1)]
-    )
+        {"settimana_inizio": lunedi, "stato": "pubblicato"}, {"_id": 0})
+    if not doc:
+        doc = await db[COLL_GRIGLIA].find_one(
+            {"stato": "pubblicato"}, {"_id": 0}, sort=[("settimana_inizio", -1)])
     if not doc:
         return {"settimana_inizio": None, "persone": [], "giorni": []}
     return doc

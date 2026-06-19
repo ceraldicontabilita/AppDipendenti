@@ -25,9 +25,9 @@ router = APIRouter()
 
 COLL_TEMPLATES = "contract_templates"   # template .docx persistenti (MongoDB-first)
 
-# Contract templates directory
-CONTRACTS_DIR = "/app/uploads/contracts"
-TEMPLATES_DIR = "/app/uploads/contract_templates"
+# Directory effimere (solo file temporanei di lavorazione): /tmp è scrivibile su Render.
+CONTRACTS_DIR = "/tmp/uploads/contracts"
+TEMPLATES_DIR = "/tmp/uploads/contract_templates"
 
 # Available contract types
 CONTRACT_TYPES = [
@@ -43,9 +43,12 @@ CONTRACT_TYPES = [
 
 
 def ensure_dirs():
-    """Create directories if they don't exist."""
-    os.makedirs(CONTRACTS_DIR, exist_ok=True)
-    os.makedirs(TEMPLATES_DIR, exist_ok=True)
+    """Create directories if they don't exist (best-effort)."""
+    for d in (CONTRACTS_DIR, TEMPLATES_DIR):
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
 
 
 async def _resolve_template(ct: Dict[str, str]) -> str:

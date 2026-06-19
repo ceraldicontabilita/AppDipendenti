@@ -76,7 +76,7 @@ function Login({ onLogin }) {
         <ChevronLeft size={16} /> indietro</button>
       <h2 style={{ marginTop: 18 }}>Ciao {sel.nome_completo.split(" ")[0]}</h2>
       <div className="muted" style={{ textAlign: "center" }}>Inserisci il tuo PIN</div>
-      <div className="pin-dots">{[0,1,2,3].map((i)=><i key={i} className={pin.length>i?"on":""} />)}</div>
+      <div className="pin-dots">{Array.from({length: Math.max(6, pin.length)}).map((_,i)=><i key={i} className={pin.length>i?"on":""} />)}</div>
       {err && <div className="err">{err}</div>}
       <div className="pinpad">
         {[1,2,3,4,5,6,7,8,9].map((n)=><button key={n} onClick={()=>press(n)}>{n}</button>)}

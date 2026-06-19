@@ -1101,6 +1101,12 @@ function TurniPage({ dipendenti, turni, reload }) {
   const TEAM = ["luigi", "angela", "giuliano", "liliana", "carmine", "mario"];
   const isTeam = (dip) => TEAM.includes((dip.nome || "").trim().toLowerCase());
   const UNICI = ["Lunga", "Riposo"]; // un solo turno di questo tipo per giorno
+  // Dipendenti da NON mostrare nei turni (richiesta titolare)
+  const NASCOSTI = [["antonella","ceraldi"],["marina","liuzza"],["vincenzo","ceraldi"],["valerio","ceraldi"]];
+  const isNascosto = (d) => { const f = `${d.nome||""} ${d.cognome||""}`.toLowerCase(); return NASCOSTI.some(([a,b]) => f.includes(a) && f.includes(b)); };
+  // Sempre presente tutti i giorni (amministratrice)
+  const isSemprePresente = (d) => { const f = `${d.nome||""} ${d.cognome||""}`.toLowerCase(); return f.includes("antonietta") && f.includes("ceraldi"); };
+  const dipTurni = dipendenti.filter(d => !isNascosto(d));
 
   const salva = async (updates) => {
     setBusy(true);
@@ -1166,6 +1172,10 @@ function TurniPage({ dipendenti, turni, reload }) {
     };
     assegnaPersona(["vespa", "capezzuto"], ferB1, domCapVespa);   // lavorano domenica (mattina)
     assegnaPersona(["parisi", "moscato"], ferB2, "Riposo");        // riposo domenica
+    // Ceraldi Antonietta: presente tutti i giorni (turno modificabile cella per cella)
+    dipendenti.filter(isSemprePresente).forEach(dip => {
+      giorni.forEach(g => updates.push({ dipendente_id: dip.id, giorno: g, turno_id: idTurno("Mattina 7-15") || null }));
+    });
     if (updates.length) await salva(updates);
   };
 
@@ -1223,7 +1233,7 @@ function TurniPage({ dipendenti, turni, reload }) {
             </tr>
           </thead>
           <tbody ref={tbodyRef}>
-            {dipendenti.map(dip => (
+            {dipTurni.map(dip => (
               <tr key={dip.id} data-id={dip.id}>
                 <td className="dc-drag-handle" style={{ cursor: "grab", color: "#94a3b8", textAlign: "center", userSelect: "none", touchAction: "none" }} title="Trascina per riordinare">⠿</td>
                 <td>
