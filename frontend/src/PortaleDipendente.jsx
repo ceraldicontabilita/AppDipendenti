@@ -219,15 +219,15 @@ function Buste() {
   const chiudi = () => { setVisionato(false); setAperta(null); };
   const mm = (b)=>String(b.mese).padStart(2,"0");
   const visiona = async (b) => {
-    const win = window.open("", "_blank");        // aperto nel gesto utente: niente blocco popup
+    setVisionato(true);                            // sblocca subito Accetto/Contesta
+    const win = window.open("", "_blank");         // aperto nel gesto utente: niente blocco popup
     try {
       const r = await api.get(`/portale/buste/${b.id}/pdf`, { responseType: "blob" });
       const url = URL.createObjectURL(r.data);
       if (win) { win.location = url; }
       else { const a=document.createElement("a"); a.href=url; a.download=b.filename||`busta_${b.mese}_${b.anno}.pdf`; a.click(); }
-      setVisionato(true);
       setTimeout(()=>URL.revokeObjectURL(url), 60000);
-    } catch { if (win) win.close(); alert("PDF non disponibile"); }
+    } catch { if (win) win.close(); alert("PDF non disponibile, riprova o contatta l'ufficio."); }
   };
   const accetta = async (b) => {
     try { await api.post(`/portale/buste/${b.id}/presa-visione`); } catch {}
