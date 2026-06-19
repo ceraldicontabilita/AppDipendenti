@@ -90,6 +90,8 @@ async def le_mie_buste(identity: Dict[str, Any] = Depends(get_identity)) -> List
             "competenza": c.get("competenza"),
             "netto": c.get("netto", 0),
             "lordo": c.get("lordo", 0),
+            "acconto_cedolino": c.get("acconto_cedolino"),
+            "saldo_residuo": c.get("saldo_residuo"),
             "filename": c.get("filename") or c.get("pdf_filename"),
             "ha_pdf": bool(c.get("pdf_data")) if "pdf_data" in c else None,
             "presa_visione": cid in accettate,
@@ -121,21 +123,28 @@ async def scarica_pdf(cedolino_id: str, request: Request,
                       identity: Dict[str, Any] = Depends(get_identity)):
     doc = await _carica_mia_busta(cedolino_id, identity,
                                   proj={"_id": 0, "pdf_data": 1, "filename": 1,
-                                        "pdf_filename": 1, "mese": 1, "anno": 1})
+                                        "pdf_filename": 1, "mese": 1, "anno": 1,
+                                        "netto": 1, "lordo": 1, "dipendente_nome": 1,
+                                        "acconto_cedolino": 1, "saldo_residuo": 1})
     pdf_data = doc.get("pdf_data")
-    if not pdf_data:
-        raise HTTPException(404, "PDF non disponibile per questa busta")
-    try:
-        pdf_bytes = base64.b64decode(pdf_data)
-    except Exception:
-        raise HTTPException(500, "PDF corrotto")
+    generato = False
+    if pdf_data:
+        try:
+            pdf_bytes = base64.b64decode(pdf_data)
+        except Exception:
+            raise HTTPException(500, "PDF corrotto")
+    else:
+        # Nessun PDF originale (es. busta importata dal Libro Unico): genero un
+        # riepilogo leggibile coi dati disponibili, così è comunque scaricabile.
+        pdf_bytes = _genera_pdf_riepilogo(doc)
+        generato = True
 
     db = Database.get_db()
     await log_evento(
         modulo="cedolini", azione="download",
         entita_id=cedolino_id, entita_collection=COLL_CED, db=db,
         fonte="portale", utente=identity["id"],
-        dettaglio=f"Download busta {doc.get('mese')}/{doc.get('anno')}",
+        dettaglio=f"Download busta {doc.get('mese')}/{doc.get('anno')}" + (" (riepilogo generato)" if generato else ""),
         extra={"ip": _client_ip(request), "user_agent": request.headers.get("user-agent", "")},
     )
     fname = doc.get("pdf_filename") or doc.get("filename") or f"busta_{doc.get('mese')}_{doc.get('anno')}.pdf"
@@ -144,6 +153,38 @@ async def scarica_pdf(cedolino_id: str, request: Request,
         io.BytesIO(pdf_bytes), media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+def _genera_pdf_riepilogo(doc: Dict[str, Any]) -> bytes:
+    """Genera un PDF di riepilogo della busta dai dati in cedolini quando manca l'originale."""
+    import fitz
+    pdf = fitz.open()
+    page = pdf.new_page()
+    mese = str(doc.get("mese", "")).zfill(2)
+    anno = doc.get("anno", "")
+    righe = [
+        ("Ceraldi Group SRL", 20, True),
+        ("Riepilogo busta paga", 14, False),
+        ("", 8, False),
+        (f"Dipendente: {doc.get('dipendente_nome', '') or '-'}", 12, False),
+        (f"Periodo: {mese}/{anno}", 12, False),
+        (f"Netto: € {float(doc.get('netto') or 0):.2f}", 13, True),
+    ]
+    if doc.get("lordo"):
+        righe.append((f"Lordo: € {float(doc.get('lordo') or 0):.2f}", 11, False))
+    if doc.get("acconto_cedolino"):
+        righe.append((f"Acconto già erogato: € {float(doc['acconto_cedolino']):.2f}", 11, False))
+        righe.append((f"Saldo da pagare: € {float(doc.get('saldo_residuo') or 0):.2f}", 11, False))
+    righe.append(("", 10, False))
+    righe.append(("Documento di riepilogo generato dal sistema. Il cedolino", 9, False))
+    righe.append(("ufficiale completo è quello fornito dal consulente del lavoro.", 9, False))
+    y = 70
+    for testo, size, grassetto in righe:
+        if testo:
+            page.insert_text((60, y), testo, fontsize=size,
+                             fontname="helv" if not grassetto else "hebo")
+        y += size + 10
+    return pdf.tobytes()
 
 
 @router.post("/{cedolino_id}/presa-visione", summary="Conferma presa visione/accettazione")

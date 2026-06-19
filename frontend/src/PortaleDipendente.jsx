@@ -210,6 +210,7 @@ function Turni() {
 /* ---------------- BUSTE ---------------- */
 function Buste() {
   const [buste, setBuste] = useState(null);
+  const [aperta, setAperta] = useState(null);
   const load = useCallback(()=>{ api.get("/portale/buste").then((r)=>setBuste(r.data)).catch(()=>setBuste([])); },[]);
   useEffect(()=>{load();},[load]);
   const scarica = async (b) => {
@@ -221,25 +222,64 @@ function Buste() {
       URL.revokeObjectURL(url);
     } catch { alert("PDF non disponibile"); }
   };
-  const presaVisione = async (b) => {
-    try { await api.post(`/portale/buste/${b.id}/presa-visione`); load(); } catch {}
+  const accetta = async (b) => {
+    try { await api.post(`/portale/buste/${b.id}/presa-visione`); } catch {}
+    setAperta(null); load();
   };
   if (!buste) return <div className="spin">Caricamento…</div>;
   if (buste.length === 0) return <div className="empty">Nessuna busta paga disponibile.</div>;
-  return buste.map((b)=>(
-    <div className="card" key={b.id}>
-      <div className="row">
-        <div><b>{String(b.mese).padStart(2,"0")}/{b.anno}</b>
-          <div className="muted">Netto € {Number(b.netto||0).toFixed(2)}</div></div>
-        {b.presa_visione ? <span className="pill ok"><Check size={11}/> Presa visione</span>
-          : <span className="pill warn">Da leggere</span>}
-      </div>
-      <div className="row" style={{marginTop:10,gap:8}}>
-        <button className="btn sec sm" onClick={()=>scarica(b)}><Download size={14}/> Scarica PDF</button>
-        {!b.presa_visione && <button className="btn sm" onClick={()=>presaVisione(b)}><Eye size={14}/> Confermo presa visione</button>}
-      </div>
-    </div>
-  ));
+  const mm = (b)=>String(b.mese).padStart(2,"0");
+  return (
+    <>
+      {buste.map((b)=>(
+        <div className="card" key={b.id}>
+          <div className="row">
+            <div><b>{mm(b)}/{b.anno}</b>
+              <div className="muted">Netto € {Number(b.netto||0).toFixed(2)}</div></div>
+            {b.presa_visione ? <span className="pill ok"><Check size={11}/> Presa visione</span>
+              : <span className="pill warn">Da leggere</span>}
+          </div>
+          <div className="row" style={{marginTop:10}}>
+            <button className="btn sm" style={{width:"100%",justifyContent:"center"}} onClick={()=>setAperta(b)}>
+              <Eye size={14}/> Apri busta
+            </button>
+          </div>
+        </div>
+      ))}
+      {aperta && (
+        <div onClick={()=>setAperta(null)}
+             style={{position:"fixed",inset:0,background:"rgba(30,27,40,.5)",display:"flex",
+                     alignItems:"center",justifyContent:"center",padding:18,zIndex:1000}}>
+          <div onClick={(e)=>e.stopPropagation()}
+               style={{background:"#fff",borderRadius:16,padding:20,maxWidth:440,width:"100%",
+                       maxHeight:"85vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,.3)"}}>
+            <h3 style={{margin:"0 0 2px"}}>Busta paga {mm(aperta)}/{aperta.anno}</h3>
+            <div className="muted">Netto € {Number(aperta.netto||0).toFixed(2)}</div>
+            {aperta.acconto_cedolino ? (
+              <div className="muted" style={{marginTop:2}}>
+                Acconto già erogato € {Number(aperta.acconto_cedolino).toFixed(2)} · saldo € {Number(aperta.saldo_residuo||0).toFixed(2)}
+              </div>
+            ) : null}
+            <div style={{background:"#eef3ef",border:"1px solid #d9e4dc",borderRadius:10,
+                         padding:12,fontSize:13,lineHeight:1.55,margin:"12px 0"}}>
+              Dichiaro di aver ricevuto e preso visione della busta paga relativa al mese
+              di <b>{mm(aperta)}/{aperta.anno}</b>. La presente accettazione viene registrata
+              con data e ora e ha valore di ricevuta.
+            </div>
+            {aperta.presa_visione && (
+              <div className="pill ok" style={{marginBottom:12}}><Check size={11}/> Già accettata</div>
+            )}
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              <button className="btn sec" onClick={()=>scarica(aperta)}><Download size={14}/> Scarica PDF</button>
+              {aperta.presa_visione
+                ? <button className="btn" onClick={()=>setAperta(null)}>Chiudi</button>
+                : <button className="btn" onClick={()=>accetta(aperta)}><Check size={14}/> Accetto e conferma presa visione</button>}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
 }
 
 /* ---------------- RICHIESTE ---------------- */
