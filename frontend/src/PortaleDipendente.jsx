@@ -226,10 +226,19 @@ function Buste() {
   const accetta = async (b) => {
     try { await api.post(`/portale/buste/${b.id}/presa-visione`); } catch {}
     setAperta(null); load();
+    setTimeout(()=>alert("Presa visione registrata con data e ora."), 80);
+  };
+  const contesta = async (b) => {
+    try {
+      const r = await api.get(`/portale/documenti/modulo/contestazione`, { responseType: "blob" });
+      const url = URL.createObjectURL(r.data);
+      const a = document.createElement("a"); a.href=url; a.download="modulo_contestazione.pdf"; a.click();
+      URL.revokeObjectURL(url);
+    } catch {}
+    setAperta(null);
     setTimeout(()=>alert(
-      "Presa visione registrata con data e ora.\n\n" +
-      "Se non sei d'accordo con questa busta puoi contestarla: vai nella sezione " +
-      "Documenti e scarica il «Modulo di contestazione busta paga»."
+      "Hai scaricato il modulo di contestazione.\n\nCompilalo e ricaricalo nella sezione Documenti. " +
+      "La busta resta NON accettata finché non decidi."
     ), 80);
   };
   if (!buste) return <div className="spin">Caricamento…</div>;
@@ -277,10 +286,13 @@ function Buste() {
               <div className="pill ok" style={{marginBottom:12}}><Check size={11}/> Già accettata il {aperta.presa_visione_il ? fmt(aperta.presa_visione_il) : ""}</div>
             )}
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
-              <button className="btn sec" onClick={()=>scarica(aperta)}><Download size={14}/> Scarica PDF</button>
+              <button className="btn sec" onClick={()=>scarica(aperta)}><Download size={14}/> Apri / scarica la busta (PDF)</button>
               {aperta.presa_visione
                 ? <button className="btn" onClick={()=>setAperta(null)}>Chiudi</button>
-                : <button className="btn" onClick={()=>accetta(aperta)}><Check size={14}/> Chiudi e conferma presa visione</button>}
+                : <>
+                    <button className="btn" onClick={()=>accetta(aperta)}><Check size={14}/> Accetto la busta</button>
+                    <button className="btn gh" style={{color:"#a6531c",borderColor:"#e6c6a8"}} onClick={()=>contesta(aperta)}><AlertTriangle size={14}/> Contesta la busta</button>
+                  </>}
             </div>
           </div>
         </div>

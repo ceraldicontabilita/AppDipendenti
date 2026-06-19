@@ -11,6 +11,7 @@ import os
 import io
 import zipfile
 import hashlib
+import base64
 import tempfile
 from datetime import datetime, timezone
 
@@ -342,18 +343,20 @@ def _lul_periodo(text):
     return None, None
 
 def _parse_lul(pdf_path):
-    """Raggruppa le pagine per codice fiscale (gestisce 1, 2 o 3 pagine a dipendente)."""
+    """Raggruppa le pagine per codice fiscale (gestisce 1, 2 o 3 pagine a dipendente).
+    Tiene anche traccia degli indici di pagina di ciascun dipendente, così l'import
+    può ritagliare il PDF reale del suo cedolino."""
     import pdfplumber
     ced = {}
     with pdfplumber.open(pdf_path) as pdf:
         cur = None
-        for page in pdf.pages:
+        for idx, page in enumerate(pdf.pages):
             t = page.extract_text() or ""
             cfs = _CF_RE.findall(t)
             mese, anno = _lul_periodo(t)
             if cfs:
                 cur = cfs[0]
-                d = ced.setdefault(cur, {"nome": None, "netto": None, "mese": None, "anno": None})
+                d = ced.setdefault(cur, {"nome": None, "netto": None, "mese": None, "anno": None, "pagine": []})
                 if mese:
                     d["mese"], d["anno"] = mese, anno
                 for line in t.split("\n"):
@@ -362,6 +365,7 @@ def _parse_lul(pdf_path):
                         d["nome"] = mm.group(1).strip()
                         break
             if cur:
+                ced[cur].setdefault("pagine", []).append(idx)
                 n = _lul_netto(t)
                 if n:
                     ced[cur]["netto"] = n
@@ -374,6 +378,20 @@ def _parse_lul(pdf_path):
 
 def _to_float(s):
     return float(s.replace(".", "").replace(",", ".")) if s else None
+
+
+def _ritaglia_pdf(pdf_path, pagine):
+    """Estrae le pagine indicate dal PDF originale e le restituisce come bytes:
+    è il cedolino reale del singolo dipendente dentro il Libro Unico."""
+    import fitz
+    src = fitz.open(pdf_path)
+    out = fitz.open()
+    for i in sorted(set(pagine)):
+        if 0 <= i < src.page_count:
+            out.insert_pdf(src, from_page=i, to_page=i)
+    data = out.tobytes()
+    out.close(); src.close()
+    return data
 
 def _estrai_testo(pdf_path):
     import pdfplumber
@@ -670,6 +688,26 @@ async def _importa_documenti(pdf_items, errori_iniziali=None):
                 await get_db().paghe_mensili.update_one(
                     {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
                     {"$set": set_doc}, upsert=True)
+                # Cedolino (fonte del portale): salvo il PDF REALE ritagliato dal Libro
+                # Unico + il netto, così il dipendente scarica la sua busta vera.
+                ced_set = {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
+                           "netto": netto,
+                           "dipendente_nome": f"{dip.get('cognome','')} {dip.get('nome','')}".strip(),
+                           "updated_at": now_iso()}
+                if acconto and acconto > 0:
+                    ced_set["acconto_cedolino"] = acconto
+                    ced_set["saldo_residuo"] = round(netto - acconto, 2)
+                try:
+                    if info.get("pagine"):
+                        ced_set["pdf_data"] = base64.b64encode(_ritaglia_pdf(path, info["pagine"])).decode()
+                        ced_set["filename"] = f"busta_{anno}_{str(mese).zfill(2)}.pdf"
+                except Exception:
+                    pass
+                await get_db().cedolini.update_one(
+                    {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
+                    {"$set": ced_set,
+                     "$setOnInsert": {"id": generate_id(), "created_at": now_iso(), "stato": "importato"}},
+                    upsert=True)
                 ass.append({"dipendente_id": dip["id"],
                             "dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
                             "netto": netto, "metodo": metodo, "mese": mese, "anno": anno,
