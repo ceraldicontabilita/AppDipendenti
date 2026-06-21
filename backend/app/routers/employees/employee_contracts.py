@@ -148,28 +148,50 @@ def fill_contract_template(template_path: str, employee_data: Dict[str, Any]) ->
     mensilita_txt = " e ".join(mensilita_lista) if mensilita_lista else "12 mensilità"
 
     # All values to replace
+    def g(*keys, default="______"):
+        """Primo valore non vuoto tra le chiavi date; evita di scrivere 'None'."""
+        for k in keys:
+            v = employee_data.get(k)
+            if v not in (None, "", "None"):
+                return v
+        return default
+
+    def _fmt_date(v, default="______"):
+        """Formatta una data in gg/mm/aaaa; tollera ISO e valori già formattati."""
+        if v in (None, "", "None"):
+            return default
+        s = str(v)
+        try:
+            return datetime.fromisoformat(s.replace("Z", "")).strftime("%d/%m/%Y")
+        except (ValueError, TypeError):
+            return s
+
     data_values = {
         "nome_completo": nome_completo or "______",
-        "cognome": employee_data.get("cognome", "______"),
-        "nome": employee_data.get("nome", "______"),
-        "codice_fiscale": employee_data.get("codice_fiscale", "______"),
-        "data_nascita": employee_data.get("data_nascita", "______"),
-        "luogo_nascita": employee_data.get("luogo_nascita") or employee_data.get("comune_nascita", "______"),
-        "indirizzo": employee_data.get("indirizzo", "______"),
-        "mansione": employee_data.get("mansione") or employee_data.get("qualifica", "______"),
-        "livello": employee_data.get("livello", "______"),
-        "qualifica": employee_data.get("qualifica") or employee_data.get("mansione", "______"),
-        "stipendio_orario": str(stipendio_orario or "______"),
-        "data_inizio": employee_data.get("data_inizio") or employee_data.get("hire_date", "______"),
-        "data_fine": employee_data.get("data_fine", "______"),
+        "cognome": g("cognome"),
+        "nome": g("nome"),
+        "codice_fiscale": g("codice_fiscale", "cf"),
+        "data_nascita": _fmt_date(g("data_nascita", default=None)),
+        "luogo_nascita": g("luogo_nascita", "comune_nascita", "citta_nascita"),
+        "indirizzo": g("indirizzo", "residenza"),
+        "mansione": g("mansione", "qualifica"),
+        "livello": g("livello"),
+        "qualifica": g("qualifica", "mansione"),
+        "stipendio_orario": str(stipendio_orario) if stipendio_orario not in (None, "") else "______",
+        "data_inizio": _fmt_date(g("data_inizio", "hire_date", default=None)),
+        "data_fine": _fmt_date(g("data_fine", default=None), default=""),
         # Nuovi campi CCNL Turismo (usabili come {{chiave}} nei .docx)
         "ore_settimanali": str(ore_settimanali),
         "stipendio_mensile": _fmt_euro(mensile),
         "ferie_giorni": str(ferie_giorni),
-        "periodo_prova": str(periodo_prova) or "______",
+        "periodo_prova": str(periodo_prova) if periodo_prova not in (None, "") else "______",
         "ticket": ticket_txt,
         "mensilita": mensilita_txt,
     }
+
+    # Decorrenza: senza data fine (indeterminato) niente "al ..." in coda.
+    _df = data_values["data_fine"]
+    _decorr = f"decorre dal {data_values['data_inizio']}" + (f" al {_df}" if _df else "")
 
     # Alias accettati per i segnaposto nominali (tolleranza sui nomi nel .docx).
     named_aliases = {
@@ -199,6 +221,11 @@ def fill_contract_template(template_path: str, employee_data: Dict[str, Any]) ->
     def replace_placeholders(text: str) -> str:
         """Replace ellipsis placeholders with employee data."""
         result = _apply_named(text)
+        # Periodo di prova parametrico anche su template con "15 giorni" fisso.
+        pp = data_values["periodo_prova"]
+        if pp and pp != "______":
+            result = _re.sub(r'(prova di|minimo di)\s*\d+\s*giorni',
+                             rf'\1 {pp} giorni', result, flags=_re.IGNORECASE)
         if "…" not in result:
             return result
 
@@ -207,8 +234,8 @@ def fill_contract_template(template_path: str, employee_data: Dict[str, Any]) ->
         
         # Pattern 1: "Lavoratore: ……………, nato a …………. il ……………………, residente in ………………………………… con codice fiscale ……………………………."
         if "Lavoratore:" in result and "…" in result:
-            # Replace the entire line
-            result = f"Lavoratore: {data_values['mansione']}, {data_values['nome_completo']}, nato a {data_values['luogo_nascita']} il {data_values['data_nascita']}, residente in {data_values['indirizzo']} con codice fiscale {data_values['codice_fiscale']}."
+            # Replace the entire line (niente mansione davanti al nome)
+            result = f"Lavoratore: {data_values['nome_completo']}, nato a {data_values['luogo_nascita']} il {data_values['data_nascita']}, residente in {data_values['indirizzo']} con codice fiscale {data_values['codice_fiscale']}."
         
         # Pattern 2: "IL Sig. ……………………………. è assunto" - this line contains EVERYTHING
         elif "IL Sig." in result and "è assunto" in result and "…" in result:
@@ -221,8 +248,9 @@ def fill_contract_template(template_path: str, employee_data: Dict[str, Any]) ->
             result = re.sub(r'livello\s*[…\.]+\s*e con', f"livello {data_values['livello']} e con", result, flags=re.IGNORECASE)
             # Replace qualifica
             result = re.sub(r'qualifica\s*[…\.]+\s*del', f"qualifica {data_values['qualifica']} del", result, flags=re.IGNORECASE)
-            # Replace date decorrenza
-            result = re.sub(r'decorre dal\s*[…\.]+\s*al\s*[…\.]+', f"decorre dal {data_values['data_inizio']} al {data_values['data_fine']}", result, flags=re.IGNORECASE)
+            # Replace date decorrenza (senza "al" se indeterminato)
+            result = re.sub(r'decorre dal\s*[…\.]+\s*al\s*[…\.]+', _decorr, result, flags=re.IGNORECASE)
+            result = re.sub(r'decorre dal\s*[…\.]+', _decorr, result, flags=re.IGNORECASE)
         
         # Pattern 3: "mansioni: ………………………… inquadrato"
         elif "mansioni:" in result and "…" in result:
@@ -252,7 +280,8 @@ def fill_contract_template(template_path: str, employee_data: Dict[str, Any]) ->
         # Pattern 7: "decorre dal ………… al …………"
         elif "decorre dal" in result.lower() and "…" in result:
             import re
-            result = re.sub(r'decorre dal\s*[…\.]+\s*al\s*[…\.]+', f"decorre dal {data_values['data_inizio']} al {data_values['data_fine']}", result, flags=re.IGNORECASE)
+            result = re.sub(r'decorre dal\s*[…\.]+\s*al\s*[…\.]+', _decorr, result, flags=re.IGNORECASE)
+            result = re.sub(r'decorre dal\s*[…\.]+', _decorr, result, flags=re.IGNORECASE)
         
         # Generic fallback: replace any remaining ellipsis sequences
         elif "…" in result:
@@ -266,37 +295,33 @@ def fill_contract_template(template_path: str, employee_data: Dict[str, Any]) ->
         
         return result
     
-    # Process all paragraphs
+    # Process all paragraphs (ogni paragrafo: i segnaposto e le sostituzioni
+    # parametriche come il periodo di prova possono comparire anche senza puntini).
     for para in doc.paragraphs:
-        if "…" in para.text or "{{" in para.text:
-            # Process the entire paragraph text
-            new_text = replace_placeholders(para.text)
-            if new_text != para.text:
-                # Clear runs and set new text
-                if para.runs:
-                    # Keep first run's formatting
-                    first_run = para.runs[0]
-                    for run in para.runs[1:]:
-                        run.text = ""
-                    first_run.text = new_text
-                else:
-                    para.text = new_text
-    
+        new_text = replace_placeholders(para.text)
+        if new_text != para.text:
+            if para.runs:
+                first_run = para.runs[0]
+                for run in para.runs[1:]:
+                    run.text = ""
+                first_run.text = new_text
+            else:
+                para.text = new_text
+
     # Process tables
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for para in cell.paragraphs:
-                    if "…" in para.text or "{{" in para.text:
-                        new_text = replace_placeholders(para.text)
-                        if new_text != para.text:
-                            if para.runs:
-                                first_run = para.runs[0]
-                                for run in para.runs[1:]:
-                                    run.text = ""
-                                first_run.text = new_text
-                            else:
-                                para.text = new_text
+                    new_text = replace_placeholders(para.text)
+                    if new_text != para.text:
+                        if para.runs:
+                            first_run = para.runs[0]
+                            for run in para.runs[1:]:
+                                run.text = ""
+                            first_run.text = new_text
+                        else:
+                            para.text = new_text
     
     # Save to temp file
     output_path = tempfile.mktemp(suffix=".docx")

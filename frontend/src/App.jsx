@@ -1818,10 +1818,14 @@ function AssunzionePage({ dipendenti, reload }) {
   const [dipId, setDipId] = useState("");
   const [tipo, setTipo] = useState("");
   const [extra, setExtra] = useState({
-    livello: "", qualifica: "", stipendio_orario: "", data_inizio: "", data_fine: "",
+    indirizzo: "", luogo_nascita: "", data_nascita: "", codice_fiscale: "",
+    mansione: "", livello: "", qualifica: "", stipendio_orario: "", data_inizio: "", data_fine: "",
     ore_settimanali: "40", periodo_prova: "", ferie_giorni: "26",
     tredicesima: true, quattordicesima: true, ticket_buono: false, ticket_importo: "",
   });
+  const MANSIONI = ["Barista", "Banconista", "Cameriere", "Aiuto Cameriere", "Cassiere",
+    "Pasticciere", "Aiuto Pasticciere", "Rosticciere", "Cuoco", "Aiuto Cuoco",
+    "Lavapiatti", "Addetto alle pulizie", "Magazziniere", "Operaio"];
   const [contratti, setContratti] = useState([]);
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState("");
@@ -1832,7 +1836,23 @@ function AssunzionePage({ dipendenti, reload }) {
     loadTemplates();
   }, []);
   const loadContratti = (id) => { if (id) axios.get(`${C}/employee/${id}`).then(r => setContratti(r.data || [])).catch(() => setContratti([])); else setContratti([]); };
-  useEffect(() => { loadContratti(dipId); }, [dipId]);
+  useEffect(() => {
+    loadContratti(dipId);
+    // Precompila i dati anagrafici dal dipendente selezionato (così l'indirizzo
+    // o la data di nascita già presenti compaiono e i campi mancanti si vedono).
+    const d = dipendenti.find(x => x.id === dipId);
+    if (d) setExtra(e => ({
+      ...e,
+      indirizzo: d.indirizzo || d.residenza || "",
+      luogo_nascita: d.luogo_nascita || d.comune_nascita || d.citta_nascita || "",
+      data_nascita: (d.data_nascita || "").slice(0, 10),
+      codice_fiscale: d.codice_fiscale || d.cf || "",
+      mansione: d.mansione || d.qualifica || "",
+      qualifica: d.qualifica || d.mansione || "",
+      livello: d.livello || e.livello,
+      stipendio_orario: d.stipendio_orario || d.salary || e.stipendio_orario,
+    }));
+  }, [dipId]);
 
   const dispTemplate = (id) => (templates.find(t => t.id === id) || {}).available;
 
@@ -1900,6 +1920,11 @@ function AssunzionePage({ dipendenti, reload }) {
   const orario = num(extra.stipendio_orario), ore = num(extra.ore_settimanali);
   const mensile = (orario != null && ore != null) ? (orario * ore * 52 / 12) : null;
   const mensileFmt = mensile != null ? mensile.toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—";
+  const set = (k, v) => setExtra(e => ({ ...e, [k]: v }));
+  const grid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 14, alignItems: "end" };
+  const lbl = { display: "flex", flexDirection: "column", gap: 5, fontSize: 13, fontWeight: 600, color: "#2a3329" };
+  const secTitle = { gridColumn: "1 / -1", margin: "12px 0 -2px", fontSize: 12, fontWeight: 800, color: "#5b7a6b", textTransform: "uppercase", letterSpacing: ".05em" };
+  const full = { ...lbl, gridColumn: "1 / -1" };
   return (
     <div className="dc-page">
       <div className="dc-page-header"><div><h1>Assunzione & Contratti</h1>
@@ -1925,45 +1950,59 @@ function AssunzionePage({ dipendenti, reload }) {
 
       <div className="dc-card" style={{ marginBottom: 16 }}>
         <h3 style={{ marginTop: 0 }}>Genera contratto</h3>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <label>Dipendente
+        <datalist id="mansioni-list">{MANSIONI.map(m => <option key={m} value={m} />)}</datalist>
+        <div style={grid}>
+          <label style={lbl}>Dipendente
             <select value={dipId} onChange={(e) => setDipId(e.target.value)} className="dc-input">
               <option value="">— seleziona —</option>
               {dipendenti.map(d => <option key={d.id} value={d.id}>{d.cognome} {d.nome}</option>)}
             </select></label>
-          <label>Tipo contratto
+          <label style={lbl}>Tipo contratto
             <select value={tipo} onChange={(e) => setTipo(e.target.value)} className="dc-input">
               {tipi.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select></label>
-          <label>Livello<input className="dc-input" value={extra.livello} onChange={(e) => setExtra({ ...extra, livello: e.target.value })} /></label>
-          <label>Qualifica / mansione<input className="dc-input" value={extra.qualifica} onChange={(e) => setExtra({ ...extra, qualifica: e.target.value })} /></label>
-          <label>Paga oraria (€)<input className="dc-input" value={extra.stipendio_orario} onChange={(e) => setExtra({ ...extra, stipendio_orario: e.target.value })} /></label>
-          <label>Data inizio<input type="date" className="dc-input" value={extra.data_inizio} onChange={(e) => setExtra({ ...extra, data_inizio: e.target.value })} /></label>
-          <label>Data fine (se determinato)<input type="date" className="dc-input" value={extra.data_fine} onChange={(e) => setExtra({ ...extra, data_fine: e.target.value })} /></label>
-          <label>Ore settimanali<input type="number" min="1" max="48" className="dc-input" value={extra.ore_settimanali} onChange={(e) => setExtra({ ...extra, ore_settimanali: e.target.value })} /></label>
-          <label>Periodo di prova (giorni)
-            <input className="dc-input" value={extra.periodo_prova} onChange={(e) => setExtra({ ...extra, periodo_prova: e.target.value })} placeholder="per livello CCNL" />
-            <span className="dc-muted" style={{ fontSize: 11 }}>CCNL Turismo: varia per livello — conferma col consulente</span>
+
+          <div style={secTitle}>Dati anagrafici</div>
+          <label style={lbl}>Codice fiscale<input className="dc-input" value={extra.codice_fiscale} onChange={(e) => set("codice_fiscale", e.target.value.toUpperCase())} /></label>
+          <label style={lbl}>Luogo di nascita<input className="dc-input" value={extra.luogo_nascita} onChange={(e) => set("luogo_nascita", e.target.value)} placeholder="Comune" /></label>
+          <label style={lbl}>Data di nascita<input type="date" className="dc-input" value={extra.data_nascita} onChange={(e) => set("data_nascita", e.target.value)} /></label>
+          <label style={full}>Indirizzo di residenza<input className="dc-input" value={extra.indirizzo} onChange={(e) => set("indirizzo", e.target.value)} placeholder="Via/Piazza, n. civico, CAP, Comune" /></label>
+
+          <div style={secTitle}>Inquadramento</div>
+          <label style={lbl}>Mansione<input list="mansioni-list" className="dc-input" value={extra.mansione} onChange={(e) => set("mansione", e.target.value)} placeholder="scegli o scrivi" /></label>
+          <label style={lbl}>Qualifica<input className="dc-input" value={extra.qualifica} onChange={(e) => set("qualifica", e.target.value)} placeholder="se diversa dalla mansione" /></label>
+          <label style={lbl}>Livello CCNL<input className="dc-input" value={extra.livello} onChange={(e) => set("livello", e.target.value)} /></label>
+          <label style={lbl}>Periodo di prova (giorni)
+            <input className="dc-input" value={extra.periodo_prova} onChange={(e) => set("periodo_prova", e.target.value)} placeholder="per livello CCNL" />
+            <span className="dc-muted" style={{ fontSize: 11, fontWeight: 400 }}>varia per livello — conferma col consulente</span>
           </label>
-          <label>Giorni di ferie / anno<input className="dc-input" value={extra.ferie_giorni} onChange={(e) => setExtra({ ...extra, ferie_giorni: e.target.value })} placeholder="26" /></label>
-          <label>Lordo mensile teorico (calcolato)
-            <input className="dc-input" value={mensile != null ? `€ ${mensileFmt}` : ""} readOnly placeholder="paga oraria × ore × 52 / 12" style={{ background: "#f4f1ea" }} />
-          </label>
+
+          <div style={secTitle}>Trattamento economico</div>
+          <label style={lbl}>Paga oraria (€)<input className="dc-input" value={extra.stipendio_orario} onChange={(e) => set("stipendio_orario", e.target.value)} placeholder="es. 8,50" /></label>
+          <label style={lbl}>Ore settimanali<input type="number" min="1" max="48" className="dc-input" value={extra.ore_settimanali} onChange={(e) => set("ore_settimanali", e.target.value)} /></label>
+          <label style={lbl}>Lordo mensile (calcolato)<input className="dc-input" value={mensile != null ? `€ ${mensileFmt}` : ""} readOnly placeholder="oraria × ore × 52 / 12" style={{ background: "#f4f1ea" }} /></label>
+          <label style={lbl}>Giorni di ferie / anno<input className="dc-input" value={extra.ferie_giorni} onChange={(e) => set("ferie_giorni", e.target.value)} placeholder="26" /></label>
+
+          <div style={secTitle}>Decorrenza</div>
+          <label style={lbl}>Data inizio<input type="date" className="dc-input" value={extra.data_inizio} onChange={(e) => set("data_inizio", e.target.value)} /></label>
+          <label style={lbl}>Data fine (solo se determinato)<input type="date" className="dc-input" value={extra.data_fine} onChange={(e) => set("data_fine", e.target.value)} /></label>
         </div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 18, marginTop: 12, alignItems: "center" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}>
-            <input type="checkbox" checked={extra.tredicesima} onChange={(e) => setExtra({ ...extra, tredicesima: e.target.checked })} /> 13ª (dicembre)
+
+        <div style={secTitle}>Istituti contrattuali</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 18, marginTop: 8, alignItems: "center" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0, fontWeight: 600 }}>
+            <input type="checkbox" checked={extra.tredicesima} onChange={(e) => set("tredicesima", e.target.checked)} /> 13ª (dicembre)
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}>
-            <input type="checkbox" checked={extra.quattordicesima} onChange={(e) => setExtra({ ...extra, quattordicesima: e.target.checked })} /> 14ª (luglio)
+          <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0, fontWeight: 600 }}>
+            <input type="checkbox" checked={extra.quattordicesima} onChange={(e) => set("quattordicesima", e.target.checked)} /> 14ª (luglio)
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}>
-            <input type="checkbox" checked={extra.ticket_buono} onChange={(e) => setExtra({ ...extra, ticket_buono: e.target.checked })} /> Buono pasto (dopo 1 anno)
+          <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0, fontWeight: 600 }}>
+            <input type="checkbox" checked={extra.ticket_buono} onChange={(e) => set("ticket_buono", e.target.checked)} /> Buono pasto (dopo 1 anno)
           </label>
           {extra.ticket_buono && (
-            <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0, fontWeight: 600 }}>
               Importo €/giorno
-              <input className="dc-input" style={{ width: 90 }} value={extra.ticket_importo} onChange={(e) => setExtra({ ...extra, ticket_importo: e.target.value })} />
+              <input className="dc-input" style={{ width: 90 }} value={extra.ticket_importo} onChange={(e) => set("ticket_importo", e.target.value)} />
             </label>
           )}
         </div>
