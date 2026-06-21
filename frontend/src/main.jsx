@@ -6,11 +6,34 @@ import PortaleDipendente from './PortaleDipendente.jsx'
 import Landing from './Landing.jsx'
 import './index.css'
 
+// Legge la scadenza (exp) dal JWT senza verificarne la firma (la verifica vera
+// è lato server). Serve solo a riportare al PIN quando la sessione è scaduta.
+function tokenValido(token) {
+  if (!token) return false
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')))
+    return !payload.exp || payload.exp * 1000 > Date.now()
+  } catch {
+    return false
+  }
+}
+
 // L'area gestione è riservata all'admin. Eccezione: il responsabile turni può
 // entrare SOLO nella pagina Turni dell'azienda (nient'altro).
+// Il gate controlla SIA il ruolo SIA la validità/scadenza del token: a sessione
+// scaduta si torna al PIN (la protezione reale resta comunque lato server).
 function RequireRole({ children, roles }) {
-  const role = typeof window !== 'undefined' ? localStorage.getItem('pt_role') : null
-  if (!roles.includes(role)) return <Navigate to="/portale" replace />
+  const hasWindow = typeof window !== 'undefined'
+  const role = hasWindow ? localStorage.getItem('pt_role') : null
+  const token = hasWindow ? localStorage.getItem('pt_token') : null
+  if (!roles.includes(role) || !tokenValido(token)) {
+    if (hasWindow && !tokenValido(token)) {
+      localStorage.removeItem('pt_token')
+      localStorage.removeItem('pt_role')
+      localStorage.removeItem('pt_name')
+    }
+    return <Navigate to="/portale" replace />
+  }
   return children
 }
 

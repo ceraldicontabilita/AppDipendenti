@@ -306,3 +306,52 @@ def date_range_params(
             )
     
     return result
+
+
+# ---------------------------------------------------------------------------
+# Autenticazione STRICT per l'area gestione (niente bypass).
+# A differenza di get_current_user, queste richiedono un JWT valido e non
+# scaduto: token assente/invalido -> 401/403. La firma e la scadenza sono
+# verificate da jose (ExpiredSignatureError è sottoclasse di JWTError).
+# ---------------------------------------------------------------------------
+_bearer_strict = HTTPBearer(auto_error=True)
+
+
+def _decode_or_401(credentials: HTTPAuthorizationCredentials) -> Dict[str, Any]:
+    try:
+        return jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+        )
+    except JWTError as e:
+        logger.info(f"Auth strict: token rifiutato ({e})")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sessione scaduta o token non valido. Effettua di nuovo l'accesso.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+async def require_admin(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer_strict),
+) -> Dict[str, Any]:
+    """Richiede un JWT valido con ruolo admin. Usata sulle rotte solo-admin."""
+    payload = _decode_or_401(credentials)
+    if payload.get("role") != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Accesso riservato all'amministratore")
+    return payload
+
+
+async def require_staff(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer_strict),
+) -> Dict[str, Any]:
+    """Richiede un JWT valido con ruolo admin o responsabile_turni.
+
+    Usata sulle rotte dell'area gestione che il responsabile turni deve poter
+    raggiungere (la pagina Turni carica dati da questo stesso router).
+    """
+    payload = _decode_or_401(credentials)
+    if payload.get("role") not in ("admin", "responsabile_turni"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Accesso riservato")
+    return payload

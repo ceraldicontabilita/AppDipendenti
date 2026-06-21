@@ -16,6 +16,28 @@ import "./App.css";
 
 const API = '/api/dipendenti-cloud';
 
+// --- Autenticazione: allega il JWT a ogni chiamata e gestisce la scadenza ---
+// L'area gestione è protetta lato server (require_admin/require_staff): senza
+// token valido le API rispondono 401/403 e qui riportiamo l'utente al PIN.
+axios.interceptors.request.use((cfg) => {
+  const t = localStorage.getItem("pt_token");
+  if (t) cfg.headers.Authorization = `Bearer ${t}`;
+  return cfg;
+});
+axios.interceptors.response.use(
+  (r) => r,
+  (err) => {
+    const s = err?.response?.status;
+    if (s === 401 || s === 403) {
+      localStorage.removeItem("pt_token");
+      localStorage.removeItem("pt_role");
+      localStorage.removeItem("pt_name");
+      if (!location.pathname.startsWith("/portale")) location.replace("/portale");
+    }
+    return Promise.reject(err);
+  }
+);
+
 // Helper functions
 const formatDate = (dateStr) => {
   if (!dateStr) return "-";

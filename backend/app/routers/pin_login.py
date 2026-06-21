@@ -15,6 +15,7 @@ from typing import Dict, Any
 import hashlib
 import hmac
 import logging
+import os
 import time
 
 from jose import jwt
@@ -27,7 +28,10 @@ from backend.app.services.auth_dipendenti import login_dipendente, lista_login, 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-PIN_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
+# Durata della sessione admin (PIN) — default 2 ore. Oltre, va re-inserito il PIN.
+# Configurabile via env Render ADMIN_TOKEN_EXPIRE_MINUTES. Riguarda SOLO i token
+# admin emessi qui; il token del portale dipendente ha la sua scadenza nel service.
+PIN_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ADMIN_TOKEN_EXPIRE_MINUTES", "120"))
 
 # ---- anti brute force (in-memory, per IP) ----
 _FAILED_ATTEMPTS: Dict[str, Dict[str, Any]] = {}

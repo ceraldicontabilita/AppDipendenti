@@ -2,7 +2,7 @@
 import logging
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -33,6 +33,9 @@ app.add_middleware(
 
 
 def register_routers():
+    # Autenticazione strict per l'area gestione (niente bypass).
+    from .utils.dependencies import require_admin, require_staff
+
     from .routers import auth, pin_login
     app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
     app.include_router(pin_login.router, prefix="/api/auth", tags=["PIN Login"])
@@ -41,7 +44,9 @@ def register_routers():
     app.include_router(dipendenti.router, prefix="/api/dipendenti", tags=["Dipendenti"])
     app.include_router(accessi.router, prefix="/api/accessi", tags=["Accessi"])
     app.include_router(buste_paga.router, prefix="/api", tags=["Buste Paga"])
-    app.include_router(employee_contracts.router, prefix="/api/contracts", tags=["Contratti"])
+    # Contratti: solo amministratore (JWT valido + ruolo admin).
+    app.include_router(employee_contracts.router, prefix="/api/contracts", tags=["Contratti"],
+                       dependencies=[Depends(require_admin)])
     app.include_router(giustificativi.router, prefix="/api/giustificativi", tags=["Giustificativi"])
     app.include_router(shifts.router, prefix="/api/shifts", tags=["Turni"])
     app.include_router(fascicolo_dipendente.router, prefix="/api", tags=["Fascicolo"])
@@ -55,7 +60,10 @@ def register_routers():
     app.include_router(turni.router, prefix="/api/turni", tags=["Turni"])
     app.include_router(notifiche.router, prefix="/api/notifiche", tags=["Notifiche"])
     # App "Dipendenti in Cloud" (8 pagine HR) -> /api/dipendenti-cloud
-    app.include_router(dipendenti_cloud.router, prefix="/api", tags=["Dipendenti Cloud"])
+    # Area gestione: JWT valido + ruolo admin o responsabile_turni (la pagina
+    # Turni del responsabile carica dati da questo router).
+    app.include_router(dipendenti_cloud.router, prefix="/api", tags=["Dipendenti Cloud"],
+                       dependencies=[Depends(require_staff)])
     app.include_router(cedolini_riconciliazione.router, prefix="/api/cedolini", tags=["Cedolini Ric."])
     app.include_router(cedolini.router, prefix="/api/cedolini", tags=["Cedolini"])
     app.include_router(tfr.router, prefix="/api/tfr", tags=["TFR"])
