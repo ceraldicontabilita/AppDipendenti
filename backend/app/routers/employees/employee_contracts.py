@@ -19,6 +19,9 @@ import tempfile
 
 from backend.app.database import Database, Collections
 from backend.app.utils.error_handler import handle_errors
+from backend.app.services.openapi_signature import (
+    get_client, OpenAPIConfigError, OpenAPIError,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -72,18 +75,78 @@ async def _resolve_template(ct: Dict[str, str]) -> str:
     raise HTTPException(404, f"Template non caricato: {ct['name']}. Caricalo dalla sezione Assunzione.")
 
 
+def _to_float(val: Any) -> Optional[float]:
+    """Converte in float un valore numerico tollerando la virgola decimale IT."""
+    if val is None or val == "":
+        return None
+    try:
+        return float(str(val).replace("€", "").replace(",", ".").strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _fmt_euro(val: Optional[float]) -> str:
+    """Formatta un importo in stile italiano (1.234,56) senza simbolo."""
+    if val is None:
+        return "______"
+    return f"{val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def compute_stipendio_mensile(stipendio_orario: Any, ore_settimanali: Any) -> Optional[float]:
+    """Calcola il lordo mensile teorico: paga oraria × ore settimanali × 52 / 12."""
+    orario = _to_float(stipendio_orario)
+    ore = _to_float(ore_settimanali)
+    if orario is None or ore is None:
+        return None
+    return round(orario * ore * 52 / 12, 2)
+
+
 def fill_contract_template(template_path: str, employee_data: Dict[str, Any]) -> str:
     """
     Fill contract template with employee data.
     Replaces specific text patterns with employee data.
+
+    Supporta due meccanismi di segnaposto, combinabili nello stesso .docx:
+      1. Puntini di sospensione (… ……) compilati per posizione (legacy).
+      2. Segnaposto nominali `{{chiave}}` (es. {{ore_settimanali}},
+         {{stipendio_mensile}}, {{periodo_prova}}) — il modo consigliato per i
+         nuovi campi CCNL Turismo, indipendente dal layout del documento.
     """
     doc = Document(template_path)
-    
+
     # Build full name
     nome_completo = employee_data.get("nome_completo", "")
     if not nome_completo:
         nome_completo = f"{employee_data.get('cognome', '')} {employee_data.get('nome', '')}".strip()
-    
+
+    # Campi CCNL Pubblici Esercizi / Turismo (H05Y) — parametrici, non inventati.
+    ore_settimanali = employee_data.get("ore_settimanali") or "40"
+    stipendio_orario = employee_data.get("stipendio_orario") or employee_data.get("salary")
+    mensile = compute_stipendio_mensile(stipendio_orario, ore_settimanali)
+    ferie_giorni = employee_data.get("ferie_giorni") or "26"
+    periodo_prova = employee_data.get("periodo_prova") or ""
+    ticket_attivo = bool(employee_data.get("ticket_buono"))
+    ticket_importo = employee_data.get("ticket_importo")
+    tredicesima = employee_data.get("tredicesima", True)
+    quattordicesima = employee_data.get("quattordicesima", True)
+
+    # Frasi pronte da inserire nel .docx tramite segnaposto nominali.
+    if ticket_attivo:
+        _imp = _to_float(ticket_importo)
+        ticket_txt = (
+            f"Buono pasto di euro {_fmt_euro(_imp)} giornalieri, riconosciuto dopo 1 anno di servizio."
+            if _imp is not None else
+            "Buono pasto giornaliero riconosciuto dopo 1 anno di servizio."
+        )
+    else:
+        ticket_txt = "Non previsto."
+    mensilita_lista = []
+    if tredicesima:
+        mensilita_lista.append("13ª (corrisposta a dicembre)")
+    if quattordicesima:
+        mensilita_lista.append("14ª (corrisposta a luglio)")
+    mensilita_txt = " e ".join(mensilita_lista) if mensilita_lista else "12 mensilità"
+
     # All values to replace
     data_values = {
         "nome_completo": nome_completo or "______",
@@ -96,15 +159,49 @@ def fill_contract_template(template_path: str, employee_data: Dict[str, Any]) ->
         "mansione": employee_data.get("mansione") or employee_data.get("qualifica", "______"),
         "livello": employee_data.get("livello", "______"),
         "qualifica": employee_data.get("qualifica") or employee_data.get("mansione", "______"),
-        "stipendio_orario": str(employee_data.get("stipendio_orario") or employee_data.get("salary", "______")),
+        "stipendio_orario": str(stipendio_orario or "______"),
         "data_inizio": employee_data.get("data_inizio") or employee_data.get("hire_date", "______"),
         "data_fine": employee_data.get("data_fine", "______"),
+        # Nuovi campi CCNL Turismo (usabili come {{chiave}} nei .docx)
+        "ore_settimanali": str(ore_settimanali),
+        "stipendio_mensile": _fmt_euro(mensile),
+        "ferie_giorni": str(ferie_giorni),
+        "periodo_prova": str(periodo_prova) or "______",
+        "ticket": ticket_txt,
+        "mensilita": mensilita_txt,
     }
-    
+
+    # Alias accettati per i segnaposto nominali (tolleranza sui nomi nel .docx).
+    named_aliases = {
+        "ore": "ore_settimanali",
+        "ore_lavoro": "ore_settimanali",
+        "mensile": "stipendio_mensile",
+        "stipendio_mese": "stipendio_mensile",
+        "paga_mensile": "stipendio_mensile",
+        "paga_oraria": "stipendio_orario",
+        "ferie": "ferie_giorni",
+        "prova": "periodo_prova",
+        "buono_pasto": "ticket",
+    }
+
+    import re as _re
+
+    def _apply_named(text: str) -> str:
+        """Sostituisce i segnaposto nominali {{chiave}} (case-insensitive)."""
+        if "{{" not in text:
+            return text
+        def _sub(m):
+            key = m.group(1).strip().lower()
+            key = named_aliases.get(key, key)
+            return str(data_values.get(key, m.group(0)))
+        return _re.sub(r"\{\{\s*([\w]+)\s*\}\}", _sub, text)
+
     def replace_placeholders(text: str) -> str:
         """Replace ellipsis placeholders with employee data."""
-        result = text
-        
+        result = _apply_named(text)
+        if "…" not in result:
+            return result
+
         # The template uses Unicode ellipsis character (…) repeated multiple times
         # We need to replace these patterns specifically
         
@@ -171,7 +268,7 @@ def fill_contract_template(template_path: str, employee_data: Dict[str, Any]) ->
     
     # Process all paragraphs
     for para in doc.paragraphs:
-        if "…" in para.text or "…" in para.text:
+        if "…" in para.text or "{{" in para.text:
             # Process the entire paragraph text
             new_text = replace_placeholders(para.text)
             if new_text != para.text:
@@ -190,7 +287,7 @@ def fill_contract_template(template_path: str, employee_data: Dict[str, Any]) ->
         for row in table.rows:
             for cell in row.cells:
                 for para in cell.paragraphs:
-                    if "…" in para.text:
+                    if "…" in para.text or "{{" in para.text:
                         new_text = replace_placeholders(para.text)
                         if new_text != para.text:
                             if para.runs:
@@ -325,6 +422,12 @@ async def generate_contract(employee_id: str, data: Dict[str, Any] = Body(...)) 
             file_content = f.read()
         file_base64 = base64.b64encode(file_content).decode('utf-8')
         
+        # Lordo mensile teorico (paga oraria × ore settimanali × 52 / 12)
+        mensile = compute_stipendio_mensile(
+            employee_data.get("stipendio_orario") or employee_data.get("salary"),
+            employee_data.get("ore_settimanali") or "40",
+        )
+
         # Record contract generation with base64 content
         contract_record = {
             "id": str(uuid.uuid4()),
@@ -336,14 +439,16 @@ async def generate_contract(employee_id: str, data: Dict[str, Any] = Body(...)) 
             "filepath": final_path,
             "file_data": file_base64,  # Architettura MongoDB-first
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "stipendio_mensile": mensile,
             "additional_data": additional_data
         }
-        
+
         await db["employee_contracts"].insert_one(contract_record.copy())
-        
+
         return {
             "success": True,
             "message": f"Contratto generato per {employee_data.get('nome_completo')}",
+            "stipendio_mensile": mensile,
             "contract": {
                 "id": contract_record["id"],
                 "filename": final_filename,
@@ -511,3 +616,173 @@ async def send_contract(contract_id: str, data: Dict[str, Any] = Body(default={}
         {"id": contract_id},
         {"$set": {"inviato_il": datetime.now(timezone.utc).isoformat(), "inviato_a": to_addr}})
     return {"ok": True, "inviato_a": to_addr, "allegati": len(allegati)}
+
+
+# ---------------------------------------------------------------------------
+# Firma digitale via OpenAPI: marca temporale -> eSignature (FES+OTP) -> PEC
+# Stato nel fascicolo: inviato -> firmato -> accettato.
+# ---------------------------------------------------------------------------
+def _docx_bytes_to_pdf(docx_bytes: bytes) -> bytes:
+    """Converte un .docx in PDF tramite LibreOffice headless.
+
+    Render non include LibreOffice di default: se `soffice`/`libreoffice` non è
+    disponibile viene sollevato un errore chiaro e azionabile.
+    """
+    import subprocess
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        raise HTTPException(
+            501,
+            "Conversione PDF non disponibile: LibreOffice (soffice) non è "
+            "installato sull'ambiente. Aggiungilo al deploy oppure usa un "
+            "servizio di conversione esterno.")
+    workdir = tempfile.mkdtemp(prefix="docx2pdf_")
+    src = os.path.join(workdir, "contratto.docx")
+    with open(src, "wb") as f:
+        f.write(docx_bytes)
+    try:
+        subprocess.run(
+            [soffice, "--headless", "--convert-to", "pdf", "--outdir", workdir, src],
+            check=True, capture_output=True, timeout=120)
+        pdf_path = os.path.join(workdir, "contratto.pdf")
+        if not os.path.exists(pdf_path):
+            raise HTTPException(500, "Conversione PDF fallita (output assente).")
+        with open(pdf_path, "rb") as f:
+            return f.read()
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(500, f"Conversione PDF fallita: {e.stderr.decode('utf-8', 'ignore')[:300]}")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+async def _get_contract_pdf(contract: Dict[str, Any]) -> bytes:
+    """Ritorna il PDF del contratto: usa quello già marcato/firmato se presente,
+    altrimenti converte il .docx generato."""
+    if contract.get("pdf_data"):
+        return base64.b64decode(contract["pdf_data"])
+    if not contract.get("file_data"):
+        raise HTTPException(404, "File del contratto non disponibile")
+    return _docx_bytes_to_pdf(base64.b64decode(contract["file_data"]))
+
+
+@router.post("/sign/{contract_id}")
+@handle_errors
+async def avvia_firma(contract_id: str, data: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """Avvia il flusso di firma: converte in PDF, applica marca temporale e crea
+    la richiesta di eSignature (FES con OTP) verso il dipendente."""
+    db = Database.get_db()
+    contract = await db["employee_contracts"].find_one({"id": contract_id}, {"_id": 0})
+    if not contract:
+        raise HTTPException(404, "Contratto non trovato")
+    emp = await db[Collections.EMPLOYEES].find_one(
+        {"id": contract.get("employee_id")},
+        {"_id": 0, "nome": 1, "cognome": 1, "email": 1, "telefono": 1, "cellulare": 1}) or {}
+    to_addr = (data.get("email") or emp.get("email") or "").strip()
+    if not to_addr:
+        raise HTTPException(400, "Email del dipendente mancante: inseriscila in anagrafica.")
+    phone = (data.get("phone") or emp.get("cellulare") or emp.get("telefono") or "").strip()
+    nome = f"{emp.get('nome','')} {emp.get('cognome','')}".strip() or "Dipendente"
+
+    client = get_client()
+    if not client.configured:
+        raise HTTPException(503, "OpenAPI non configurato: imposta OPENAPI_CLIENT_ID e "
+                                 "OPENAPI_CLIENT_SECRET nelle env di Render.")
+    try:
+        pdf_bytes = await _get_contract_pdf(contract)
+        # 1) Marca temporale (data certa)
+        ts = await client.apply_timestamp(pdf_bytes, filename=contract.get("filename", "contratto.pdf"))
+        # 2) eSignature FES con OTP verso il dipendente
+        sig = await client.create_signature_request(
+            pdf_bytes, signer_name=nome, signer_email=to_addr, signer_phone=phone,
+            title=f"Contratto — {contract.get('contract_name','')}",
+            filename=contract.get("filename", "contratto.pdf"))
+    except OpenAPIConfigError as e:
+        raise HTTPException(503, str(e))
+    except OpenAPIError as e:
+        raise HTTPException(502, f"OpenAPI: {e}")
+
+    req_id = sig.get("id") or sig.get("request_id")
+    await db["employee_contracts"].update_one(
+        {"id": contract_id},
+        {"$set": {
+            "pdf_data": base64.b64encode(pdf_bytes).decode("ascii"),
+            "firma_stato": "inviato",
+            "firma_request_id": req_id,
+            "marca_temporale": ts,
+            "firma_inviata_a": to_addr,
+            "firma_inviata_il": datetime.now(timezone.utc).isoformat(),
+        }})
+    return {"ok": True, "stato": "inviato", "request_id": req_id, "firmatario": to_addr}
+
+
+@router.get("/sign/{contract_id}/status")
+@handle_errors
+async def stato_firma(contract_id: str) -> Dict[str, Any]:
+    """Interroga OpenAPI sullo stato della firma e aggiorna il fascicolo.
+    Se firmato, salva il PDF firmato e passa lo stato a 'firmato'."""
+    db = Database.get_db()
+    contract = await db["employee_contracts"].find_one({"id": contract_id}, {"_id": 0})
+    if not contract:
+        raise HTTPException(404, "Contratto non trovato")
+    req_id = contract.get("firma_request_id")
+    if not req_id:
+        return {"ok": True, "stato": contract.get("firma_stato") or "non_avviato"}
+
+    client = get_client()
+    try:
+        res = await client.get_signature_status(req_id)
+    except OpenAPIError as e:
+        raise HTTPException(502, f"OpenAPI: {e}")
+
+    stato_raw = str(res.get("status") or "").lower()
+    updates: Dict[str, Any] = {"firma_check_il": datetime.now(timezone.utc).isoformat()}
+    firmato = stato_raw in ("signed", "completed", "firmato")
+    if firmato:
+        updates["firma_stato"] = "firmato"
+        signed = res.get("signed_document") or res.get("signed_pdf") or {}
+        content = signed.get("content") if isinstance(signed, dict) else signed
+        if content:
+            updates["pdf_data"] = content  # base64 del PDF firmato
+            updates["firmato_il"] = datetime.now(timezone.utc).isoformat()
+    await db["employee_contracts"].update_one({"id": contract_id}, {"$set": updates})
+    return {"ok": True, "stato": updates.get("firma_stato", contract.get("firma_stato")), "provider": stato_raw}
+
+
+@router.post("/pec/{contract_id}")
+@handle_errors
+async def invia_pec(contract_id: str, data: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """Invia via PEC il contratto (firmato se disponibile) con ricevuta a data certa.
+    Porta lo stato a 'accettato'."""
+    db = Database.get_db()
+    contract = await db["employee_contracts"].find_one({"id": contract_id}, {"_id": 0})
+    if not contract:
+        raise HTTPException(404, "Contratto non trovato")
+    to_addr = (data.get("pec") or "").strip()
+    if not to_addr:
+        raise HTTPException(400, "Indirizzo PEC destinatario mancante.")
+    pdf_bytes = await _get_contract_pdf(contract)
+    pdf_name = (contract.get("filename", "contratto.docx").rsplit(".", 1)[0]) + ".pdf"
+
+    client = get_client()
+    if not client.configured:
+        raise HTTPException(503, "OpenAPI non configurato (OPENAPI_CLIENT_ID/SECRET in env Render).")
+    try:
+        res = await client.send_pec(
+            to_addr=to_addr,
+            subject=f"Contratto di assunzione — {contract.get('contract_name','')}",
+            body="In allegato il contratto di assunzione con marca temporale e firma per accettazione.",
+            attachments=[{"filename": pdf_name, "content": pdf_bytes}])
+    except OpenAPIConfigError as e:
+        raise HTTPException(503, str(e))
+    except OpenAPIError as e:
+        raise HTTPException(502, f"OpenAPI: {e}")
+
+    await db["employee_contracts"].update_one(
+        {"id": contract_id},
+        {"$set": {
+            "firma_stato": "accettato",
+            "pec_inviata_a": to_addr,
+            "pec_inviata_il": datetime.now(timezone.utc).isoformat(),
+            "pec_messaggio": res,
+        }})
+    return {"ok": True, "stato": "accettato", "pec": to_addr}

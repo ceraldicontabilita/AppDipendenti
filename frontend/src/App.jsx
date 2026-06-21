@@ -721,7 +721,7 @@ function PresenzePage({ dipendenti, reload }) {
           <span style={{ fontSize: 13, color: "#6b7669", marginRight: 4 }}>Pennello:</span>
           {tipiGiustificativo.map(t => (
             <button key={t.code} type="button" onClick={() => setPenna(t.code)} title={t.label}
-              style={{ border: penna === t.code ? "3px solid #1E1B4B" : "1px solid #e5e7eb", background: penna === t.code ? t.color : "#fff", color: penna === t.code ? "#fff" : "#374151", borderRadius: 8, padding: "6px 10px", fontWeight: 700, cursor: "pointer", fontSize: 13 }}>
+              style={{ border: penna === t.code ? "3px solid #5b7a6b" : "1px solid #e5e7eb", background: penna === t.code ? t.color : "#fff", color: penna === t.code ? "#fff" : "#374151", borderRadius: 8, padding: "6px 10px", fontWeight: 700, cursor: "pointer", fontSize: 13 }}>
               {t.code} <span style={{ fontWeight: 400, fontSize: 11 }}>{t.label}</span>
             </button>
           ))}
@@ -1194,7 +1194,7 @@ function TurniPage({ dipendenti, turni, reload }) {
               <span key={t.id} onClick={() => setEvid(sel ? null : t.id)}
                 className="dc-turno-badge"
                 title="Clicca per evidenziare chi fa questo turno"
-                style={{ backgroundColor: t.colore, cursor: "pointer", outline: sel ? "3px solid #1E1B4B" : "none", opacity: evid && !sel ? 0.45 : 1 }}>
+                style={{ backgroundColor: t.colore, cursor: "pointer", outline: sel ? "3px solid #5b7a6b" : "none", opacity: evid && !sel ? 0.45 : 1 }}>
                 {t.nome}{!haOrario && t.orario_inizio ? `: ${t.orario_inizio}-${t.orario_fine}` : ""}
               </span>
             );
@@ -1254,7 +1254,7 @@ function TurniPage({ dipendenti, turni, reload }) {
                         style={{
                           ...(turno ? { backgroundColor: turno.colore + '30', borderColor: turno.colore } : {}),
                           ...(evid ? (ass?.turno_id === evid
-                            ? { outline: "3px solid " + ((getTurno(evid) || {}).colore || "#1E1B4B"), opacity: 1 }
+                            ? { outline: "3px solid " + ((getTurno(evid) || {}).colore || "#5b7a6b"), opacity: 1 }
                             : { opacity: 0.2 }) : {})
                         }}
                       >
@@ -1795,7 +1795,11 @@ function AssunzionePage({ dipendenti, reload }) {
   const [templates, setTemplates] = useState([]);
   const [dipId, setDipId] = useState("");
   const [tipo, setTipo] = useState("");
-  const [extra, setExtra] = useState({ livello: "", qualifica: "", stipendio_orario: "", data_inizio: "", data_fine: "" });
+  const [extra, setExtra] = useState({
+    livello: "", qualifica: "", stipendio_orario: "", data_inizio: "", data_fine: "",
+    ore_settimanali: "40", periodo_prova: "", ferie_giorni: "26",
+    tredicesima: true, quattordicesima: true, ticket_buono: false, ticket_importo: "",
+  });
   const [contratti, setContratti] = useState([]);
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState("");
@@ -1823,8 +1827,10 @@ function AssunzionePage({ dipendenti, reload }) {
     if (!dispTemplate(tipo)) { setMsg("Carica prima il template di questo tipo."); return; }
     setBusy("gen"); setMsg("");
     try {
-      await axios.post(`${C}/generate/${dipId}`, { contract_type: tipo, additional_data: extra });
-      setMsg("Contratto generato."); loadContratti(dipId);
+      const r = await axios.post(`${C}/generate/${dipId}`, { contract_type: tipo, additional_data: extra });
+      const m = r.data?.stipendio_mensile;
+      setMsg(m != null ? `Contratto generato. Lordo mensile teorico: € ${Number(m).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.` : "Contratto generato.");
+      loadContratti(dipId);
     } catch (e) { setMsg(e?.response?.data?.detail || "Errore generazione"); }
     setBusy("");
   };
@@ -1841,8 +1847,37 @@ function AssunzionePage({ dipendenti, reload }) {
     } catch (e) { setMsg(e?.response?.data?.detail || "Errore invio email"); }
     setBusy("");
   };
+  const avviaFirma = async (cid) => {
+    if (!window.confirm("Avviare la firma digitale OpenAPI? Il dipendente riceverà la richiesta di firma con OTP (marca temporale + eSignature).")) return;
+    setBusy("sign-" + cid); setMsg("");
+    try { const r = await axios.post(`${C}/sign/${cid}`, {});
+      setMsg(`Firma avviata: inviata a ${r.data.firmatario} (stato: ${r.data.stato}).`); loadContratti(dipId);
+    } catch (e) { setMsg(e?.response?.data?.detail || "Errore avvio firma"); }
+    setBusy("");
+  };
+  const checkFirma = async (cid) => {
+    setBusy("chk-" + cid); setMsg("");
+    try { const r = await axios.get(`${C}/sign/${cid}/status`);
+      setMsg(`Stato firma: ${r.data.stato}.`); loadContratti(dipId);
+    } catch (e) { setMsg(e?.response?.data?.detail || "Errore controllo firma"); }
+    setBusy("");
+  };
+  const inviaPec = async (cid) => {
+    const pec = window.prompt("Indirizzo PEC destinatario:");
+    if (!pec) return;
+    setBusy("pec-" + cid); setMsg("");
+    try { const r = await axios.post(`${C}/pec/${cid}`, { pec });
+      setMsg(`PEC inviata a ${r.data.pec} (stato: ${r.data.stato}).`); loadContratti(dipId);
+    } catch (e) { setMsg(e?.response?.data?.detail || "Errore invio PEC"); }
+    setBusy("");
+  };
+  const STATO_FIRMA = { inviato: ["Firma inviata", "#c4894a", "#fdf0dd"], firmato: ["Firmato", "#3d8168", "#e7f6ec"], accettato: ["Accettato (PEC)", "#3d8168", "#e7f6ec"] };
 
   const dip = dipendenti.find(d => d.id === dipId);
+  const num = (v) => { const n = parseFloat(String(v).replace(",", ".")); return isNaN(n) ? null : n; };
+  const orario = num(extra.stipendio_orario), ore = num(extra.ore_settimanali);
+  const mensile = (orario != null && ore != null) ? (orario * ore * 52 / 12) : null;
+  const mensileFmt = mensile != null ? mensile.toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—";
   return (
     <div className="dc-page">
       <div className="dc-page-header"><div><h1>Assunzione & Contratti</h1>
@@ -1883,6 +1918,32 @@ function AssunzionePage({ dipendenti, reload }) {
           <label>Paga oraria (€)<input className="dc-input" value={extra.stipendio_orario} onChange={(e) => setExtra({ ...extra, stipendio_orario: e.target.value })} /></label>
           <label>Data inizio<input type="date" className="dc-input" value={extra.data_inizio} onChange={(e) => setExtra({ ...extra, data_inizio: e.target.value })} /></label>
           <label>Data fine (se determinato)<input type="date" className="dc-input" value={extra.data_fine} onChange={(e) => setExtra({ ...extra, data_fine: e.target.value })} /></label>
+          <label>Ore settimanali<input type="number" min="1" max="48" className="dc-input" value={extra.ore_settimanali} onChange={(e) => setExtra({ ...extra, ore_settimanali: e.target.value })} /></label>
+          <label>Periodo di prova (giorni)
+            <input className="dc-input" value={extra.periodo_prova} onChange={(e) => setExtra({ ...extra, periodo_prova: e.target.value })} placeholder="per livello CCNL" />
+            <span className="dc-muted" style={{ fontSize: 11 }}>CCNL Turismo: varia per livello — conferma col consulente</span>
+          </label>
+          <label>Giorni di ferie / anno<input className="dc-input" value={extra.ferie_giorni} onChange={(e) => setExtra({ ...extra, ferie_giorni: e.target.value })} placeholder="26" /></label>
+          <label>Lordo mensile teorico (calcolato)
+            <input className="dc-input" value={mensile != null ? `€ ${mensileFmt}` : ""} readOnly placeholder="paga oraria × ore × 52 / 12" style={{ background: "#f4f1ea" }} />
+          </label>
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 18, marginTop: 12, alignItems: "center" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}>
+            <input type="checkbox" checked={extra.tredicesima} onChange={(e) => setExtra({ ...extra, tredicesima: e.target.checked })} /> 13ª (dicembre)
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}>
+            <input type="checkbox" checked={extra.quattordicesima} onChange={(e) => setExtra({ ...extra, quattordicesima: e.target.checked })} /> 14ª (luglio)
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}>
+            <input type="checkbox" checked={extra.ticket_buono} onChange={(e) => setExtra({ ...extra, ticket_buono: e.target.checked })} /> Buono pasto (dopo 1 anno)
+          </label>
+          {extra.ticket_buono && (
+            <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}>
+              Importo €/giorno
+              <input className="dc-input" style={{ width: 90 }} value={extra.ticket_importo} onChange={(e) => setExtra({ ...extra, ticket_importo: e.target.value })} />
+            </label>
+          )}
         </div>
         {dip && !dip.email && <p className="dc-muted" style={{ fontSize: 12, marginTop: 8 }}>⚠ Questo dipendente non ha email in anagrafica: non potrai inviare il contratto.</p>}
         <button onClick={genera} disabled={busy === "gen"} className="dc-btn-primary" style={{ marginTop: 12 }}>
@@ -1895,11 +1956,20 @@ function AssunzionePage({ dipendenti, reload }) {
           <h3 style={{ marginTop: 0 }}>Contratti di {dip?.cognome} {dip?.nome}</h3>
           {contratti.length === 0 ? <p className="dc-muted">Nessun contratto generato.</p> :
             contratti.map(c => (
-              <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "space-between", borderTop: "1px solid #eee", padding: "8px 0" }}>
-                <div><b>{c.contract_name}</b><div className="dc-muted" style={{ fontSize: 12 }}>{c.filename}{c.inviato_a ? ` · inviato a ${c.inviato_a}` : ""}</div></div>
-                <div style={{ display: "flex", gap: 6 }}>
+              <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "space-between", borderTop: "1px solid #eee", padding: "8px 0", flexWrap: "wrap" }}>
+                <div>
+                  <b>{c.contract_name}</b>
+                  {c.firma_stato && STATO_FIRMA[c.firma_stato] && (
+                    <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 999, color: STATO_FIRMA[c.firma_stato][1], background: STATO_FIRMA[c.firma_stato][2] }}>{STATO_FIRMA[c.firma_stato][0]}</span>
+                  )}
+                  <div className="dc-muted" style={{ fontSize: 12 }}>{c.filename}{c.inviato_a ? ` · inviato a ${c.inviato_a}` : ""}{c.stipendio_mensile != null ? ` · €/mese ${Number(c.stipendio_mensile).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ""}</div>
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   <button className="dc-btn" onClick={() => scarica(c.id, c.filename)}>Scarica</button>
                   <button className="dc-btn-primary" disabled={busy === "send-" + c.id} onClick={() => invia(c.id)}>{busy === "send-" + c.id ? "Invio…" : "Invia email"}</button>
+                  <button className="dc-btn" disabled={busy === "sign-" + c.id} onClick={() => avviaFirma(c.id)}>{busy === "sign-" + c.id ? "Firma…" : "Firma (OpenAPI)"}</button>
+                  {c.firma_request_id && <button className="dc-btn" disabled={busy === "chk-" + c.id} onClick={() => checkFirma(c.id)}>{busy === "chk-" + c.id ? "…" : "Stato firma"}</button>}
+                  {c.firma_stato === "firmato" && <button className="dc-btn" disabled={busy === "pec-" + c.id} onClick={() => inviaPec(c.id)}>{busy === "pec-" + c.id ? "PEC…" : "Invia PEC"}</button>}
                 </div>
               </div>
             ))}

@@ -26,11 +26,11 @@
 .muted{color:var(--muted);font-size:13px}
 .pill{display:inline-block;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700}
 .pill.ok{background:#e7f6ec;color:var(--ok)} .pill.warn{background:#fdf0dd;color:var(--warn)}
-.pill.info{background:#ece7fb;color:var(--violet)} .pill.danger{background:#fdeaea;color:var(--danger)}
+.pill.info{background:#e8efe9;color:var(--violet)} .pill.danger{background:#fdeaea;color:var(--danger)}
 .pill.muted{background:#eee;color:#666}
 .btn{background:var(--violet);color:#fff;border:none;border-radius:12px;padding:12px 14px;
   font-weight:700;font-size:14px;width:100%;font-family:inherit}
-.btn:active{background:var(--violet-d)} .btn.sec{background:#ece7fb;color:var(--violet)}
+.btn:active{background:var(--violet-d)} .btn.sec{background:#e8efe9;color:var(--violet)}
 .btn.gh{background:transparent;border:1px solid var(--line);color:var(--ink)}
 .btn.sm{width:auto;padding:8px 12px;font-size:13px;border-radius:10px}
 .input,select,textarea{width:100%;padding:12px;border:1px solid var(--line);border-radius:12px;
@@ -60,9 +60,9 @@ label{font-size:13px;font-weight:600;display:block;margin-top:10px}
 .tgrid{overflow-x:auto;-webkit-overflow-scrolling:touch}
 .tgrid table{border-collapse:collapse;width:100%;font-size:12px}
 .tgrid th,.tgrid td{border:1px solid var(--line);padding:6px 7px;text-align:center;white-space:nowrap}
-.tgrid th{background:#f3f1fb;font-weight:700;position:sticky;left:0}
-.tgrid td.name{text-align:left;font-weight:600;background:#faf9ff;position:sticky;left:0}
-.t-lunga{background:#ede7fb;color:var(--violet);font-weight:700;border-radius:6px;padding:2px 4px}
+.tgrid th{background:#eef3ef;font-weight:700;position:sticky;left:0}
+.tgrid td.name{text-align:left;font-weight:600;background:#faf7f0;position:sticky;left:0}
+.t-lunga{background:#e8efe9;color:var(--violet);font-weight:700;border-radius:6px;padding:2px 4px}
 .t-riposo{color:var(--muted)} .t-indisp{background:#fdeaea;color:var(--danger);border-radius:6px;padding:2px 4px}
 .t-lav{background:#e7f6ec;color:var(--ok);border-radius:6px;padding:2px 4px}
 .daycard{display:flex;justify-content:space-between;padding:11px 0;border-bottom:1px solid var(--line)}
