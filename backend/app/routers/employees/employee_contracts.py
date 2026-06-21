@@ -598,11 +598,37 @@ def _smtp_send(to_addr: str, subject: str, body: str, allegati: List[Dict[str, A
             s.send_message(msg)
 
 
+# Documenti accessori che accompagnano SEMPRE il contratto (da sottoscrivere):
+# informativa 152/1997, informativa privacy e regolamento interno.
+DOC_ACCESSORI = ["informativa_152", "informativa_privacy", "regolamento"]
+
+
+async def _raccogli_documenti(db, contract: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Contratto + ultimi documenti accessori generati per il dipendente
+    (informativa 152, privacy, regolamento), nell'ordine di sottoscrizione.
+
+    Ritorna [{filename, data(bytes), tipo}]. Solo i documenti effettivamente
+    generati per quel dipendente vengono inclusi.
+    """
+    docs = [{"filename": contract.get("filename", "contratto.docx"),
+             "data": base64.b64decode(contract["file_data"]),
+             "tipo": contract.get("contract_type", "contratto")}]
+    emp_id = contract.get("employee_id")
+    for tipo in DOC_ACCESSORI:
+        d = await db["employee_contracts"].find_one(
+            {"employee_id": emp_id, "contract_type": tipo},
+            {"_id": 0, "file_data": 1, "filename": 1}, sort=[("generated_at", -1)])
+        if d and d.get("file_data"):
+            docs.append({"filename": d.get("filename", f"{tipo}.docx"),
+                         "data": base64.b64decode(d["file_data"]), "tipo": tipo})
+    return docs
+
+
 @router.post("/send/{contract_id}")
 @handle_errors
 async def send_contract(contract_id: str, data: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
-    """Invia il contratto al dipendente via email. Se `includi_regolamento` è
-    true e il regolamento è generato per quel dipendente, lo allega anch'esso."""
+    """Invia al dipendente via email il contratto INSIEME a regolamento, privacy
+    e informativa 152 (quelli generati per lui), da sottoscrivere."""
     db = Database.get_db()
     contract = await db["employee_contracts"].find_one({"id": contract_id}, {"_id": 0})
     if not contract:
@@ -616,31 +642,26 @@ async def send_contract(contract_id: str, data: Dict[str, Any] = Body(default={}
     if not contract.get("file_data"):
         raise HTTPException(404, "File del contratto non disponibile")
 
-    allegati = [{"filename": contract.get("filename", "contratto.docx"),
-                 "data": base64.b64decode(contract["file_data"])}]
-    if data.get("includi_regolamento"):
-        reg = await db["employee_contracts"].find_one(
-            {"employee_id": contract.get("employee_id"), "contract_type": "regolamento"},
-            {"_id": 0, "file_data": 1, "filename": 1}, sort=[("generated_at", -1)])
-        if reg and reg.get("file_data"):
-            allegati.append({"filename": reg.get("filename", "regolamento.docx"),
-                             "data": base64.b64decode(reg["file_data"])})
+    documenti = await _raccogli_documenti(db, contract)
+    allegati = [{"filename": d["filename"], "data": d["data"]} for d in documenti]
+    mancanti = [t for t in DOC_ACCESSORI if t not in {d["tipo"] for d in documenti}]
 
     nome = f"{emp.get('nome','')} {emp.get('cognome','')}".strip() or "Gentile collaboratore"
+    elenco = ", ".join(d["filename"] for d in documenti)
     corpo = (
         f"Gentile {nome},\n\n"
-        f"in allegato trova il contratto ({contract.get('contract_name','')}) e l'eventuale "
-        f"regolamento interno. La preghiamo di prenderne visione.\n\n"
-        f"È possibile accettare il regolamento dal portale dipendenti.\n\n"
+        f"in allegato trova i documenti da sottoscrivere per l'assunzione: {elenco}.\n"
+        f"La preghiamo di prenderne visione e di firmarli per accettazione.\n\n"
         f"Ceraldi Group S.r.l."
     )
     import asyncio
     await asyncio.to_thread(_smtp_send, to_addr,
-                            f"Contratto di assunzione — {contract.get('contract_name','')}", corpo, allegati)
+                            f"Documenti di assunzione — {contract.get('contract_name','')}", corpo, allegati)
     await db["employee_contracts"].update_one(
         {"id": contract_id},
         {"$set": {"inviato_il": datetime.now(timezone.utc).isoformat(), "inviato_a": to_addr}})
-    return {"ok": True, "inviato_a": to_addr, "allegati": len(allegati)}
+    return {"ok": True, "inviato_a": to_addr, "allegati": len(allegati),
+            "documenti": [d["filename"] for d in documenti], "accessori_mancanti": mancanti}
 
 
 # ---------------------------------------------------------------------------
@@ -690,6 +711,19 @@ async def _get_contract_pdf(contract: Dict[str, Any]) -> bytes:
     return _docx_bytes_to_pdf(base64.b64decode(contract["file_data"]))
 
 
+def _bundle_to_pdf(documenti: List[Dict[str, Any]]) -> bytes:
+    """Converte ogni .docx (contratto + accessori) in PDF e li unisce in un unico
+    PDF: così la firma per accettazione copre tutti i documenti in una sola volta."""
+    from PyPDF2 import PdfMerger
+    merger = PdfMerger()
+    for d in documenti:
+        merger.append(io.BytesIO(_docx_bytes_to_pdf(d["data"])))
+    out = io.BytesIO()
+    merger.write(out)
+    merger.close()
+    return out.getvalue()
+
+
 @router.post("/sign/{contract_id}")
 @handle_errors
 async def avvia_firma(contract_id: str, data: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
@@ -712,15 +746,19 @@ async def avvia_firma(contract_id: str, data: Dict[str, Any] = Body(default={}))
     if not client.configured:
         raise HTTPException(503, "OpenAPI non configurato: imposta OPENAPI_CLIENT_ID e "
                                  "OPENAPI_CLIENT_SECRET nelle env di Render.")
+    import asyncio
+    documenti = await _raccogli_documenti(db, contract)
+    fname = (contract.get("filename", "documenti").rsplit(".", 1)[0]) + "_assunzione.pdf"
     try:
-        pdf_bytes = await _get_contract_pdf(contract)
+        # Unico PDF con contratto + regolamento + privacy + informativa 152.
+        pdf_bytes = await asyncio.to_thread(_bundle_to_pdf, documenti)
         # 1) Marca temporale (data certa)
-        ts = await client.apply_timestamp(pdf_bytes, filename=contract.get("filename", "contratto.pdf"))
-        # 2) eSignature FES con OTP verso il dipendente
+        ts = await client.apply_timestamp(pdf_bytes, filename=fname)
+        # 2) eSignature FES con OTP verso il dipendente (firma unica su tutti i documenti)
         sig = await client.create_signature_request(
             pdf_bytes, signer_name=nome, signer_email=to_addr, signer_phone=phone,
-            title=f"Contratto — {contract.get('contract_name','')}",
-            filename=contract.get("filename", "contratto.pdf"))
+            title=f"Documenti di assunzione — {contract.get('contract_name','')}",
+            filename=fname)
     except OpenAPIConfigError as e:
         raise HTTPException(503, str(e))
     except OpenAPIError as e:
@@ -736,8 +774,10 @@ async def avvia_firma(contract_id: str, data: Dict[str, Any] = Body(default={}))
             "marca_temporale": ts,
             "firma_inviata_a": to_addr,
             "firma_inviata_il": datetime.now(timezone.utc).isoformat(),
+            "firma_documenti": [d["filename"] for d in documenti],
         }})
-    return {"ok": True, "stato": "inviato", "request_id": req_id, "firmatario": to_addr}
+    return {"ok": True, "stato": "inviato", "request_id": req_id, "firmatario": to_addr,
+            "documenti": [d["filename"] for d in documenti]}
 
 
 @router.get("/sign/{contract_id}/status")

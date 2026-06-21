@@ -1882,10 +1882,11 @@ function AssunzionePage({ dipendenti, reload }) {
     } catch { setMsg("Download non disponibile"); }
   };
   const invia = async (cid) => {
-    const reg = window.confirm("Allegare anche il Regolamento Interno? (OK = sì, Annulla = solo contratto)");
     setBusy("send-" + cid); setMsg("");
-    try { const r = await axios.post(`${C}/send/${cid}`, { includi_regolamento: reg });
-      setMsg(`Inviato a ${r.data.inviato_a} (${r.data.allegati} allegati).`); loadContratti(dipId);
+    try { const r = await axios.post(`${C}/send/${cid}`, {});
+      const miss = (r.data.accessori_mancanti || []);
+      const avviso = miss.length ? ` ⚠ Non ancora generati per questo dipendente: ${miss.join(", ")}.` : "";
+      setMsg(`Inviato a ${r.data.inviato_a}: ${(r.data.documenti || []).join(", ")}.${avviso}`); loadContratti(dipId);
     } catch (e) { setMsg(e?.response?.data?.detail || "Errore invio email"); }
     setBusy("");
   };
