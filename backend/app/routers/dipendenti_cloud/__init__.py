@@ -1402,6 +1402,7 @@ async def save_turni_config(data: dict = Body(...)):
                       "riposo_giorno": v.get("riposo_giorno") or None,
                       "lunga_giorni": v.get("lunga_giorni") or [],
                       "rotazione": v.get("rotazione") or None,
+                      "sala": bool(v.get("sala")),
                       "updated_at": now_iso()}}, upsert=True)
     return {"ok": True, "salvati": len(data.get("voci") or [])}
 

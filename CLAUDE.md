@@ -59,8 +59,10 @@ Fondo EST (sanitario), Fon.Te. (previdenza compl.).
   scadenzario (contratti/prova)→alert; timbratura→presenze reali.
 - Alert visibili nel **Pannello di controllo** (pannello "Avvisi & Scadenze").
 - **Turni data-driven** (pagina Turni, modale "⚙️ Configura turni" = punto unico):
-  per dipendente `turni_config` (collezione) = turno abituale + giorno di riposo fisso
-  + giorni di Lunga (Ven/Sab/Dom); + onomastico (`onomastici`). "Genera settimana"
+  per dipendente `turni_config` (collezione) = modalità Sala (cameriere: rotazione
+  automatica 2 Lunga/2 Mattina/2 Pomeriggio/1 Riposo, riposi nei feriali per coprire il
+  weekend) | turno abituale | rotazione bar (mattina↔pom); + giorno di riposo fisso +
+  giorni di Lunga (Ven/Sab/Dom); + onomastico (`onomastici`). "Genera settimana"
   (`generaProduzione` in App.jsx) assegna: turno abituale, Lunga nei giorni spuntati,
   Riposo nel giorno fisso e nell'onomastico, Ferie nei giorni di ferie APPROVATE.
   Niente più nomi cablati. Celle sempre modificabili a mano.

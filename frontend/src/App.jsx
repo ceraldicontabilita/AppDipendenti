@@ -1239,7 +1239,7 @@ function TurniPage({ dipendenti, turni, reload }) {
     const om = {}; onom.forEach(o => { om[o.dipendente_id] = o; });
     setCfgRows(dipTurni.map(d => { const c = cfgDi(d.id); const o = om[d.id] || {}; return {
       dipendente_id: d.id, nome: `${d.cognome || ''} ${d.nome || ''}`.trim() || d.nome,
-      turno_id: c.turno_id || '', riposo_giorno: c.riposo_giorno || '', lunga_giorni: c.lunga_giorni || [], rotazione: c.rotazione || '',
+      turno_id: c.turno_id || '', riposo_giorno: c.riposo_giorno || '', lunga_giorni: c.lunga_giorni || [], rotazione: c.rotazione || '', sala: !!c.sala,
       onom_mese: o.mese ?? '', onom_giorno: o.giorno ?? '', onom_attivo: o.attivo ?? false, straniero: o.straniero || false }; }));
     setShowCfg(true);
   };
@@ -1250,7 +1250,7 @@ function TurniPage({ dipendenti, turni, reload }) {
     return { ...r, lunga_giorni: has ? r.lunga_giorni.filter(x => x !== g) : [...(r.lunga_giorni || []), g] };
   }));
   const salvaCfg = async () => {
-    await axios.post(`${API}/turni-config`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, turno_id: r.turno_id || null, riposo_giorno: r.riposo_giorno || null, lunga_giorni: r.lunga_giorni || [], rotazione: r.rotazione || null })) });
+    await axios.post(`${API}/turni-config`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, turno_id: r.turno_id || null, riposo_giorno: r.riposo_giorno || null, lunga_giorni: r.lunga_giorni || [], rotazione: r.rotazione || null, sala: !!r.sala })) });
     await axios.post(`${API}/onomastici`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, mese: r.onom_mese ? Number(r.onom_mese) : null, giorno: r.onom_giorno ? Number(r.onom_giorno) : null, attivo: r.onom_attivo })) });
     await caricaCfg();
     axios.get(`${API}/onomastici/settimana?settimana=${settimana}`).then(r => setOnomSett(r.data || []));
@@ -1289,9 +1289,42 @@ function TurniPage({ dipendenti, turni, reload }) {
     const ferieIn = (dipId, dStr) => ferieFresh.find(f => f.dipendente_id === dipId
       && (f.stato === 'approvata' || !f.stato)
       && (((f.data_inizio || f.data) <= dStr && (f.data_fine || f.data_inizio || f.data) >= dStr)));
+    // Turni "sala" per la rotazione camerieri
+    const idSalaMatt = idTurno("Mattina 8-16") || idTurno("Mattina 7-15");
+    const idSalaPom = idTurno("Pomeriggio");
+    // Camerieri in rotazione bilanciata: 2 Lunga, 2 Mattina, 2 Pomeriggio, 1 Riposo.
+    // Riposo nei giorni feriali (Lun-Gio) → ven/sab/dom restano pieni (più copertura weekend).
+    const camerieri = dipTurni.filter(d => cfgDi(d.id).sala).map(d => d.id);
+    const FERIALI_RIPOSO = [0, 1, 2, 3]; // Lun,Mar,Mer,Gio
     let tocco = 0;
     dipTurni.forEach(dip => {
       const c = cfgDi(dip.id);
+
+      // ===== CAMERIERE (rotazione sala) =====
+      if (c.sala) {
+        const k = Math.max(0, camerieri.indexOf(dip.id));
+        // giorno di riposo: quello fisso se feriale, altrimenti distribuito Lun-Gio per coprire il weekend
+        let riposoIdx = c.riposo_giorno ? giorni.indexOf(c.riposo_giorno) : -1;
+        if (riposoIdx < 0 || riposoIdx > 4) riposoIdx = FERIALI_RIPOSO[k % 4];
+        // sequenza interlacciata (2 Lunga, 2 Mattina, 2 Pomeriggio) ruotata per persona → fasce sfalsate
+        const base = [idTurno("Lunga"), idSalaMatt, idSalaPom, idTurno("Lunga"), idSalaMatt, idSalaPom];
+        const off = k % 6;
+        const seq = base.slice(off).concat(base.slice(0, off));
+        let si = 0;
+        for (let gi = 0; gi < 7; gi++) {
+          const date = new Date(lunedi); date.setDate(lunedi.getDate() + gi);
+          const dStr = isoT(date); const giorno = giorni[gi];
+          let target;
+          if (ferieIn(dip.id, dStr)) target = idFerie || idRiposo;
+          else if (onomSett.some(o => o.dipendente_id === dip.id && o.giorno_nome === giorno)) target = idRiposo;
+          else if (gi === riposoIdx) target = idRiposo;
+          else { target = seq[si % 6] || null; si++; }
+          updates.push({ dipendente_id: dip.id, giorno, turno_id: target || null }); tocco++;
+        }
+        return;
+      }
+
+      // ===== ALTRI (turno fisso / rotazione bar) =====
       const configurato = !!(c.turno_id || c.riposo_giorno || (c.lunga_giorni || []).length || c.rotazione);
       // turno "di lavoro" della settimana: se in rotazione bar, alterna mattina/pomeriggio
       let turnoLavoro = c.turno_id || null;
@@ -1322,7 +1355,7 @@ function TurniPage({ dipendenti, turni, reload }) {
         }
       }
     });
-    if (!tocco) { alert("Niente da generare. Apri \"Configura turni\" e imposta turno/riposo, oppure verifica che ci siano ferie approvate."); return; }
+    if (!tocco) { alert("Niente da generare. Apri \"Configura turni\" e imposta turno/riposo (o spunta Sala per i camerieri), oppure verifica che ci siano ferie approvate."); return; }
     if (updates.length) await salva(updates);
   };
 
@@ -1378,22 +1411,25 @@ function TurniPage({ dipendenti, turni, reload }) {
         <div onClick={() => setShowCfg(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
           <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 920, width: "100%", marginTop: 20 }}>
             <h3 style={{ marginTop: 0 }}>⚙️ Configura turni dipendenti</h3>
-            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Punto unico dei turni. Per ognuno: <b>turno abituale</b> oppure <b>rotazione bar</b> (alterna ogni settimana mattina/pomeriggio), <b>giorno di riposo fisso</b>, chi fa la <b>Lunga</b> (Ven/Sab/Dom) e l’<b>onomastico</b>. “Genera settimana” usa tutto questo: turno abituale (o la mattina/pomeriggio della settimana per chi è in rotazione), Lunga nei giorni spuntati, Riposo nel giorno fisso e nell’onomastico, Ferie nei giorni approvati. Le celle restano modificabili a mano. Salva su database (MongoDB Atlas).</p>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Punto unico dei turni. Per ognuno scegli UNA modalità: <b>Sala</b> (cameriere → rotazione automatica 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo, riposi nei feriali per coprire il weekend), oppure <b>turno abituale</b>, oppure <b>rotazione bar</b> (mattina ↔ pomeriggio ogni settimana). In più: <b>riposo fisso</b>, chi fa la <b>Lunga</b> (Ven/Sab/Dom) e l’<b>onomastico</b>. “Genera settimana” mette sempre Ferie nei giorni approvati e Riposo nell’onomastico. Le celle restano modificabili a mano. Salva su database (MongoDB Atlas).</p>
             <div style={{ maxHeight: "60vh", overflow: "auto" }}>
             <table className="dc-table">
-              <thead><tr><th>Dipendente</th><th>Turno abituale</th><th>Rotazione bar<br/><span style={{fontWeight:400,fontSize:11}}>mattina ↔ pom</span></th><th>Riposo fisso</th><th>Lunga<br/><span style={{fontWeight:400,fontSize:11}}>V · S · D</span></th><th>Onomastico<br/><span style={{fontWeight:400,fontSize:11}}>gg / mm · attivo</span></th></tr></thead>
+              <thead><tr><th>Dipendente</th><th>Sala<br/><span style={{fontWeight:400,fontSize:11}}>cameriere</span></th><th>Turno abituale</th><th>Rotazione bar<br/><span style={{fontWeight:400,fontSize:11}}>mattina ↔ pom</span></th><th>Riposo fisso</th><th>Lunga<br/><span style={{fontWeight:400,fontSize:11}}>V · S · D</span></th><th>Onomastico<br/><span style={{fontWeight:400,fontSize:11}}>gg / mm · attivo</span></th></tr></thead>
               <tbody>
                 {cfgRows.map((r, i) => (
                   <tr key={r.dipendente_id}>
                     <td>{r.nome}{r.straniero ? <span className="dc-muted"> · straniero</span> : ""}</td>
+                    <td style={{ textAlign: "center" }}>
+                      <input type="checkbox" checked={!!r.sala} title="Cameriere: rotazione automatica 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo" onChange={e => setCfgRow(i, "sala", e.target.checked)} />
+                    </td>
                     <td>
-                      <select className="dc-input" value={r.turno_id} onChange={e => setCfgRow(i, "turno_id", e.target.value)} disabled={!!r.rotazione} title={r.rotazione ? "In rotazione bar: il turno è alternato automaticamente" : ""}>
+                      <select className="dc-input" value={r.turno_id} onChange={e => setCfgRow(i, "turno_id", e.target.value)} disabled={!!r.rotazione || !!r.sala} title={r.sala ? "In rotazione sala: i turni sono assegnati in automatico" : (r.rotazione ? "In rotazione bar: il turno è alternato automaticamente" : "")}>
                         <option value="">— nessuno —</option>
                         {turni.map(t => <option key={t.id} value={t.id}>{t.nome}</option>)}
                       </select>
                     </td>
                     <td>
-                      <select className="dc-input" value={r.rotazione} onChange={e => setCfgRow(i, "rotazione", e.target.value)} title="Alterna ogni settimana mattina e pomeriggio bar">
+                      <select className="dc-input" value={r.rotazione} onChange={e => setCfgRow(i, "rotazione", e.target.value)} disabled={!!r.sala} title="Alterna ogni settimana mattina e pomeriggio bar">
                         <option value="">— no —</option>
                         <option value="mattina">Inizia mattina</option>
                         <option value="pomeriggio">Inizia pomeriggio</option>
