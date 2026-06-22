@@ -1660,6 +1660,54 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
         </div>
       </div>
 
+      {/* Riepilogo a colpo d'occhio: busta vs bonifico emesso per il mese selezionato */}
+      <div className="dc-card" style={{ marginBottom: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Riepilogo {mesi[mese - 1]} {anno} — busta vs bonifico emesso</h3>
+        <div style={{ overflowX: "auto" }}>
+          <table className="dc-table" style={{ minWidth: 580, whiteSpace: "nowrap" }}>
+            <thead><tr>
+              <th>Dipendente</th>
+              <th style={{ textAlign: "right" }}>Busta €</th>
+              <th style={{ textAlign: "right" }}>Acconti €</th>
+              <th style={{ textAlign: "right" }}>Bonifico emesso €</th>
+              <th>Stato</th>
+            </tr></thead>
+            <tbody>
+              {dipendenti.map(d => {
+                const r = get(d.id);
+                const busta = parseFloat(r.importo_busta) || 0;
+                const bon = parseFloat(r.bonifico_importo) || 0;
+                const acc = (r.acconti || []).reduce((a, x) => a + (parseFloat(x.importo) || 0), 0);
+                if (busta <= 0 && bon <= 0 && acc <= 0) return null;
+                const pagato = bon + acc;
+                let stato;
+                if (busta <= 0 && bon > 0) stato = <Badge variant="warning">bonifico senza busta</Badge>;
+                else if (pagato + 0.5 >= busta) stato = <Badge variant="success">✓ pagato</Badge>;
+                else if (pagato > 0) stato = <Badge variant="warning">parziale · manca € {eur(busta - pagato)}</Badge>;
+                else stato = <Badge variant="danger">⚠ da pagare</Badge>;
+                return (
+                  <tr key={d.id}>
+                    <td>{d.cognome ? `${d.cognome} ${d.nome?.[0] || ''}.` : d.nome}</td>
+                    <td style={{ textAlign: "right" }}>{busta ? eur(busta) : "—"}</td>
+                    <td style={{ textAlign: "right" }}>{acc ? eur(acc) : "—"}</td>
+                    <td style={{ textAlign: "right" }}>{bon ? eur(bon) : "—"}</td>
+                    <td>{stato}</td>
+                  </tr>
+                );
+              })}
+              <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4" }}>
+                <td>Totale</td>
+                <td style={{ textAlign: "right" }}>{eur(totBuste)}</td>
+                <td style={{ textAlign: "right" }}>{eur(totAcconti)}</td>
+                <td style={{ textAlign: "right" }}>{eur(totBonifici)}</td>
+                <td></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p className="dc-muted" style={{ fontSize: 12, marginTop: 8 }}>“Pagato” = bonifico emesso + acconti ≥ importo busta. Cambia mese/anno in alto per altri periodi.</p>
+      </div>
+
       {importMsg && (
         <div className="dc-card" style={{ marginBottom: 16, padding: 14, borderLeft: `4px solid ${importMsg.errore ? '#d35f4e' : '#3d8168'}` }}>
           {importMsg.errore ? (
