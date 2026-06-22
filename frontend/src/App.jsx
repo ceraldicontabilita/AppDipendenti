@@ -1233,6 +1233,30 @@ function TurniPage({ dipendenti, turni, reload }) {
     })();
   }, [onomSett, assegnazioni, turni, settimana]);
 
+  // Config turni per dipendente (turno abituale + giorno di riposo fisso) + ferie
+  const [turniCfg, setTurniCfg] = useState([]);     // [{dipendente_id, turno_id, riposo_giorno}]
+  const [ferieTurni, setFerieTurni] = useState([]); // ferie/permessi per overlay
+  const [showCfg, setShowCfg] = useState(false);
+  const [cfgRows, setCfgRows] = useState([]);
+  const isoT = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const caricaCfg = () => axios.get(`${API}/turni-config`).then(r => setTurniCfg(r.data || [])).catch(() => {});
+  useEffect(() => { caricaCfg(); axios.get(`${API}/ferie`).then(r => setFerieTurni(r.data || [])).catch(() => {}); }, []);
+  const cfgDi = (dipId) => turniCfg.find(c => c.dipendente_id === dipId) || {};
+  const ferieDataT = (dipId, dStr) => ferieTurni.find(f => f.dipendente_id === dipId
+    && (f.stato === 'approvata' || !f.stato)
+    && f.data_inizio <= dStr && (f.data_fine || f.data_inizio) >= dStr);
+  const apriCfg = () => {
+    setCfgRows(dipTurni.map(d => { const c = cfgDi(d.id); return {
+      dipendente_id: d.id, nome: `${d.cognome || ''} ${d.nome || ''}`.trim() || d.nome,
+      turno_id: c.turno_id || '', riposo_giorno: c.riposo_giorno || '' }; }));
+    setShowCfg(true);
+  };
+  const setCfgRow = (i, k, v) => setCfgRows(rows => rows.map((r, j) => j === i ? { ...r, [k]: v } : r));
+  const salvaCfg = async () => {
+    await axios.post(`${API}/turni-config`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, turno_id: r.turno_id || null, riposo_giorno: r.riposo_giorno || null })) });
+    await caricaCfg(); setShowCfg(false);
+  };
+
   // Riequilibrio automatico: se assegno una Lunga o un Riposo a una persona della
   // produzione, chi aveva quel turno quel giorno si scambia il turno con lei,
   // così il giorno resta sempre con una sola lunga e un solo riposo.
@@ -1249,50 +1273,31 @@ function TurniPage({ dipendenti, turni, reload }) {
   };
 
   // Genera la settimana della squadra produzione secondo le regole.
+  // Genera la settimana dai DATI: per ogni dipendente configurato usa il suo turno
+  // abituale, mette Riposo nel giorno di riposo fisso e nell'onomastico, e mette
+  // Ferie nei giorni di ferie/permesso approvati. Niente più nomi cablati.
   const generaProduzione = async () => {
-    const BASE = {
-      luigi:    ["Riposo","Mattina 7-15","Mattina 7-15","Mattina 7-15","Mattina 7-15","Lunga","Mattina 7-15"],
-      angela:   ["Mattina 7-15","Mattina 8-16","Mattina 8-16","Riposo","Lunga","Mattina 7-15","Mattina 7-15"],
-      giuliano: ["Lunga","Pomeriggio","Riposo","Mattina 8-16","Pomeriggio","Mattina 8-16","Mattina 8-16"],
-      liliana:  ["Mattina 8-16","Lunga","Pomeriggio","Mattina 7-15","Riposo","Pomeriggio","Pomeriggio"],
-      carmine:  ["Pomeriggio","Riposo","Lunga","Pomeriggio","Mattina 8-16","Mattina 7-15","Pomeriggio"],
-      mario:    ["Mattina 7-15","Mattina 8-16","Mattina 7-15","Lunga","Mattina 7-15","Pomeriggio","Riposo"],
-    };
+    const idRiposo = idTurno("Riposo");
+    const idFerie = idTurno("Ferie");
     const updates = [];
-    dipendenti.filter(isTeam).forEach(dip => {
-      const row = BASE[(dip.nome || "").trim().toLowerCase()];
-      if (row) row.forEach((nome, gi) => updates.push({ dipendente_id: dip.id, giorno: giorni[gi], turno_id: idTurno(nome) || null }));
+    let configurati = 0;
+    dipTurni.forEach(dip => {
+      const c = cfgDi(dip.id);
+      if (!c.turno_id && !c.riposo_giorno) return;  // genera solo chi è stato configurato
+      configurati++;
+      for (let gi = 0; gi < 7; gi++) {
+        const date = new Date(lunedi); date.setDate(lunedi.getDate() + gi);
+        const dStr = isoT(date);
+        const giorno = giorni[gi];
+        let turnoId;
+        if (ferieDataT(dip.id, dStr)) turnoId = idFerie || idRiposo;                 // ferie approvata
+        else if (onomSett.some(o => o.dipendente_id === dip.id && o.giorno_nome === giorno)) turnoId = idRiposo; // onomastico
+        else if (c.riposo_giorno && c.riposo_giorno === giorno) turnoId = idRiposo;  // riposo fisso settimanale
+        else turnoId = c.turno_id || null;                                            // turno abituale
+        updates.push({ dipendente_id: dip.id, giorno, turno_id: turnoId || null });
+      }
     });
-    // --- Gruppi bar ---
-    // Capezzuto+Vespa e Parisi+Moscato si alternano mattina/pomeriggio settimana per settimana.
-    // Ciascuno ha 1 giorno di riposo feriale a testa (giorni diversi, così il bar resta coperto).
-    // Capezzuto+Vespa lavorano la domenica (mattina); Parisi+Moscato riposano la domenica.
-    // Domenica solo mattina unicamente se la spunta è attiva E la domenica cade nel periodo impostato.
-    const mattinaT = "Bar 6:30-15", pomT = "Bar 15-21";
-    const ferB1 = settimanaPari ? mattinaT : pomT;   // Capezzuto+Vespa
-    const ferB2 = settimanaPari ? pomT : mattinaT;   // Parisi+Moscato
-    const domData = new Date(lunedi); domData.setDate(domData.getDate() + 6);
-    const domISO = `${domData.getFullYear()}-${String(domData.getMonth() + 1).padStart(2, "0")}-${String(domData.getDate()).padStart(2, "0")}`;
-    const inPeriodo = (!periodoInizio || !periodoFine) ? true : (domISO >= periodoInizio && domISO <= periodoFine);
-    const domCapVespa = (barChiusoDomPom && inPeriodo) ? mattinaT : ferB1;   // domenica: solo mattina nel periodo
-    // riposo feriale individuale per cognome (0=Lun … 5=Sab): giorni diversi
-    const riposoGiorno = { capezzuto: 0, vespa: 1, parisi: 2, moscato: 3 };
-    const assegnaPersona = (cognomi, turnoFeriale, turnoDomenica) => {
-      dipendenti.filter(d => cognomi.some(c => (d.cognome || "").toLowerCase().includes(c))).forEach(dip => {
-        const key = Object.keys(riposoGiorno).find(c => (dip.cognome || "").toLowerCase().includes(c));
-        const rday = key != null ? riposoGiorno[key] : -1;
-        for (let gi = 0; gi < 7; gi++) {
-          const nome = gi === 6 ? turnoDomenica : (gi === rday ? "Riposo" : turnoFeriale);
-          updates.push({ dipendente_id: dip.id, giorno: giorni[gi], turno_id: idTurno(nome) || null });
-        }
-      });
-    };
-    assegnaPersona(["vespa", "capezzuto"], ferB1, domCapVespa);   // lavorano domenica (mattina)
-    assegnaPersona(["parisi", "moscato"], ferB2, "Riposo");        // riposo domenica
-    // Ceraldi Antonietta: presente tutti i giorni (turno modificabile cella per cella)
-    dipendenti.filter(isSemprePresente).forEach(dip => {
-      giorni.forEach(g => updates.push({ dipendente_id: dip.id, giorno: g, turno_id: idTurno("Mattina 7-15") || null }));
-    });
+    if (!configurati) { alert("Nessun dipendente configurato. Apri \"Configura turni\" e imposta turno e giorno di riposo."); return; }
     if (updates.length) await salva(updates);
   };
 
@@ -1334,11 +1339,50 @@ function TurniPage({ dipendenti, turni, reload }) {
             al <input type="date" value={periodoFine} onChange={(e) => salvaImpostazione({ periodo_fine: e.target.value })} style={{ border: "1px solid #cdd8d0", borderRadius: 6, padding: "3px 6px", fontSize: 12 }} />
           </span>
         )}
+        <button onClick={apriCfg} className="dc-btn"
+          style={{ marginLeft: "auto", padding: "10px 16px", borderRadius: 10, fontWeight: 600 }}>
+          ⚙️ Configura turni
+        </button>
         <button onClick={generaProduzione} disabled={busy}
-          style={{ marginLeft: "auto", background: "#5b7a6b", color: "#fff", border: "none", padding: "10px 18px", borderRadius: 10, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
+          style={{ background: "#5b7a6b", color: "#fff", border: "none", padding: "10px 18px", borderRadius: 10, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
           {busy ? "Attendi…" : "Genera settimana"}
         </button>
       </div>
+
+      {showCfg && (
+        <div onClick={() => setShowCfg(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
+          <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 720, width: "100%", marginTop: 20 }}>
+            <h3 style={{ marginTop: 0 }}>⚙️ Configura turni dipendenti</h3>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Per ogni dipendente scegli il <b>turno abituale</b> e il suo <b>giorno di riposo fisso</b>. “Genera settimana” assegnerà quel turno tutti i giorni, mettendo Riposo nel giorno scelto e nell’onomastico, e Ferie nei giorni di ferie approvate. Le celle restano comunque modificabili a mano.</p>
+            <table className="dc-table">
+              <thead><tr><th>Dipendente</th><th>Turno abituale</th><th>Riposo fisso</th></tr></thead>
+              <tbody>
+                {cfgRows.map((r, i) => (
+                  <tr key={r.dipendente_id}>
+                    <td>{r.nome}</td>
+                    <td>
+                      <select className="dc-input" value={r.turno_id} onChange={e => setCfgRow(i, "turno_id", e.target.value)}>
+                        <option value="">— nessuno —</option>
+                        {turni.map(t => <option key={t.id} value={t.id}>{t.nome}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <select className="dc-input" value={r.riposo_giorno} onChange={e => setCfgRow(i, "riposo_giorno", e.target.value)}>
+                        <option value="">— nessuno —</option>
+                        {giorni.map(g => <option key={g} value={g}>{g}</option>)}
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
+              <button className="dc-btn" onClick={() => setShowCfg(false)}>Chiudi</button>
+              <button className="dc-btn-primary" onClick={salvaCfg}>Salva</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="dc-card" style={{ marginBottom: 12 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>

@@ -1380,6 +1380,29 @@ async def create_or_update_assegnazione(data: dict):
     
     return {"message": "Assegnazione salvata"}
 
+# ============ CONFIG TURNI PER DIPENDENTE ============
+# Per ogni dipendente: turno abituale (turno_id) + giorno di riposo fisso
+# settimanale (riposo_giorno, nome italiano). Usati da "Genera settimana".
+@router.get("/turni-config")
+async def get_turni_config():
+    return await get_db().turni_config.find({}, {"_id": 0}).to_list(1000)
+
+
+@router.post("/turni-config")
+async def save_turni_config(data: dict = Body(...)):
+    """Body: {voci: [{dipendente_id, turno_id, riposo_giorno}]}."""
+    db = get_db()
+    for v in (data.get("voci") or []):
+        if not v.get("dipendente_id"):
+            continue
+        await db.turni_config.update_one(
+            {"dipendente_id": v["dipendente_id"]},
+            {"$set": {"dipendente_id": v["dipendente_id"],
+                      "turno_id": v.get("turno_id") or None,
+                      "riposo_giorno": v.get("riposo_giorno") or None,
+                      "updated_at": now_iso()}}, upsert=True)
+    return {"ok": True, "salvati": len(data.get("voci") or [])}
+
 # ============ ONOMASTICI (riposo per onomastico nei turni) ============
 # Date standard italiane (mese, giorno) per nome proprio. Prefillate e
 # MODIFICABILI in gestione. I nomi non presenti sono "stranieri" → esclusi.
