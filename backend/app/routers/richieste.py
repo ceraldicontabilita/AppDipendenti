@@ -16,7 +16,7 @@ import smtplib
 import asyncio
 import uuid
 from email.message import EmailMessage
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, HTTPException, Body, Query, Depends
 
@@ -99,25 +99,42 @@ def _to_float(v):
         return None
 
 
-async def _segna_presenze_ferie(db, dipendente_id: str, dal, al):
-    """Segna i giorni dal..al come 'ferie' nelle presenze (upsert idempotente)."""
-    if not (dal and al):
+_TIPO_FERIE = {"ferie_programmate": "Ferie", "permesso": "Permesso",
+               "malattia": "Malattia", "rol": "ROL"}
+
+
+async def _registra_ferie_cloud(db, req: Dict[str, Any], richiesta_id: str):
+    """Ferie/permesso approvati dal portale → record in Ferie & Permessi
+    (collezione ferie_cloud). Così compaiono sia in Ferie sia, in automatico,
+    nel calendario Presenze (che sovrappone già le ferie). Niente doppioni con
+    le presenze: il giorno viene derivato dalla logica esistente.
+    """
+    dati = req.get("dati", {})
+    dal, al = dati.get("dal"), dati.get("al") or dati.get("dal")
+    if not dal:
+        return
+    # idempotenza: non duplicare se già registrato per questa richiesta
+    if await db["ferie_cloud"].find_one({"richiesta_id": richiesta_id}, {"_id": 1}):
         return
     try:
         d0 = datetime.fromisoformat(str(dal)[:10])
         d1 = datetime.fromisoformat(str(al)[:10])
+        giorni = (d1 - d0).days + 1
     except (ValueError, TypeError):
-        return
-    giorno = d0
-    while giorno <= d1:
-        ds = giorno.strftime("%Y-%m-%d")
-        await db["presenze"].update_one(
-            {"employee_id": dipendente_id, "data": ds},
-            {"$set": {"employee_id": dipendente_id, "data": ds, "stato": "ferie",
-                      "ore_lavorate": 0, "origine": "ferie_auto",
-                      "anno": giorno.year, "mese": giorno.month}},
-            upsert=True)
-        giorno += timedelta(days=1)
+        giorni = 1
+    await db["ferie_cloud"].insert_one({
+        "id": f"fer_{uuid.uuid4().hex[:12]}",
+        "dipendente_id": req["dipendente_id"],
+        "tipo": _TIPO_FERIE.get(req["tipo"], "Ferie"),
+        "data_inizio": str(dal)[:10],
+        "data_fine": str(al)[:10],
+        "giorni": max(1, giorni),
+        "stato": "approvata",
+        "nota": req.get("dettaglio", ""),
+        "origine": "portale",
+        "richiesta_id": richiesta_id,
+        "created_at": _now(),
+    })
 
 
 @router.post("", summary="Crea una richiesta (dipendente)")
@@ -266,13 +283,12 @@ async def risolvi_richiesta(
                 "creato_il": _now(),
             })
 
-    # Ferie approvate → segna i giorni come "ferie" nelle presenze
+    # Ferie approvata → record in Ferie & Permessi (compare anche nelle Presenze)
     if esito == "approvata" and req["tipo"] == "ferie_programmate":
-        dati = req.get("dati", {})
         try:
-            await _segna_presenze_ferie(db, req["dipendente_id"], dati.get("dal"), dati.get("al"))
+            await _registra_ferie_cloud(db, req, richiesta_id)
         except Exception:
-            logger.exception("presenze ferie")
+            logger.exception("ferie_cloud da richiesta")
 
     # Acconto/anticipo approvato → partita aperta (tracciamento finanziario)
     if esito == "approvata" and req["tipo"] in ("acconto_stipendio", "acconto_tfr", "anticipo_retribuzione"):

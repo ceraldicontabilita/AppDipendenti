@@ -66,6 +66,22 @@ async def on_cedolino_importato(event: Dict[str, Any], db) -> Optional[Dict]:
         )
         risultati.append("alert_dati_incompleti")
 
+    # TFR del cedolino → progressivi del dipendente (una sola volta per cedolino).
+    try:
+        ced = await db["cedolini"].find_one(
+            {"id": cedolino_id}, {"_id": 0, "tfr_quota": 1, "tfr": 1, "tfr_conteggiato": 1})
+        if ced and not ced.get("tfr_conteggiato"):
+            tfr = float(ced.get("tfr_quota") or ced.get("tfr") or 0)
+            if tfr:
+                await db["dipendenti"].update_one(
+                    {"id": dipendente_id},
+                    {"$inc": {"progressivi.tfr_accantonato": round(tfr, 2)}})
+                await db["cedolini"].update_one(
+                    {"id": cedolino_id}, {"$set": {"tfr_conteggiato": True}})
+                risultati.append("tfr_progressivi")
+    except Exception as e:
+        logger.warning(f"cedolino: aggiornamento TFR progressivi saltato: {e}")
+
     # Notifica in-app al dipendente: nuova busta paga disponibile.
     try:
         from backend.app.services.notifiche import crea_notifica
