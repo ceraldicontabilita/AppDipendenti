@@ -107,6 +107,11 @@ timbrature), `presenze` (LUL), `ferie_cloud`, `turni_settimane` + assegnazioni,
 `missioni_cloud`, `assegnazioni_turni_cloud`, `turni_config` (turno/riposo/Lunga per
 dipendente), `onomastici`.
 - `documenti_cloud`: archivio documenti dipendente. Upload massivo POST `/api/dipendenti-cloud/documenti/upload-massivo`: classifica il tipo (UNILAV/CERTIFICAZIONE_UNICA/CONTRATTO/BONIFICO/CODICE_FISCALE/BUSTA_PAGA/ALTRO) da regole sul testo, trova il dipendente dal codice fiscale/nome nel PDF, dedup per hash, salva file_data. Pagina Documenti = vista a cartelle per tipo + download (`/documenti/{id}/file`).
+- Import: anagrafica da Excel (`POST /dipendenti/importa-anagrafica`); pagamenti bonifici
+  da CSV banca (`POST /paghe/importa-pagamenti` → collezione `pagamenti_esiti`, ricalcola
+  bonifico mese); Prima Nota Excel (`/paghe/importa-prima-nota`). Prima nota con saldo
+  progressivo: `GET /paghe/prima-nota?dipendente_id=` (cumulato busta − erogato). Upload
+  massivo documenti accetta anche ZIP (estrae) e categoria RIDUZIONE_ORARIO.
 - `cedolini`: oltre a netto/pdf salva `voci` (tutti i codici busta) + dati chiave
   (rateo 13ª/14ª, Indennità L.207/24 + cng ann, Trattam. integ. L.21/2020, Rimborso 730,
   ore/giorni lavorati). Motore ricerca: GET `/api/dipendenti-cloud/cedolini/cerca-voce`

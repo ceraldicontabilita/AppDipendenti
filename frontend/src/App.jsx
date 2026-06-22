@@ -424,6 +424,20 @@ function AnagraficaPage({ dipendenti, reload }) {
     codice_fiscale: "", contratto: "Indeterminato", iban: "", stato: "attivo"
   });
   const [filter, setFilter] = useState("tutti");
+  const anagRef = useRef(null);
+  const [anagBusy, setAnagBusy] = useState(false);
+  const handleImportAnagrafica = async (e) => {
+    const fl = (e.target.files || [])[0];
+    if (!fl) return;
+    setAnagBusy(true);
+    try {
+      const fd = new FormData(); fd.append("file", fl);
+      const r = await axios.post(`${API}/dipendenti/importa-anagrafica`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+      alert(`Anagrafica importata: ${r.data.creati} creati, ${r.data.aggiornati} aggiornati.`);
+      reload && reload();
+    } catch (err) { alert(err?.response?.data?.detail || "Errore import anagrafica"); }
+    finally { setAnagBusy(false); if (anagRef.current) anagRef.current.value = ""; }
+  };
 
   const filteredDipendenti = dipendenti.filter(d => {
     if (filter === "attivi") return d.stato === "attivo";
@@ -494,6 +508,10 @@ function AnagraficaPage({ dipendenti, reload }) {
             <option value="attivi">Attivi ({attivi})</option>
             <option value="inattivi">Inattivi ({dipendenti.length - attivi})</option>
           </select>
+          <input ref={anagRef} type="file" accept=".xlsx" onChange={handleImportAnagrafica} style={{ display: "none" }} />
+          <button onClick={() => anagRef.current?.click()} disabled={anagBusy} className="dc-btn" title="Importa/aggiorna l'anagrafica da Excel (Cognome, Nome, CF, …)">
+            {anagBusy ? "Importo…" : "📥 Importa anagrafica (Excel)"}
+          </button>
           <button onClick={() => openModal()} className="dc-btn dc-btn-primary" data-testid="add-dipendente">
             <Plus size={18} /> Nuovo Dipendente
           </button>
@@ -1707,6 +1725,28 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
       if (excelRef.current) excelRef.current.value = "";
     }
   };
+  const csvRef = useRef(null);
+  const [csvMsg, setCsvMsg] = useState(null);
+  const [pnDett, setPnDett] = useState(null);
+  const handleImportPagamenti = async (e) => {
+    const fl = (e.target.files || [])[0];
+    if (!fl) return;
+    setImporting(true); setCsvMsg(null);
+    try {
+      const fd = new FormData(); fd.append("file", fl);
+      const r = await axios.post(`${API}/paghe/importa-pagamenti`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setCsvMsg(r.data); await load();
+      if (vistaAnno) { setVistaAnno(false); setTimeout(() => setVistaAnno(true), 50); }
+    } catch (err) { setCsvMsg({ errore: err?.response?.data?.detail || "Errore import pagamenti" }); }
+    finally { setImporting(false); if (csvRef.current) csvRef.current.value = ""; }
+  };
+  const apriPrimaNota = async (dipId, nome) => {
+    setPnDett({ nome, loading: true });
+    try {
+      const r = await axios.get(`${API}/paghe/prima-nota?dipendente_id=${dipId}`);
+      setPnDett({ nome, righe: r.data.righe || [], saldo_finale: r.data.saldo_finale });
+    } catch { setPnDett({ nome, righe: [], errore: true }); }
+  };
   const totBuste = dipendenti.reduce((s, d) => s + (parseFloat(get(d.id).importo_busta) || 0), 0);
   const totBonifici = dipendenti.reduce((s, d) => s + (parseFloat(get(d.id).bonifico_importo) || 0), 0);
   const totAcconti = dipendenti.reduce((s, d) => s + (get(d.id).acconti || []).reduce((a, x) => a + (parseFloat(x.importo) || 0), 0), 0);
@@ -1733,6 +1773,11 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
           <button onClick={() => excelRef.current?.click()} disabled={importing} title="Importa la Prima Nota Salari (Excel): inserisce i bonifici nei mesi corrispondenti"
             style={{ background: "#4f6b5d", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
             {importing ? "…" : "Importa Prima Nota (Excel)"}
+          </button>
+          <input ref={csvRef} type="file" accept=".csv,text/csv" onChange={handleImportPagamenti} style={{ display: "none" }} />
+          <button onClick={() => csvRef.current?.click()} disabled={importing} title="Importa il CSV banca dei pagamenti (esiti bonifici)"
+            style={{ background: "#6e8377", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
+            {importing ? "…" : "Importa pagamenti (CSV)"}
           </button>
           <select value={mese} onChange={e => setMese(+e.target.value)} className="dc-select">
             {mesi.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
@@ -1765,6 +1810,49 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {csvMsg && (
+        <div className="dc-card" style={{ marginBottom: 16, borderLeft: `4px solid ${csvMsg.errore ? '#d35f4e' : '#3d8168'}` }}>
+          {csvMsg.errore ? <div style={{ color: "#d35f4e", fontWeight: 600 }}>⚠ {csvMsg.errore}</div> : (
+            <div style={{ fontSize: 14 }}>
+              <div style={{ fontWeight: 700 }}>✓ Pagamenti importati: {csvMsg.importati} · {csvMsg.mesi_aggiornati} mesi aggiornati.</div>
+              {csvMsg.non_trovati?.length > 0 && <div style={{ marginTop: 6, fontSize: 13, color: "#7d5526" }}>⚠ Beneficiari non trovati in anagrafica: {csvMsg.non_trovati.join(", ")}</div>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {pnDett && (
+        <div onClick={() => setPnDett(null)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
+          <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 640, width: "100%", marginTop: 20 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <h3 style={{ margin: 0 }}>Prima nota — {pnDett.nome}</h3>
+              <button className="dc-btn" onClick={() => setPnDett(null)}>Chiudi</button>
+            </div>
+            {pnDett.loading ? <p className="dc-muted">Carico…</p> : !pnDett.righe?.length ? <p className="dc-muted" style={{ marginTop: 12 }}>Nessun dato.</p> : (
+              <div style={{ overflowX: "auto", marginTop: 12 }}>
+                <table className="dc-table" style={{ minWidth: 520, whiteSpace: "nowrap" }}>
+                  <thead><tr><th>Periodo</th><th style={{ textAlign: "right" }}>Busta €</th><th style={{ textAlign: "right" }}>Erogato €</th><th style={{ textAlign: "right" }}>Saldo progressivo €</th></tr></thead>
+                  <tbody>
+                    {pnDett.righe.map((x, i) => (
+                      <tr key={i}>
+                        <td>{mesi[x.mese - 1]} {x.anno}</td>
+                        <td style={{ textAlign: "right" }}>{x.busta ? eur(x.busta) : "—"}</td>
+                        <td style={{ textAlign: "right" }}>{x.erogato ? eur(x.erogato) : "—"}</td>
+                        <td style={{ textAlign: "right", fontWeight: 700, color: x.saldo_progressivo > 0.5 ? "#d35f4e" : x.saldo_progressivo < -0.5 ? "#7d5526" : "#3d8168" }}>{eur(x.saldo_progressivo)}</td>
+                      </tr>
+                    ))}
+                    <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4" }}>
+                      <td colSpan={3}>Saldo finale (positivo = ancora da pagare)</td>
+                      <td style={{ textAlign: "right", color: pnDett.saldo_finale > 0.5 ? "#d35f4e" : "#3d8168" }}>{eur(pnDett.saldo_finale)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -1830,7 +1918,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                     : <Badge variant="danger">⚠ da pagare</Badge>;
                   return (
                     <tr key={d.id}>
-                      <td>{d.cognome ? `${d.cognome} ${d.nome?.[0] || ''}.` : d.nome}</td>
+                      <td><button onClick={() => apriPrimaNota(d.id, d.cognome ? `${d.cognome} ${d.nome || ''}`.trim() : d.nome)} title="Apri prima nota / saldo progressivo" style={{ background: "none", border: "none", color: "#5b7a6b", cursor: "pointer", textDecoration: "underline", padding: 0, font: "inherit" }}>{d.cognome ? `${d.cognome} ${d.nome?.[0] || ''}.` : d.nome}</button></td>
                       <td style={{ textAlign: "right" }}>{busta ? eur(busta) : "—"}</td>
                       <td style={{ textAlign: "right" }}>{acc ? eur(acc) : "—"}</td>
                       <td style={{ textAlign: "right" }}>{bon ? eur(bon) : "—"}</td>
@@ -1872,7 +1960,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                     const tdiff = (tbon + tacc) - tb;
                     return (
                       <tr key={d.id}>
-                        <td>{d.cognome ? `${d.cognome} ${d.nome?.[0] || ''}.` : d.nome}</td>
+                        <td><button onClick={() => apriPrimaNota(d.id, d.cognome ? `${d.cognome} ${d.nome || ''}`.trim() : d.nome)} title="Apri prima nota / saldo progressivo" style={{ background: "none", border: "none", color: "#5b7a6b", cursor: "pointer", textDecoration: "underline", padding: 0, font: "inherit" }}>{d.cognome ? `${d.cognome} ${d.nome?.[0] || ''}.` : d.nome}</button></td>
                         {celle.map((c, i) => {
                           const sym = c === "ok" ? "✓" : c === "manca" ? "⚠" : c === "parziale" ? "~" : c === "bonifico" ? "€" : "·";
                           const col = c === "ok" ? "#3d8168" : c === "manca" ? "#d35f4e" : c === "parziale" ? "#b9770e" : c === "bonifico" ? "#5b7a6b" : "#cbd2c9";
@@ -2247,7 +2335,7 @@ function DocumentiPage({ dipendenti, documenti, reload, getDipendente }) {
           <p>Archivio documenti e certificati</p>
         </div>
         <div className="dc-page-actions">
-          <input ref={massRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png" onChange={handleMassUpload} style={{ display: "none" }} />
+          <input ref={massRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.zip,.docx" onChange={handleMassUpload} style={{ display: "none" }} />
           <button onClick={() => massRef.current?.click()} disabled={massBusy} className="dc-btn dc-btn-primary" title="Carica più documenti: l'app riconosce il tipo e li mette nella cartella del dipendente">
             {massBusy ? "Carico…" : "📂 Carica documenti (auto)"}
           </button>

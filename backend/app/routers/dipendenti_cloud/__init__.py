@@ -1743,6 +1743,181 @@ async def importa_prima_nota(file: UploadFile = File(...)):
             "discrepanze": sorted(discrepanze, key=lambda x: (x["anno"], x["mese"]))}
 
 
+_MESI_IT = {"gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
+            "luglio": 7, "agosto": 8, "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12}
+
+
+@router.post("/dipendenti/importa-anagrafica")
+async def importa_anagrafica(file: UploadFile = File(...)):
+    """Importa/aggiorna l'anagrafica da Excel (Cognome, Nome, CF, Data di nascita,
+    Mansione, Telefono, Email, Indirizzo). Match per codice fiscale: aggiorna se esiste,
+    altrimenti crea."""
+    import io
+    import openpyxl
+    raw = await file.read()
+    if raw[:2] != b"PK":
+        raise HTTPException(400, "Il file deve essere un .xlsx")
+    wb = openpyxl.load_workbook(io.BytesIO(raw), data_only=True, read_only=True)
+    ws = wb[wb.sheetnames[0]]
+    rows = list(ws.iter_rows(values_only=True))
+    header = [(str(c).strip().lower() if c is not None else "") for c in rows[0]]
+
+    def col(*names):
+        for i, h in enumerate(header):
+            if any(n in h for n in names):
+                return i
+        return None
+    ci = {"cognome": col("cognome"), "nome": col("nome"), "cf": col("cf", "codice fiscale"),
+          "nascita": col("nascita"), "mansione": col("mansione"), "tel": col("telefono", "cell"),
+          "email": col("email", "mail"), "indirizzo": col("indirizzo")}
+    db = get_db()
+    creati, aggiornati = 0, 0
+
+    def val(r, k):
+        i = ci.get(k)
+        if i is None or i >= len(r) or r[i] is None:
+            return None
+        return str(r[i]).strip()
+    for r in rows[1:]:
+        cf = (val(r, "cf") or "").upper().replace(" ", "")
+        nome, cognome = val(r, "nome"), val(r, "cognome")
+        if not (cf or (nome and cognome)):
+            continue
+        campi = {"nome": nome, "cognome": cognome, "codice_fiscale": cf or None,
+                 "data_nascita": (val(r, "nascita") or "")[:10] or None,
+                 "mansione": val(r, "mansione"), "telefono": val(r, "tel"),
+                 "email": val(r, "email"), "indirizzo": val(r, "indirizzo")}
+        campi = {k: v for k, v in campi.items() if v}
+        campi["nome_completo"] = f"{cognome or ''} {nome or ''}".strip()
+        esistente = await db.dipendenti.find_one({"codice_fiscale": cf}) if cf else None
+        if esistente:
+            await db.dipendenti.update_one({"id": esistente["id"]}, {"$set": campi})
+            aggiornati += 1
+        else:
+            campi.update({"id": generate_id(), "attivo": True, "stato": "attivo", "created_at": now_iso()})
+            await db.dipendenti.insert_one(campi)
+            creati += 1
+    return {"creati": creati, "aggiornati": aggiornati}
+
+
+@router.post("/paghe/importa-pagamenti")
+async def importa_pagamenti(file: UploadFile = File(...)):
+    """Importa i bonifici/pagamenti dal CSV banca (Esecuzione;Ordinante;Beneficiario;Importo;
+    Div;Descrizione Causale;CRO). Mese di competenza dalla causale (es. '9-2025', 'luglio')
+    o, in mancanza, dalla data. Idempotente (dedup per CRO/riga). Aggiorna bonifico del mese
+    = somma dei pagamenti di quel mese (alimenta anche la prima nota)."""
+    import io
+    import csv as _csv
+    raw = await file.read()
+    text = raw.decode("utf-8", errors="ignore")
+    reader = _csv.reader(io.StringIO(text), delimiter=";")
+    righe = list(reader)
+    if not righe:
+        raise HTTPException(400, "CSV vuoto")
+    db = get_db()
+    dips = await db.dipendenti.find({"merged_into": {"$exists": False}},
+                                    {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "nome_completo": 1}).to_list(1000)
+
+    def norm(s):
+        return re.sub(r"\s+", " ", str(s or "").strip()).lower()
+    by_nome, by_cogn = {}, {}
+    for d in dips:
+        n, c = norm(d.get("nome")), norm(d.get("cognome"))
+        for v in {norm(d.get("nome_completo")), f"{c} {n}".strip(), f"{n} {c}".strip()}:
+            if v and len(v) > 5:
+                by_nome[v] = d
+        if len(c) >= 4:
+            by_cogn.setdefault(c, []).append(d)
+
+    def trova_dip(beneficiario):
+        b = norm(beneficiario)
+        for nome_n, d in by_nome.items():
+            if nome_n in b or b in nome_n:
+                return d
+        for cogn, lst in by_cogn.items():
+            if cogn in b and len(lst) == 1:
+                return lst[0]
+        return None
+
+    def to_float(s):
+        try:
+            return float(str(s).replace(".", "").replace(",", "."))
+        except (TypeError, ValueError):
+            return None
+
+    def mese_anno(causale, data_dt):
+        c = norm(causale)
+        m = re.search(r'\b(\d{1,2})[-/](20\d{2})\b', c)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        for nome, n in _MESI_IT.items():
+            if nome in c:
+                y = re.search(r'(20\d{2})', c)
+                return n, int(y.group(1)) if y else data_dt.year
+        return data_dt.month, data_dt.year
+
+    start = 1 if righe and "benefic" in (righe[0][2].lower() if len(righe[0]) > 2 else "") else 0
+    importati, non_trovati, affected = 0, [], set()
+    for r in righe[start:]:
+        if len(r) < 4:
+            continue
+        try:
+            data_dt = datetime.strptime(r[0].strip()[:10], "%d/%m/%Y")
+        except (ValueError, IndexError):
+            continue
+        beneficiario, importo, causale = r[2].strip(), to_float(r[3]), (r[5] if len(r) > 5 else "")
+        cro = (r[6].strip() if len(r) > 6 and r[6] else "")
+        if not importo or importo <= 0:
+            continue
+        d = trova_dip(beneficiario)
+        if not d:
+            non_trovati.append(beneficiario)
+            continue
+        mese, anno = mese_anno(causale, data_dt)
+        key = cro or hashlib.sha1(f"{beneficiario}|{r[0]}|{importo}|{causale}".encode()).hexdigest()
+        await db.pagamenti_esiti.update_one(
+            {"key": key},
+            {"$set": {"key": key, "dipendente_id": d["id"], "data": data_dt.strftime("%Y-%m-%d"),
+                      "importo": importo, "causale": causale, "beneficiario": beneficiario,
+                      "mese": mese, "anno": anno}}, upsert=True)
+        affected.add((d["id"], mese, anno))
+        importati += 1
+    # ricalcola il bonifico del mese = somma dei pagamenti di quel mese
+    for dip_id, mese, anno in affected:
+        tot = 0.0
+        async for p in db.pagamenti_esiti.find({"dipendente_id": dip_id, "mese": mese, "anno": anno}, {"_id": 0, "importo": 1}):
+            tot += p.get("importo") or 0
+        await db.paghe_mensili.update_one(
+            {"dipendente_id": dip_id, "anno": anno, "mese": mese},
+            {"$set": {"dipendente_id": dip_id, "anno": anno, "mese": mese,
+                      "bonifico_importo": round(tot, 2), "bonifico_ricevuto": tot > 0,
+                      "bonifico_da_esiti": True, "updated_at": now_iso()}}, upsert=True)
+    return {"importati": importati, "mesi_aggiornati": len(affected),
+            "non_trovati": sorted(set(non_trovati))}
+
+
+@router.get("/paghe/prima-nota")
+async def prima_nota(dipendente_id: str):
+    """Prima nota salari di un dipendente: tutti i mesi con busta, erogato (bonifici+acconti)
+    e saldo progressivo (cumulato busta − cumulato erogato; >0 = ancora da pagare)."""
+    db = get_db()
+    paghe = await db.paghe_mensili.find({"dipendente_id": dipendente_id}, {"_id": 0}).to_list(2000)
+    paghe.sort(key=lambda p: (p.get("anno") or 0, p.get("mese") or 0))
+    out, saldo = [], 0.0
+    for p in paghe:
+        busta = float(p.get("importo_busta") or 0)
+        acc = sum(float(a.get("importo") or 0) for a in (p.get("acconti") or []))
+        bon = float(p.get("bonifico_importo") or 0)
+        erogato = bon + acc
+        if busta == 0 and erogato == 0:
+            continue
+        saldo += busta - erogato
+        out.append({"anno": p.get("anno"), "mese": p.get("mese"), "busta": round(busta, 2),
+                    "bonifico": round(bon, 2), "acconti": round(acc, 2),
+                    "erogato": round(erogato, 2), "saldo_progressivo": round(saldo, 2)})
+    return {"righe": out, "saldo_finale": round(saldo, 2)}
+
+
 # ============ BUSTE PAGA ============
 
 @router.get("/buste-paga")
@@ -1945,7 +2120,7 @@ async def delete_documento(documento_id: str):
 
 
 _CF_DOC_RE = re.compile(r'\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b')
-CATEGORIE_DOC = ["UNILAV", "CERTIFICAZIONE_UNICA", "CONTRATTO", "BONIFICO",
+CATEGORIE_DOC = ["UNILAV", "CERTIFICAZIONE_UNICA", "CONTRATTO", "RIDUZIONE_ORARIO", "BONIFICO",
                  "CODICE_FISCALE", "CARTA_IDENTITA", "BUSTA_PAGA", "ALTRO"]
 
 
@@ -1970,7 +2145,11 @@ def classifica_documento(text: str, filename: str = "") -> str:
         return "BUSTA_PAGA"
     if H(t, "carta di identità", "carta d'identità", "documento di identità", "carta d identita"):
         return "CARTA_IDENTITA"
+    if H(t, "riduzione orario", "riduzione dell'orario", "riduzione dell orario", "trasformazione part-time", "riduzione part time"):
+        return "RIDUZIONE_ORARIO"
     # 2) Nome FILE (per scansioni senza testo)
+    if H(fn, "riduzione"):
+        return "RIDUZIONE_ORARIO"
     if H(fn, "unilav"):
         return "UNILAV"
     if H(fn, "certificazione_unica", "certificazione unica", "_cu_", "cud"):
@@ -2016,15 +2195,16 @@ async def upload_documenti_massivo(files: List[UploadFile] = File(...)):
         if len(c) >= 4:
             by_cogn.setdefault(c, []).append(d)
 
+    import zipfile
     caricati, duplicati, non_assegnati, per_categoria = [], [], [], {}
-    for f in files:
-        raw = await f.read()
+
+    async def processa(filename, raw, contesto=""):
         if not raw:
-            continue
+            return
         h = hashlib.sha256(raw).hexdigest()
         if await db.documenti_cloud.find_one({"hash": h}):
-            duplicati.append(f.filename)
-            continue
+            duplicati.append(filename)
+            return
         text = ""
         if raw[:4] == b"%PDF":
             try:
@@ -2033,45 +2213,54 @@ async def upload_documenti_massivo(files: List[UploadFile] = File(...)):
                         text += (p.extract_text() or "") + "\n"
             except Exception:
                 text = ""
-        categoria = classifica_documento(text, f.filename or "")
+        categoria = classifica_documento(text, f"{contesto} {filename}".strip())
         d = None
-        # 1) codice fiscale nel testo
         for cf in _CF_DOC_RE.findall((text or "").upper()):
             if cf in by_cf:
                 d = by_cf[cf]
                 break
-        # 2) nome completo nel testo
         if not d:
             tl = norm(text)
             for nome_n, dd in by_nome.items():
                 if nome_n in tl:
                     d = dd
                     break
-        # 3) nome/cognome nel NOME FILE (per scansioni senza testo)
         if not d:
-            fn_norm = norm((f.filename or "").replace("_", " ").replace("-", " "))
+            fn_norm = norm(f"{contesto} {filename}".replace("_", " ").replace("-", " "))
             for nome_n, dd in by_nome.items():
                 if nome_n in fn_norm:
                     d = dd
                     break
             if not d:
                 for cogn, lst in by_cogn.items():
-                    if cogn in fn_norm and len(lst) == 1:  # cognome univoco
+                    if cogn in fn_norm and len(lst) == 1:
                         d = lst[0]
                         break
         doc = {"id": generate_id(),
                "dipendente_id": (d or {}).get("id"),
                "dipendente_nome": (f"{d.get('cognome','')} {d.get('nome','')}".strip() if d else None),
-               "titolo": f.filename, "filename": f.filename,
+               "titolo": filename, "filename": filename,
                "tipo": categoria, "categoria": categoria, "hash": h,
                "file_data": base64.b64encode(raw).decode(),
                "assegnato": bool(d), "origine": "upload_massivo", "data_caricamento": now_iso()}
         await db.documenti_cloud.insert_one(doc)
         per_categoria[categoria] = per_categoria.get(categoria, 0) + 1
-        if d:
-            caricati.append({"file": f.filename, "categoria": categoria, "dipendente": doc["dipendente_nome"]})
+        (caricati if d else non_assegnati).append({"file": filename, "categoria": categoria, "dipendente": doc["dipendente_nome"]})
+
+    for f in files:
+        raw = await f.read()
+        fn = f.filename or ""
+        if fn.lower().endswith(".zip"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                    for nm in zf.namelist():
+                        if nm.endswith("/"):
+                            continue
+                        await processa(nm.split("/")[-1], zf.read(nm), contesto=fn)
+            except zipfile.BadZipFile:
+                non_assegnati.append({"file": fn, "categoria": "ALTRO"})
         else:
-            non_assegnati.append({"file": f.filename, "categoria": categoria})
+            await processa(fn, raw, contesto="")
     return {"caricati": len(caricati), "duplicati": duplicati,
             "non_assegnati": non_assegnati, "per_categoria": per_categoria,
             "dettaglio": caricati[:300]}
