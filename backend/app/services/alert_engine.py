@@ -168,6 +168,12 @@ ALERT_CATALOG: Dict[str, Dict[str, Any]] = {
         "titolo": "Possibile cedolino duplicato",
         "condizione_chiusura": "Utente conferma"
     },
+    "CED_CONTESTATA": {
+        "modulo": "cedolini",
+        "severita": "warning",
+        "titolo": "Busta paga contestata dal dipendente",
+        "condizione_chiusura": "Contestazione gestita"
+    },
     "CED_DATI_ECONOMICI_INCOMPLETI": {
         "modulo": "cedolini",
         "severita": "warning",

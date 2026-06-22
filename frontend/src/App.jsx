@@ -10,7 +10,7 @@ import {
   Users, Calendar, Clock, FileText, Briefcase, Home, 
   ChevronRight, Plus, Check, X, Edit2, Trash2, 
   MapPin, Euro, Download, RefreshCw, ChevronLeft, Grid3X3,
-  User, FolderOpen, Settings, LogOut, ArrowLeft
+  User, FolderOpen, Settings, LogOut, ArrowLeft, AlertTriangle
 } from "lucide-react";
 import "./App.css";
 
@@ -286,6 +286,13 @@ function DashboardPage({ stats, dipendenti, ferie, missioni, getDipendente }) {
   const attivi = dipendenti.filter(d => d.stato === "attivo").length;
   const pendingFerie = ferie.filter(f => f.stato === "in_attesa");
   const pendingMissioni = missioni.filter(m => m.stato === "in_attesa");
+  const [alerts, setAlerts] = useState([]);
+  const loadAlerts = () => axios.get(`${API}/alerts`).then(r => setAlerts(r.data.alerts || [])).catch(() => {});
+  useEffect(() => { loadAlerts(); }, []);
+  const risolviAlert = async (id) => {
+    try { await axios.post(`${API}/alerts/${id}/risolvi`); loadAlerts(); } catch {}
+  };
+  const sevColor = (s) => ({ critico: "danger", alto: "danger", warning: "warning", media: "warning" }[s] || "default");
 
   return (
     <div className="dc-page">
@@ -324,6 +331,33 @@ function DashboardPage({ stats, dipendenti, ferie, missioni, getDipendente }) {
             <span className="dc-stat-value">{pendingMissioni.length}</span>
           </div>
         </div>
+        <div className="dc-stat-card dc-stat-yellow">
+          <div className="dc-stat-icon"><AlertTriangle size={24} /></div>
+          <div className="dc-stat-content">
+            <span className="dc-stat-label">AVVISI &amp; SCADENZE</span>
+            <span className="dc-stat-value">{stats.alert_aperti ?? alerts.length}</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="dc-card" style={{ marginBottom: 16 }}>
+        <h3><AlertTriangle size={18} /> Avvisi &amp; Scadenze</h3>
+        {alerts.length === 0 ? (
+          <p className="dc-empty">Nessun avviso aperto</p>
+        ) : (
+          <div className="dc-list">
+            {alerts.slice(0, 12).map((a) => (
+              <div key={a.id} className="dc-list-item">
+                <Badge variant={sevColor(a.severita)}>{a.severita}</Badge>
+                <div className="dc-list-info" style={{ flex: 1 }}>
+                  <span className="dc-list-name">{a.titolo}</span>
+                  <span className="dc-list-sub">{a.dettaglio}</span>
+                </div>
+                <button className="dc-btn" onClick={() => risolviAlert(a.id)}>Risolvi</button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="dc-dashboard-grid">

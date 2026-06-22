@@ -1505,13 +1505,43 @@ async def create_missione(missione: MissioneCloud):
 
 @router.put("/missioni/{missione_id}/approva")
 async def approva_missione(missione_id: str):
-    result = await get_db().missioni_cloud.update_one(
-        {"id": missione_id},
-        {"$set": {"stato": "approvata"}}
-    )
-    if result.matched_count == 0:
+    db = get_db()
+    miss = await db.missioni_cloud.find_one({"id": missione_id}, {"_id": 0})
+    if not miss:
         raise HTTPException(status_code=404, detail="Missione non trovata")
-    return {"message": "Missione approvata"}
+    await db.missioni_cloud.update_one(
+        {"id": missione_id}, {"$set": {"stato": "approvata", "approvata_il": now_iso()}})
+
+    automazioni = []
+    rimborso = float(miss.get("rimborso") or 0)
+    dip_id = miss.get("dipendente_id")
+    dip = await db.dipendenti.find_one({"id": dip_id}, {"_id": 0, "nome_completo": 1, "nome": 1, "cognome": 1}) if dip_id else None
+    nome = (dip or {}).get("nome_completo") or (f"{(dip or {}).get('cognome','')} {(dip or {}).get('nome','')}".strip() if dip else "")
+
+    # Rimborso missione → partita aperta (tracciamento finanziario)
+    if rimborso > 0 and dip_id:
+        try:
+            from backend.app.services.partite_aperte_engine import crea_partita, TipoPartita
+            await crea_partita(
+                tipo=TipoPartita.ALTRO, documento_id=missione_id,
+                documento_collection="missioni_cloud", controparte_id=dip_id,
+                controparte_nome=nome, importo=rimborso, db=db, data_documento=now_iso()[:10],
+                extra={"categoria": "rimborso_missione", "destinazione": miss.get("destinazione")})
+            automazioni.append("partita_rimborso")
+        except Exception:
+            pass
+    # Notifica al dipendente
+    if dip_id:
+        try:
+            from backend.app.services.notifiche import crea_notifica
+            await crea_notifica(db, dip_id, "missione", "Missione approvata",
+                                f"La missione a {miss.get('destinazione','')} è stata approvata"
+                                + (f" · rimborso € {rimborso:.2f}" if rimborso > 0 else "") + ".",
+                                extra={"missione_id": missione_id})
+            automazioni.append("notifica_dipendente")
+        except Exception:
+            pass
+    return {"message": "Missione approvata", "automazioni": automazioni}
 
 @router.delete("/missioni/{missione_id}")
 async def delete_missione(missione_id: str):
@@ -1558,14 +1588,41 @@ async def get_dashboard_stats():
     # Presenze oggi
     today = datetime.now().strftime("%Y-%m-%d")
     presenze_oggi = await get_db().presenze_cloud.count_documents({"data": today, "stato": "presente"})
-    
+
+    alert_aperti = await get_db().alerts.count_documents({"stato": "aperto"})
+
     return {
         "totale_dipendenti": len(dipendenti),
         "dipendenti_attivi": len(attivi),
         "ferie_in_attesa": ferie_pending,
         "missioni_in_attesa": missioni_pending,
-        "presenze_oggi": presenze_oggi
+        "presenze_oggi": presenze_oggi,
+        "alert_aperti": alert_aperti,
     }
+
+
+@router.get("/alerts")
+async def lista_alert(modulo: str = "", severita: str = ""):
+    """Elenco degli alert aperti (scadenze, contestazioni, dati incompleti...)."""
+    q = {"stato": "aperto"}
+    if modulo:
+        q["modulo"] = modulo
+    if severita:
+        q["severita"] = severita
+    alerts = await get_db().alerts.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return {"totale": len(alerts), "alerts": alerts}
+
+
+@router.post("/alerts/{alert_id}/risolvi")
+async def risolvi_alert_id(alert_id: str):
+    """Segna un alert come risolto (manuale)."""
+    r = await get_db().alerts.update_one(
+        {"id": alert_id, "stato": "aperto"},
+        {"$set": {"stato": "risolto", "risolto": True,
+                  "resolved_at": now_iso(), "resolved_by": "admin"}})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Alert non trovato o già risolto")
+    return {"ok": True, "stato": "risolto"}
 
 # ============ SEED DATA ============
 

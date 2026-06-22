@@ -16,7 +16,7 @@ import smtplib
 import asyncio
 import uuid
 from email.message import EmailMessage
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, HTTPException, Body, Query, Depends
 
@@ -92,6 +92,34 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _to_float(v):
+    try:
+        return float(str(v).replace("€", "").replace(",", ".").strip())
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+async def _segna_presenze_ferie(db, dipendente_id: str, dal, al):
+    """Segna i giorni dal..al come 'ferie' nelle presenze (upsert idempotente)."""
+    if not (dal and al):
+        return
+    try:
+        d0 = datetime.fromisoformat(str(dal)[:10])
+        d1 = datetime.fromisoformat(str(al)[:10])
+    except (ValueError, TypeError):
+        return
+    giorno = d0
+    while giorno <= d1:
+        ds = giorno.strftime("%Y-%m-%d")
+        await db["presenze"].update_one(
+            {"employee_id": dipendente_id, "data": ds},
+            {"$set": {"employee_id": dipendente_id, "data": ds, "stato": "ferie",
+                      "ore_lavorate": 0, "origine": "ferie_auto",
+                      "anno": giorno.year, "mese": giorno.month}},
+            upsert=True)
+        giorno += timedelta(days=1)
+
+
 @router.post("", summary="Crea una richiesta (dipendente)")
 async def crea_richiesta(
     payload: Dict[str, Any] = Body(..., example={"tipo": "ferie_programmate",
@@ -140,6 +168,15 @@ async def crea_richiesta(
         await asyncio.to_thread(_invia_email_richiesta, nome, label, doc)
     except Exception:
         logger.exception("email richiesta")
+    # Contestazione busta → alert tracciato per l'azienda
+    if tipo == "contestazione_busta":
+        try:
+            from backend.app.services.alert_engine import genera_alert
+            await genera_alert("CED_CONTESTATA", doc["id"], "richieste",
+                               f"Contestazione busta da {nome}: {doc['dettaglio'] or 's.d.'}",
+                               db, extra={"dipendente_id": identity["id"]})
+        except Exception:
+            logger.exception("alert contestazione")
     return doc
 
 
@@ -228,6 +265,29 @@ async def risolvi_richiesta(
                 "richiesta_id": richiesta_id,
                 "creato_il": _now(),
             })
+
+    # Ferie approvate → segna i giorni come "ferie" nelle presenze
+    if esito == "approvata" and req["tipo"] == "ferie_programmate":
+        dati = req.get("dati", {})
+        try:
+            await _segna_presenze_ferie(db, req["dipendente_id"], dati.get("dal"), dati.get("al"))
+        except Exception:
+            logger.exception("presenze ferie")
+
+    # Acconto/anticipo approvato → partita aperta (tracciamento finanziario)
+    if esito == "approvata" and req["tipo"] in ("acconto_stipendio", "acconto_tfr", "anticipo_retribuzione"):
+        importo = _to_float(req.get("dati", {}).get("importo"))
+        if importo and importo > 0:
+            try:
+                from backend.app.services.partite_aperte_engine import crea_partita, TipoPartita
+                await crea_partita(
+                    tipo=TipoPartita.ALTRO, documento_id=richiesta_id,
+                    documento_collection="richieste", controparte_id=req["dipendente_id"],
+                    controparte_nome=req.get("dipendente_nome", ""), importo=importo, db=db,
+                    data_documento=_now()[:10],
+                    extra={"tipo_richiesta": req["tipo"], "categoria": "acconto_dipendente"})
+            except Exception:
+                logger.exception("partita acconto")
 
     # Notifica al dipendente l'esito
     try:
