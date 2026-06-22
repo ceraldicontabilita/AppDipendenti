@@ -1288,12 +1288,11 @@ function TurniPage({ dipendenti, turni, reload }) {
     try { ferieFresh = (await axios.get(`${API}/ferie`)).data || []; setFerieTurni(ferieFresh); } catch { /* uso lo stato attuale */ }
     const ferieIn = (dipId, dStr) => ferieFresh.find(f => f.dipendente_id === dipId
       && (f.stato === 'approvata' || !f.stato)
-      && f.data_inizio <= dStr && (f.data_fine || f.data_inizio) >= dStr);
-    let configurati = 0;
+      && (((f.data_inizio || f.data) <= dStr && (f.data_fine || f.data_inizio || f.data) >= dStr)));
+    let tocco = 0;
     dipTurni.forEach(dip => {
       const c = cfgDi(dip.id);
-      if (!c.turno_id && !c.riposo_giorno && !(c.lunga_giorni || []).length && !c.rotazione) return;  // genera solo chi è configurato
-      configurati++;
+      const configurato = !!(c.turno_id || c.riposo_giorno || (c.lunga_giorni || []).length || c.rotazione);
       // turno "di lavoro" della settimana: se in rotazione bar, alterna mattina/pomeriggio
       let turnoLavoro = c.turno_id || null;
       if (c.rotazione) {
@@ -1305,16 +1304,25 @@ function TurniPage({ dipendenti, turni, reload }) {
         const date = new Date(lunedi); date.setDate(lunedi.getDate() + gi);
         const dStr = isoT(date);
         const giorno = giorni[gi];
-        let turnoId;
-        if (ferieIn(dip.id, dStr)) turnoId = idFerie || idRiposo;                     // ferie approvata
-        else if (onomSett.some(o => o.dipendente_id === dip.id && o.giorno_nome === giorno)) turnoId = idRiposo; // onomastico
-        else if (c.riposo_giorno && c.riposo_giorno === giorno) turnoId = idRiposo;  // riposo fisso settimanale
-        else if ((c.lunga_giorni || []).includes(giorno)) turnoId = idLunga || turnoLavoro || null; // Lunga fissa (ven/sab/dom)
-        else turnoId = turnoLavoro || null;                                           // turno abituale / rotazione bar
-        updates.push({ dipendente_id: dip.id, giorno, turno_id: turnoId || null });
+        let target;  // undefined = nessuna opinione (lascio la cella com'è)
+        if (ferieIn(dip.id, dStr)) target = idFerie || idRiposo;                       // ferie approvata (vale per TUTTI)
+        else if (onomSett.some(o => o.dipendente_id === dip.id && o.giorno_nome === giorno)) target = idRiposo; // onomastico
+        else if (configurato) {
+          if (c.riposo_giorno && c.riposo_giorno === giorno) target = idRiposo;        // riposo fisso settimanale
+          else if ((c.lunga_giorni || []).includes(giorno)) target = idLunga || turnoLavoro || null; // Lunga (ven/sab/dom)
+          else target = turnoLavoro || null;                                            // turno abituale / rotazione bar
+        }
+        if (target !== undefined) {
+          updates.push({ dipendente_id: dip.id, giorno, turno_id: target || null }); tocco++;
+        } else {
+          // non configurato e nessuna ferie/onomastico: pulisco solo una "Ferie" rimasta
+          // (così se cancello la ferie e rigenero, il turno non resta bloccato su Ferie).
+          const cur = getAssegnazione(dip.id, giorno);
+          if (cur && nomeTurno(cur.turno_id) === "Ferie") { updates.push({ dipendente_id: dip.id, giorno, turno_id: null }); tocco++; }
+        }
       }
     });
-    if (!configurati) { alert("Nessun dipendente configurato. Apri \"Configura turni\" e imposta turno e giorno di riposo."); return; }
+    if (!tocco) { alert("Niente da generare. Apri \"Configura turni\" e imposta turno/riposo, oppure verifica che ci siano ferie approvate."); return; }
     if (updates.length) await salva(updates);
   };
 
