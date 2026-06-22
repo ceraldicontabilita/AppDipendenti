@@ -2,7 +2,7 @@
 Dipendenti in Cloud - Router Module
 Sistema HR completo per gestione personale
 """
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Body
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import uuid
@@ -167,6 +167,32 @@ async def delete_dipendente(dipendente_id: str):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Dipendente non trovato")
     return {"message": "Dipendente eliminato"}
+
+@router.post("/dipendenti/{dipendente_id}/cessa")
+async def cessa_dipendente(dipendente_id: str, data: dict = Body(default={})):
+    """Cessa il rapporto: aggiorna lo stato e innesca l'iter completo di chiusura
+    (termina contratti, rifiuta assenze future, annulla partite, risolve alert)
+    tramite l'evento DIPENDENTE_CESSATO già agganciato all'handler dedicato."""
+    db = get_db()
+    dip = await db.dipendenti.find_one({"id": dipendente_id}, {"_id": 0})
+    if not dip:
+        raise HTTPException(status_code=404, detail="Dipendente non trovato")
+    data_cessazione = (data.get("data_cessazione") or now_iso()[:10])
+    nome = dip.get("nome_completo") or f"{dip.get('cognome','')} {dip.get('nome','')}".strip()
+    await db.dipendenti.update_one({"id": dipendente_id}, {"$set": {
+        "stato": "cessato", "attivo": False,
+        "data_dimissione": data_cessazione, "cessato_il": now_iso(),
+        "motivo_cessazione": data.get("motivo") or "cessazione_manuale",
+    }})
+    try:
+        from backend.app.services.event_bus import propagate_event, EventTypes
+        risultati = await propagate_event(EventTypes.DIPENDENTE_CESSATO, {
+            "dipendente_id": dipendente_id, "nome_completo": nome,
+            "data_cessazione": data_cessazione,
+        }, db, source_module="gestione", user="admin")
+    except Exception as e:
+        risultati = [{"error": str(e)}]
+    return {"ok": True, "stato": "cessato", "data_cessazione": data_cessazione, "automazioni": risultati}
 
 @router.get("/ordine-dipendenti")
 async def get_ordine_dipendenti():

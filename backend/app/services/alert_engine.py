@@ -236,7 +236,19 @@ ALERT_CATALOG: Dict[str, Dict[str, Any]] = {
         "titolo": "Contratto dipendente mancante",
         "condizione_chiusura": "Contratto inserito"
     },
-    
+    "DIP_CONTRATTO_IN_SCADENZA": {
+        "modulo": "dipendenti",
+        "severita": "warning",
+        "titolo": "Contratto a termine in scadenza",
+        "condizione_chiusura": "Rinnovo o cessazione registrati"
+    },
+    "DIP_PERIODO_PROVA_IN_SCADENZA": {
+        "modulo": "dipendenti",
+        "severita": "warning",
+        "titolo": "Periodo di prova in scadenza",
+        "condizione_chiusura": "Esito prova registrato"
+    },
+
     # --- Banca ---
     "BNK_NON_CLASSIFICATO": {
         "modulo": "banca",

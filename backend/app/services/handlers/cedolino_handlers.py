@@ -66,6 +66,20 @@ async def on_cedolino_importato(event: Dict[str, Any], db) -> Optional[Dict]:
         )
         risultati.append("alert_dati_incompleti")
 
+    # Notifica in-app al dipendente: nuova busta paga disponibile.
+    try:
+        from backend.app.services.notifiche import crea_notifica
+        periodo = f"{mese}/{anno}" if mese and anno else ""
+        await crea_notifica(
+            db, dipendente_id, "busta_paga",
+            "Nuova busta paga disponibile",
+            f"È disponibile la busta paga {periodo}." if periodo else "È disponibile una nuova busta paga.",
+            extra={"cedolino_id": cedolino_id, "mese": mese, "anno": anno},
+        )
+        risultati.append("notifica_dipendente")
+    except Exception as e:
+        logger.warning(f"cedolino: notifica dipendente saltata: {e}")
+
     # Audit
     from backend.app.services.audit_logger import log_evento
     await log_evento(

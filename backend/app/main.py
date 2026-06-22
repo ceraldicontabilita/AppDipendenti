@@ -17,7 +17,17 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await Database.connect()
+    try:
+        from .services.scadenze_scheduler import start_scheduler
+        start_scheduler()
+    except Exception as e:
+        logger.warning(f"Scadenzario non avviato: {e}")
     yield
+    try:
+        from .services.scadenze_scheduler import stop_scheduler
+        stop_scheduler()
+    except Exception:
+        pass
     await Database.close()
 
 

@@ -892,6 +892,27 @@ async def finalizza_contratto(contract_id: str, file: Optional[UploadFile] = Fil
     }
     await db["contratti_dipendenti"].insert_one(fasc.copy())
 
+    # A→B: il contratto definitivo aggiorna l'anagrafica del dipendente.
+    add_dati = contract.get("additional_data", {}) or {}
+    ctype = contract.get("contract_type", "")
+    emp_update: Dict[str, Any] = {}
+    for campo, valore in {
+        "livello": add_dati.get("livello"),
+        "mansione": add_dati.get("mansione"),
+        "ruolo": add_dati.get("mansione"),  # DipendenteCloud usa 'ruolo'
+        "qualifica": add_dati.get("qualifica"),
+        "stipendio_orario": add_dati.get("stipendio_orario"),
+        "ore_settimanali": add_dati.get("ore_settimanali"),
+        "data_assunzione": add_dati.get("data_inizio"),
+        "data_fine_contratto": add_dati.get("data_fine"),
+        "contratto": "Determinato" if ("determinato" in ctype and "indeterminato" not in ctype) else "Indeterminato",
+    }.items():
+        if valore not in (None, ""):
+            emp_update[campo] = valore
+    if emp_update:
+        await db[Collections.EMPLOYEES].update_one(
+            {"id": contract.get("employee_id")}, {"$set": emp_update})
+
     await db["employee_contracts"].update_one(
         {"id": contract_id},
         {"$set": {

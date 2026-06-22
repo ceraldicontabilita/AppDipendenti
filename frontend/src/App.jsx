@@ -429,6 +429,18 @@ function AnagraficaPage({ dipendenti, reload }) {
     reload();
   };
 
+  const handleCessa = async (dip) => {
+    const nome = `${dip.cognome || ""} ${dip.nome || ""}`.trim();
+    const data = window.prompt(`Cessare il rapporto con ${nome}?\nData cessazione (AAAA-MM-GG):`, new Date().toISOString().slice(0, 10));
+    if (!data) return;
+    try {
+      const r = await axios.post(`${API}/dipendenti/${dip.id}/cessa`, { data_cessazione: data });
+      const az = (r.data.automazioni || []).map(a => a.handler || a.error).filter(Boolean);
+      window.alert(`Rapporto cessato.\nAutomazioni eseguite: ${az.length ? az.join(", ") : "nessuna"}.`);
+      reload();
+    } catch (e) { window.alert(e?.response?.data?.detail || "Errore cessazione"); }
+  };
+
   const attivi = dipendenti.filter(d => d.stato === "attivo").length;
 
   return (
@@ -478,6 +490,7 @@ function AnagraficaPage({ dipendenti, reload }) {
                 <td data-label="Stato"><Badge variant={dip.stato === "attivo" ? "success" : "default"}>{dip.stato}</Badge></td>
                 <td data-label="Azioni" className="dc-table-actions">
                   <button onClick={() => openModal(dip)} className="dc-btn-icon"><Edit2 size={16} /></button>
+                  {dip.stato === "attivo" && <button onClick={() => handleCessa(dip)} className="dc-btn-icon" title="Cessa rapporto"><LogOut size={16} /></button>}
                   <button onClick={() => handleDelete(dip.id)} className="dc-btn-icon dc-btn-danger"><Trash2 size={16} /></button>
                 </td>
               </tr>
