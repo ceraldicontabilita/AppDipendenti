@@ -110,4 +110,8 @@ if os.path.exists(STATIC_DIR):
 
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
+        # Le API inesistenti devono dare 404, non l'index.html dell'app.
+        if full_path.startswith("api/"):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Endpoint non trovato")
         return FileResponse(os.path.join(STATIC_DIR, "index.html"))
