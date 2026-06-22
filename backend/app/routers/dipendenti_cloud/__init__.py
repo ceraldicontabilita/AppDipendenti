@@ -1349,17 +1349,20 @@ async def create_or_update_assegnazione(data: dict):
     if not dipendente_id or not giorno:
         raise HTTPException(status_code=400, detail="dipendente_id e giorno sono obbligatori")
     
+    motivo = data.get("motivo")  # es. "onomastico" → reso visibile nei turni
     match = {"dipendente_id": dipendente_id, "giorno": giorno}
     if settimana:
         match["settimana"] = settimana
     existing = await get_db().assegnazioni_turni_cloud.find_one(match)
-    
+
     if turno_id:
         if existing:
-            await get_db().assegnazioni_turni_cloud.update_one(
-                {"id": existing["id"]},
-                {"$set": {"turno_id": turno_id}}
-            )
+            upd = {"$set": {"turno_id": turno_id}}
+            if motivo:
+                upd["$set"]["motivo"] = motivo
+            else:
+                upd["$unset"] = {"motivo": ""}
+            await get_db().assegnazioni_turni_cloud.update_one({"id": existing["id"]}, upd)
         else:
             ass = {
                 "id": generate_id(),
@@ -1368,6 +1371,8 @@ async def create_or_update_assegnazione(data: dict):
                 "turno_id": turno_id,
                 "settimana": settimana,
             }
+            if motivo:
+                ass["motivo"] = motivo
             await get_db().assegnazioni_turni_cloud.insert_one(ass)
     else:
         if existing:
@@ -1394,6 +1399,14 @@ ONOMASTICI_DEFAULT = {
     "valerio": (1, 29), "vincenzo": (1, 22), "vincenza": (1, 22),
 }
 NOMI_GIORNO_IT = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
+# Dipendenti che NON seguono i turni → niente riposo onomastico (decisione titolare).
+NON_TURNI = [("vincenzo", "ceraldi"), ("valerio", "ceraldi"),
+             ("antonietta", "ceraldi"), ("marina", "liuzza")]
+
+
+def _non_turni(d: dict) -> bool:
+    f = f"{d.get('nome','')} {d.get('cognome','')} {d.get('nome_completo','')}".lower()
+    return any(a in f and b in f for a, b in NON_TURNI)
 
 
 def _nome_proprio(dip: dict) -> str:
@@ -1423,11 +1436,12 @@ async def get_onomastici():
             mese, giorno, attivo = s.get("mese"), s.get("giorno"), s.get("attivo", True)
         else:
             mese, giorno = (default if default else (None, None))
-            attivo = not straniero
+            attivo = (not straniero) and (not _non_turni(d))
         out.append({
             "dipendente_id": d.get("id"),
             "nome": d.get("nome_completo") or f"{d.get('cognome','')} {d.get('nome','')}".strip(),
             "mese": mese, "giorno": giorno, "attivo": bool(attivo), "straniero": straniero,
+            "non_turni": _non_turni(d),
         })
     out.sort(key=lambda x: (x["nome"] or "").lower())
     return out

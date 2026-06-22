@@ -1208,8 +1208,21 @@ function TurniPage({ dipendenti, turni, reload }) {
   const mettiRiposoOnom = async (o) => {
     const idR = idTurno("Riposo");
     if (!idR) { alert("Manca il turno 'Riposo' tra i tipi di turno."); return; }
-    await salva([{ dipendente_id: o.dipendente_id, giorno: o.giorno_nome, turno_id: idR }]);
+    await salva([{ dipendente_id: o.dipendente_id, giorno: o.giorno_nome, turno_id: idR, motivo: "onomastico" }]);
   };
+  // Precompilazione automatica: nel giorno dell'onomastico → Riposo (se la cella è
+  // libera; un'assegnazione manuale dell'admin ha la precedenza = copertura).
+  useEffect(() => {
+    if (!onomSett.length) return;
+    const idR = idTurno("Riposo");
+    if (!idR) return;
+    const mancanti = onomSett.filter(o => !assegnazioni.some(a => a.dipendente_id === o.dipendente_id && a.giorno === o.giorno_nome));
+    if (!mancanti.length) return;
+    (async () => {
+      for (const o of mancanti) await axios.post(`${API}/assegnazioni-turni`, { dipendente_id: o.dipendente_id, giorno: o.giorno_nome, turno_id: idR, settimana, motivo: "onomastico" });
+      caricaSettimana(settimana);
+    })();
+  }, [onomSett, assegnazioni, turni, settimana]);
 
   // Riequilibrio automatico: se assegno una Lunga o un Riposo a una persona della
   // produzione, chi aveva quel turno quel giorno si scambia il turno con lei,
@@ -1329,13 +1342,13 @@ function TurniPage({ dipendenti, turni, reload }) {
             <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
               {onomSett.map((o, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, borderTop: "1px solid #eee", paddingTop: 8, flexWrap: "wrap" }}>
-                  <span><b>{o.nome}</b> · {o.giorno_nome} {o.data_label}</span>
-                  <button className="dc-btn-primary" disabled={busy} onClick={() => mettiRiposoOnom(o)}>Metti a riposo</button>
+                  <span>🎂 <b>{o.nome}</b> · {o.giorno_nome} {o.data_label} — a riposo</span>
+                  <button className="dc-btn" disabled={busy} onClick={() => mettiRiposoOnom(o)}>Rimetti a riposo</button>
                 </div>
               ))}
             </div>
           )}
-        <p className="dc-muted" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>La copertura ha priorità: il riposo lo applichi tu con un clic, valutando l'organico del giorno.</p>
+        <p className="dc-muted" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>Il riposo è impostato automaticamente nel giorno dell'onomastico (marcato 🎂 nella griglia). Se ti serve copertura, basta riassegnare un turno in quella cella: la tua scelta ha la precedenza.</p>
       </div>
 
       {showOnom && (
@@ -1388,7 +1401,8 @@ function TurniPage({ dipendenti, turni, reload }) {
                   const ass = getAssegnazione(dip.id, g);
                   const turno = ass ? getTurno(ass.turno_id) : null;
                   return (
-                    <td key={g}>
+                    <td key={g} style={{ position: "relative" }}>
+                      {ass?.motivo === "onomastico" && <span title="Riposo per onomastico" style={{ position: "absolute", top: 0, right: 2, fontSize: 11, zIndex: 1 }}>🎂</span>}
                       <select
                         value={ass?.turno_id || ""}
                         onChange={e => handleAssegna(dip, g, e.target.value)}
