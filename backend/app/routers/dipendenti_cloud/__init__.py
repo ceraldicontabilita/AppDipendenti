@@ -368,6 +368,63 @@ def _lul_periodo(text):
         return _MESI[m.group(1).lower()], int(m.group(2))
     return None, None
 
+_LUL_NUM = re.compile(r'-?\d{1,3}(?:\.\d{3})*,\d{2,6}|-?\d+,\d{2,6}')
+
+
+def _lul_dati_busta(text: str) -> dict:
+    """Estrae dal testo della busta i dati chiave (per codice voce o descrizione).
+    Robusto sul prefisso (C/F/Z…). L'ultimo numero della riga voce = importo competenza."""
+    voci = []
+    voci_obj = []
+    for line in text.split("\n"):
+        m = re.match(r'^\s*([A-Z]\d{4,5})\b\s*(.*)$', line)
+        if m:
+            resto, valori = m.group(2), _LUL_NUM.findall(m.group(2))
+            voci.append((m.group(1), resto, valori))
+            voci_obj.append({"codice": m.group(1),
+                             "descrizione": _LUL_NUM.split(resto)[0].strip(' .-'),
+                             "valori": valori})
+
+    def find(codici=None, testo=None):
+        for codice, resto, valori in voci:
+            if (codici and codice in codici) or (testo and testo.lower() in resto.lower()):
+                return valori[-1] if valori else None
+        return None
+
+    dati = {
+        "rateo_13ma": find(codici={"C50000", "Z50000"}, testo="13ma Mensilit"),
+        "rateo_14ma": find(codici={"C50022", "Z50022"}, testo="14ma Mensilit"),
+        "indennita_l207_24": find(codici={"F02703"}),
+        "indennita_l207_24_cng_ann": find(codici={"F09088"}),
+        "tratt_integrativo_l21": find(codici={"F09081"}),
+        "tratt_integrativo_l21_rata": find(codici={"F09083"}),
+        "tratt_integrativo_l21_cng": find(codici={"F09084"}),
+        # tutte le voci del cedolino (codici+descrizione+importi) per il motore di ricerca
+        "voci": voci_obj or None,
+    }
+    # Rimborso da 730 (residuo + importo del mese)
+    for codice, resto, valori in voci:
+        if "730" in resto:
+            dati["rimborso_730"] = valori[-1] if valori else None
+            if len(valori) >= 2:
+                dati["rimborso_730_residuo"] = valori[0]
+            break
+    # Ore lavorate + giorni retribuiti (riquadro 'Lavorato', best effort)
+    lav = re.search(r'(?:Lavorato|Ore\s*lavorat\w*)\D{0,15}?(\d{1,3},\d{2})\s+(\d{1,2})\b', text, re.IGNORECASE)
+    if lav:
+        dati["ore_lavorate"] = lav.group(1)
+        dati["giorni_retribuiti"] = lav.group(2)
+    # Giorni effettivamente lavorati: righe del foglio presenze con ore (LU 19 6,40 ...)
+    gg = set()
+    for line in text.split("\n"):
+        pm = re.search(r'\b(LU|MA|ME|GI|VE|SA|DO)\s+(\d{1,2})\s+\d{1,2},\d{2}\b', line)
+        if pm:
+            gg.add(pm.group(2))
+    if gg:
+        dati["giorni_lavorati"] = len(gg)
+    return {k: v for k, v in dati.items() if v is not None}
+
+
 def _parse_lul(pdf_path):
     """Raggruppa le pagine per codice fiscale (gestisce 1, 2 o 3 pagine a dipendente).
     Tiene anche traccia degli indici di pagina di ciascun dipendente, così l'import
@@ -400,6 +457,9 @@ def _parse_lul(pdf_path):
                     ced[cur]["acconto"] = round((ced[cur].get("acconto") or 0) + acc, 2)
                 if not ced[cur].get("mese") and mese:
                     ced[cur]["mese"], ced[cur]["anno"] = mese, anno
+                # Dati chiave della busta (rateo 13/14, indennità L.207/24, tratt. integ. L.21, giorni)
+                for k, v in _lul_dati_busta(t).items():
+                    ced[cur][k] = v
     return ced
 
 def _to_float(s):
@@ -723,6 +783,14 @@ async def _importa_documenti(pdf_items, errori_iniziali=None, forza=False):
                 if acconto and acconto > 0:
                     ced_set["acconto_cedolino"] = acconto
                     ced_set["saldo_residuo"] = round(netto - acconto, 2)
+                # Dati chiave estratti dalla busta (salvati nel cedolino)
+                for k in ("rateo_13ma", "rateo_14ma", "indennita_l207_24",
+                          "indennita_l207_24_cng_ann", "tratt_integrativo_l21",
+                          "tratt_integrativo_l21_rata", "tratt_integrativo_l21_cng",
+                          "rimborso_730", "rimborso_730_residuo",
+                          "ore_lavorate", "giorni_retribuiti", "giorni_lavorati", "voci"):
+                    if info.get(k) is not None:
+                        ced_set[k] = info[k]
                 try:
                     if info.get("pagine"):
                         ced_set["pdf_data"] = base64.b64encode(_ritaglia_pdf(path, info["pagine"])).decode()
@@ -1511,6 +1579,64 @@ async def onomastici_settimana(settimana: str):
                     "data_label": gd.strftime("%d/%m"),
                 })
     return out
+
+# ============ MOTORE DI INTERROGAZIONE CEDOLINI ============
+
+@router.get("/cedolini/cerca-voce")
+async def cerca_voce(codice: Optional[str] = None, testo: Optional[str] = None,
+                     anno: Optional[int] = None, dipendente_id: Optional[str] = None):
+    """Cerca una voce in TUTTI i cedolini salvati (campo voci). Per codice (es. F09081)
+    o per testo della descrizione (es. '730', '13ma'). Filtrabile per anno/dipendente."""
+    if not codice and not testo:
+        raise HTTPException(status_code=400, detail="Indica 'codice' (es. F09081) o 'testo' (es. 730) da cercare")
+    q: dict = {}
+    if anno:
+        q["anno"] = anno
+    if dipendente_id:
+        q["dipendente_id"] = dipendente_id
+    cod = (codice or "").upper().strip()
+    txt = (testo or "").lower().strip()
+    out = []
+    async for c in get_db().cedolini.find(q, {"_id": 0, "dipendente_id": 1, "dipendente_nome": 1, "anno": 1, "mese": 1, "voci": 1}):
+        for v in (c.get("voci") or []):
+            if (cod and v.get("codice") == cod) or (txt and txt in (v.get("descrizione") or "").lower()):
+                out.append({"dipendente_id": c.get("dipendente_id"), "dipendente": c.get("dipendente_nome"),
+                            "anno": c.get("anno"), "mese": c.get("mese"),
+                            "codice": v.get("codice"), "descrizione": v.get("descrizione"),
+                            "importo": (v.get("valori") or [None])[-1], "valori": v.get("valori")})
+    out.sort(key=lambda x: (x.get("anno") or 0, x.get("mese") or 0))
+    return {"risultati": out, "totale": len(out)}
+
+
+@router.post("/cedolini/riscansiona")
+async def riscansiona_cedolini(anno: Optional[int] = None, dipendente_id: Optional[str] = None):
+    """Ri-estrae tutte le voci dai cedolini storici (2023→oggi) che hanno il PDF salvato,
+    così il motore di ricerca trova ogni codice anche sulle buste già importate."""
+    import io
+    import pdfplumber
+    db = get_db()
+    q: dict = {"pdf_data": {"$exists": True}}
+    if anno:
+        q["anno"] = anno
+    if dipendente_id:
+        q["dipendente_id"] = dipendente_id
+    aggiornati, errori = 0, 0
+    async for c in db.cedolini.find(q, {"_id": 0, "id": 1, "pdf_data": 1}):
+        try:
+            raw = base64.b64decode(c["pdf_data"])
+            text = ""
+            with pdfplumber.open(io.BytesIO(raw)) as pdf:
+                for p in pdf.pages:
+                    text += (p.extract_text() or "") + "\n"
+            dati = _lul_dati_busta(text)
+            if dati:
+                await db.cedolini.update_one({"id": c["id"]}, {"$set": dati})
+                aggiornati += 1
+        except Exception:
+            errori += 1
+    return {"aggiornati": aggiornati, "errori": errori,
+            "nota": "I cedolini senza PDF salvato non possono essere riscansionati: vanno re-importati dal Libro Unico."}
+
 
 # ============ BUSTE PAGA ============
 

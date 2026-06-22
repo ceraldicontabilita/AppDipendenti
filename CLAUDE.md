@@ -106,6 +106,10 @@ timbrature), `presenze` (LUL), `ferie_cloud`, `turni_settimane` + assegnazioni,
 `employee_contracts`, `contratti_dipendenti` (fascicolo), `alerts`, `partite_aperte`,
 `missioni_cloud`, `assegnazioni_turni_cloud`, `turni_config` (turno/riposo/Lunga per
 dipendente), `onomastici`.
+- `cedolini`: oltre a netto/pdf salva `voci` (tutti i codici busta) + dati chiave
+  (rateo 13ª/14ª, Indennità L.207/24 + cng ann, Trattam. integ. L.21/2020, Rimborso 730,
+  ore/giorni lavorati). Motore ricerca: GET `/api/dipendenti-cloud/cedolini/cerca-voce`
+  (codice/testo); backfill storico: POST `/cedolini/riscansiona` (riusa il PDF salvato).
 
 ## Bug noti / da fare
 - Buste paga "foglio bianco": `portale_buste.py::scarica_pdf` genera un riepilogo se

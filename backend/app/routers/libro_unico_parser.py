@@ -236,7 +236,12 @@ def parse_foglio_presenze(text: str) -> Dict:
                     "quantita": match.group(3),
                     "unita": "hm"
                 })
-    
+
+    # Giorni EFFETTIVAMENTE lavorati = giorni con ore ordinarie e senza giustificativo di assenza
+    pres = result.get("presenze", [])
+    result["giorni_lavorati"] = sum(1 for p in pres if p.get("ore_ordinarie") and not p.get("giustificativo"))
+    result["giorni_con_giustificativo"] = sum(1 for p in pres if p.get("giustificativo"))
+
     return result
 
 
@@ -431,7 +436,58 @@ def parse_busta_paga(text: str) -> Dict:
     banca_match = re.search(r'(BANCO\s+BPM[^I]*)', full_text)
     if banca_match:
         result["pagamento"]["banca"] = banca_match.group(1).strip()
-    
+
+    # --- Cattura GENERICA di tutte le voci del cedolino (massimo dato salvato) ---
+    # Riga tipo: "C00001 Retribuzione 9,54850 79,99992 ORE 763,48" → codice, descrizione, importi.
+    # Prefisso flessibile (C/F/Z/...): non dipende dal formato Zucchetti specifico.
+    voci = []
+    _num = re.compile(r'-?\d{1,3}(?:\.\d{3})*,\d{2,6}|-?\d+,\d{2,6}')
+    for line in lines:
+        m = re.match(r'^([A-Z]\d{4,5})\b\s*(.*)$', line.strip())
+        if not m:
+            continue
+        codice, resto = m.group(1), m.group(2)
+        valori = _num.findall(resto)
+        descr = _num.split(resto)[0].strip(' .-')
+        voci.append({"codice": codice, "descrizione": descr, "valori": valori})
+    result["voci"] = voci
+
+    def _voce(codici=None, testo=None):
+        for v in voci:
+            if codici and v["codice"] in codici:
+                return v
+            if testo and testo.lower() in v["descrizione"].lower():
+                return v
+        return None
+
+    def _imp(v):
+        return v["valori"][-1] if v and v["valori"] else None
+
+    # --- Dati chiave richiesti dal titolare ---
+    r13 = _voce(codici={"C50000", "Z50000"}, testo="13ma Mensilit")
+    r14 = _voce(codici={"C50022", "Z50022"}, testo="14ma Mensilit")
+    l207 = _voce(codici={"F02703"}, testo="L.207")
+    l207c = _voce(codici={"F09088"}, testo="207/24 cng")
+    ti = _voce(codici={"F09081"}, testo="integrativo L.21")
+    tir = _voce(codici={"F09083"})
+    tic = _voce(codici={"F09084"})
+    result["dati_chiave"] = {
+        "rateo_13ma_presente": bool(r13), "rateo_13ma_importo": _imp(r13),
+        "rateo_14ma_presente": bool(r14), "rateo_14ma_importo": _imp(r14),
+        "indennita_l207_24": _imp(l207),
+        "indennita_l207_24_cng_ann": _imp(l207c),
+        "tratt_integrativo_l21": _imp(ti),
+        "tratt_integrativo_l21_rata": _imp(tir),
+        "tratt_integrativo_l21_cng": _imp(tic),
+    }
+
+    # --- Ore lavorate e giorni retribuiti dal riquadro 'Lavorato' (best effort) ---
+    # I giorni EFFETTIVAMENTE lavorati si contano dal foglio presenze (campo giorni_lavorati lì).
+    lav = re.search(r'(?:Lavorato|Ore\s*lavorat\w*)\D{0,15}?(\d{1,3},\d{2})\s+(\d{1,2})\b', full_text, re.IGNORECASE)
+    if lav:
+        result["ore_lavorate"] = lav.group(1)
+        result["giorni_retribuiti"] = lav.group(2)
+
     return result
 
 
