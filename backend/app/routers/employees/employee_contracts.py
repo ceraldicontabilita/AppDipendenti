@@ -368,6 +368,8 @@ async def upload_template(contract_type: str, file: UploadFile = File(...)) -> D
         raise HTTPException(400, "File vuoto")
     if len(raw) > 12 * 1024 * 1024:
         raise HTTPException(400, "File troppo grande (max 12MB)")
+    if raw[:2] != b"PK":  # i .docx sono archivi ZIP (firma 'PK')
+        raise HTTPException(400, "Il file non è un .docx valido")
     db = Database.get_db()
     await db[COLL_TEMPLATES].update_one(
         {"tipo": contract_type},
@@ -507,7 +509,7 @@ async def generate_contract(employee_id: str, data: Dict[str, Any] = Body(...)) 
         logger.error(f"Error generating contract: {e}")
         import traceback
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Errore generazione contratto: {str(e)}")
+        raise HTTPException(status_code=500, detail="Errore nella generazione del contratto. Riprova o contatta l'assistenza.")
 
 
 def _deduci_tipo(employee: Dict[str, Any], ore_sett: Optional[float]) -> str:
@@ -807,6 +809,8 @@ async def carica_firmato(contract_id: str, file: UploadFile = File(...)) -> Dict
         raise HTTPException(400, "File vuoto")
     if len(raw) > 20 * 1024 * 1024:
         raise HTTPException(400, "File troppo grande (max 20MB)")
+    if raw[:4] != b"%PDF":
+        raise HTTPException(400, "Il contratto firmato deve essere un PDF")
     await db["employee_contracts"].update_one(
         {"id": contract_id},
         {"$set": {
@@ -835,6 +839,8 @@ async def finalizza_contratto(contract_id: str, file: Optional[UploadFile] = Fil
 
     if file is not None:
         definitivo = await file.read()
+        if definitivo[:4] != b"%PDF":
+            raise HTTPException(400, "Il file controfirmato deve essere un PDF")
         def_name = file.filename or "contratto_definitivo.pdf"
     elif contract.get("pdf_firmato_dipendente"):
         definitivo = base64.b64decode(contract["pdf_firmato_dipendente"])
