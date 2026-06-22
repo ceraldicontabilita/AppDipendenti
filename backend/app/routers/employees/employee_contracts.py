@@ -382,110 +382,228 @@ async def upload_template(contract_type: str, file: UploadFile = File(...)) -> D
     return {"ok": True, "tipo": contract_type, "name": ct["name"]}
 
 
-@router.post("/generate/{employee_id}")
-@handle_errors
-async def generate_contract(employee_id: str, data: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
-    """
-    Generate a contract for an employee.
-    
-    Request body:
-    {
-        "contract_type": "determinato",
-        "additional_data": {
-            "livello": "5",
-            "stipendio_orario": "8.50",
-            "qualifica": "Barista"
-        }
-    }
+# Documenti accessori generati automaticamente insieme al contratto.
+ACCESSORI_AUTO = ["regolamento", "informativa_privacy", "informativa_152"]
+
+
+async def _template_disponibile(db, ct_id: str) -> bool:
+    """True se il template (MongoDB o disco) per quel tipo è caricato."""
+    ct = next((c for c in CONTRACT_TYPES if c["id"] == ct_id), None)
+    if not ct:
+        return False
+    doc = await db[COLL_TEMPLATES].find_one({"tipo": ct_id}, {"_id": 0, "tipo": 1})
+    if doc:
+        return True
+    return os.path.exists(os.path.join(TEMPLATES_DIR, ct["filename"]))
+
+
+async def _genera_doc(db, employee: Dict[str, Any], ct: Dict[str, str],
+                      additional_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Compila un template per il dipendente, salva il record e lo ritorna.
+
+    Cuore unico della generazione: usato dal contratto principale, dai documenti
+    accessori e dalla generazione massiva.
     """
     ensure_dirs()
-    
-    contract_type = data.get("contract_type") or data.get("contract_type_id")
-    additional_data = data.get("additional_data", {})
-    
-    # Find contract type
-    ct = next((c for c in CONTRACT_TYPES if c["id"] == contract_type), None)
-    if not ct:
-        raise HTTPException(status_code=400, detail=f"Tipo contratto non valido: {contract_type}")
-    
-    # Get employee
-    db = Database.get_db()
-    employee = await db[Collections.EMPLOYEES].find_one({"id": employee_id}, {"_id": 0})
-    
-    if not employee:
-        raise HTTPException(status_code=404, detail="Dipendente non trovato")
-    
-    # Risolvi template (MongoDB-first, fallback su disco)
     template_path = await _resolve_template(ct)
-    
-    # Merge employee data with additional data
-    employee_data = {**employee, **additional_data}
-    
-    # Format date if present
+    employee_data = {**employee, **(additional_data or {})}
     if employee_data.get("data_nascita"):
         try:
             dt = datetime.fromisoformat(str(employee_data["data_nascita"]).replace("Z", ""))
             employee_data["data_nascita"] = dt.strftime("%d/%m/%Y")
         except (ValueError, TypeError):
             pass
-    
+
+    output_path = fill_contract_template(template_path, employee_data)
+    nome_completo = employee_data.get("nome_completo") or \
+        f"{employee_data.get('cognome','')} {employee_data.get('nome','')}".strip()
+    safe_name = (nome_completo or "dipendente").replace(" ", "_")
+    final_filename = f"{ct['id']}_{safe_name}_{datetime.now().strftime('%Y%m%d')}.docx"
+    final_path = os.path.join(CONTRACTS_DIR, final_filename)
+    shutil.move(output_path, final_path)
+    with open(final_path, "rb") as f:
+        file_base64 = base64.b64encode(f.read()).decode("utf-8")
+
+    mensile = compute_stipendio_mensile(
+        employee_data.get("stipendio_orario") or employee_data.get("salary"),
+        employee_data.get("ore_settimanali") or "40")
+
+    record = {
+        "id": str(uuid.uuid4()),
+        "employee_id": employee.get("id"),
+        "employee_name": nome_completo,
+        "contract_type": ct["id"],
+        "contract_name": ct["name"],
+        "filename": final_filename,
+        "filepath": final_path,
+        "file_data": file_base64,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "stipendio_mensile": mensile,
+        "additional_data": additional_data or {},
+    }
+    await db["employee_contracts"].insert_one(record.copy())
+    return record
+
+
+async def _genera_con_accessori(db, employee: Dict[str, Any], contract_type: str,
+                                additional_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Genera il contratto principale e, se i template sono caricati, anche i
+    documenti accessori (regolamento, privacy, informativa 152)."""
+    ct = next((c for c in CONTRACT_TYPES if c["id"] == contract_type), None)
+    if not ct:
+        raise HTTPException(400, f"Tipo contratto non valido: {contract_type}")
+    rec = await _genera_doc(db, employee, ct, additional_data)
+    accessori, mancanti = [], []
+    for acc_id in ACCESSORI_AUTO:
+        acc = next((c for c in CONTRACT_TYPES if c["id"] == acc_id), None)
+        if acc and await _template_disponibile(db, acc_id):
+            a = await _genera_doc(db, employee, acc, additional_data)
+            accessori.append(a["filename"])
+        else:
+            mancanti.append(acc_id)
+    return {"contract": rec, "accessori": accessori, "accessori_mancanti": mancanti}
+
+
+@router.post("/generate/{employee_id}")
+@handle_errors
+async def generate_contract(employee_id: str, data: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """
+    Generate a contract for an employee, insieme ai documenti accessori
+    (regolamento, privacy, informativa 152) se i relativi template sono caricati.
+
+    Request body:
+    {
+        "contract_type": "determinato",
+        "additional_data": {"livello": "5", "stipendio_orario": "8.50", "qualifica": "Barista"}
+    }
+    """
+    contract_type = data.get("contract_type") or data.get("contract_type_id")
+    additional_data = data.get("additional_data", {})
+
+    db = Database.get_db()
+    employee = await db[Collections.EMPLOYEES].find_one({"id": employee_id}, {"_id": 0})
+    if not employee:
+        raise HTTPException(status_code=404, detail="Dipendente non trovato")
+
     try:
-        # Generate filled contract
-        output_path = fill_contract_template(template_path, employee_data)
-        
-        # Create final filename
-        safe_name = employee_data.get("nome_completo", "dipendente").replace(" ", "_")
-        final_filename = f"{ct['id']}_{safe_name}_{datetime.now().strftime('%Y%m%d')}.docx"
-        final_path = os.path.join(CONTRACTS_DIR, final_filename)
-        
-        # Move to contracts dir
-        shutil.move(output_path, final_path)
-        
-        # Read file and encode to base64 for MongoDB (architettura MongoDB-first)
-        import base64
-        with open(final_path, 'rb') as f:
-            file_content = f.read()
-        file_base64 = base64.b64encode(file_content).decode('utf-8')
-        
-        # Lordo mensile teorico (paga oraria × ore settimanali × 52 / 12)
-        mensile = compute_stipendio_mensile(
-            employee_data.get("stipendio_orario") or employee_data.get("salary"),
-            employee_data.get("ore_settimanali") or "40",
-        )
-
-        # Record contract generation with base64 content
-        contract_record = {
-            "id": str(uuid.uuid4()),
-            "employee_id": employee_id,
-            "employee_name": employee_data.get("nome_completo"),
-            "contract_type": contract_type,
-            "contract_name": ct["name"],
-            "filename": final_filename,
-            "filepath": final_path,
-            "file_data": file_base64,  # Architettura MongoDB-first
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "stipendio_mensile": mensile,
-            "additional_data": additional_data
-        }
-
-        await db["employee_contracts"].insert_one(contract_record.copy())
-
+        res = await _genera_con_accessori(db, employee, contract_type, additional_data)
+        rec = res["contract"]
         return {
             "success": True,
-            "message": f"Contratto generato per {employee_data.get('nome_completo')}",
-            "stipendio_mensile": mensile,
+            "message": f"Contratto generato per {rec.get('employee_name')}",
+            "stipendio_mensile": rec.get("stipendio_mensile"),
+            "accessori": res["accessori"],
+            "accessori_mancanti": res["accessori_mancanti"],
             "contract": {
-                "id": contract_record["id"],
-                "filename": final_filename,
-                "download_url": f"/api/contracts/download/{contract_record['id']}"
+                "id": rec["id"],
+                "filename": rec["filename"],
+                "download_url": f"/api/contracts/download/{rec['id']}"
             }
         }
-        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error generating contract: {e}")
         import traceback
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Errore generazione contratto: {str(e)}")
+
+
+def _deduci_tipo(employee: Dict[str, Any], ore_sett: Optional[float]) -> str:
+    """Deduce il tipo di contratto da anagrafica + ore settimanali."""
+    contratto = (employee.get("contratto") or "Indeterminato").lower()
+    determinato = ("indeterminat" not in contratto and "determinat" in contratto) \
+        or bool(employee.get("data_fine_contratto"))
+    part = ore_sett is not None and ore_sett < 36
+    if part and determinato:
+        return "part_time_det"
+    if part:
+        return "part_time_ind"
+    if determinato:
+        return "determinato"
+    return "indeterminato"
+
+
+async def _dati_da_busta(db, employee: Dict[str, Any]) -> Dict[str, Any]:
+    """Deduce livello, paga oraria e ore settimanali dall'ultima busta paga in
+    archivio (collezione cedolini), abbinata per dipendente_id o codice fiscale."""
+    cf = (employee.get("codice_fiscale") or "").strip()
+    ors: List[Dict[str, Any]] = [{"dipendente_id": employee.get("id")}]
+    if cf:
+        ors += [{"codice_fiscale": cf}, {"codice_fiscale": cf.upper()}]
+    try:
+        ced = await db[Collections.PAYSLIPS].find_one(
+            {"$or": ors}, {"_id": 0}, sort=[("anno", -1), ("mese", -1)])
+    except Exception:
+        ced = None
+    out: Dict[str, Any] = {}
+    if not ced:
+        return out
+    if ced.get("livello"):
+        out["livello"] = str(ced["livello"])
+    ore_mese = _to_float(ced.get("ore_lavorate"))
+    lordo = _to_float(ced.get("lordo"))
+    if ore_mese and ore_mese > 0:
+        out["ore_settimanali"] = str(round(ore_mese / 4.333))
+        if lordo:
+            out["stipendio_orario"] = f"{lordo / ore_mese:.2f}".replace(".", ",")
+    return out
+
+
+@router.post("/genera-massivo")
+@handle_errors
+async def genera_massivo(data: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """Genera (e salva come bozza) i contratti per tutti i dipendenti in forza,
+    deducendo tipo/ore/paga dall'ultima busta paga. Non invia nulla.
+
+    Salta chi ha già un contratto generato (a meno di `force: true`) e chi non ha
+    il template del tipo dedotto. NON invia né firma: sono bozze da rivedere.
+    """
+    db = Database.get_db()
+    force = bool(data.get("force"))
+    TIPI_CONTRATTO = {"indeterminato", "determinato", "part_time_det", "part_time_ind"}
+    raw = await db[Collections.EMPLOYEES].find(
+        {"merged_into": {"$exists": False}}, {"_id": 0}).to_list(1000)
+    employees = [e for e in raw
+                 if e.get("attivo", True) is not False
+                 and (e.get("stato") or "attivo") not in ("cessato", "dismesso", "archiviato")]
+
+    generati, saltati = [], []
+    for emp in employees:
+        nome = emp.get("nome_completo") or f"{emp.get('cognome','')} {emp.get('nome','')}".strip()
+        try:
+            if not force:
+                gia = await db["employee_contracts"].find_one(
+                    {"employee_id": emp.get("id"), "contract_type": {"$in": list(TIPI_CONTRATTO)}},
+                    {"_id": 0, "id": 1})
+                if gia:
+                    saltati.append({"dipendente": nome, "motivo": "contratto già presente"})
+                    continue
+            busta = await _dati_da_busta(db, emp)
+            ore = _to_float(busta.get("ore_settimanali"))
+            tipo = _deduci_tipo(emp, ore)
+            add = dict(busta)
+            if emp.get("data_assunzione"):
+                add.setdefault("data_inizio", str(emp["data_assunzione"])[:10])
+            if emp.get("data_fine_contratto"):
+                add.setdefault("data_fine", str(emp["data_fine_contratto"])[:10])
+            if emp.get("ruolo"):
+                add.setdefault("mansione", emp["ruolo"])
+                add.setdefault("qualifica", emp["ruolo"])
+            if not await _template_disponibile(db, tipo):
+                saltati.append({"dipendente": nome, "motivo": f"template '{tipo}' non caricato"})
+                continue
+            res = await _genera_con_accessori(db, emp, tipo, add)
+            generati.append({"dipendente": nome, "tipo": tipo,
+                             "dati_da_busta": bool(busta),
+                             "accessori_mancanti": res["accessori_mancanti"]})
+        except HTTPException as e:
+            saltati.append({"dipendente": nome, "motivo": str(e.detail)})
+        except Exception as e:
+            saltati.append({"dipendente": nome, "motivo": str(e)})
+
+    return {"ok": True, "generati": len(generati), "saltati": len(saltati),
+            "dettaglio": generati, "non_generati": saltati}
 
 
 @router.get("/download/{contract_id}")

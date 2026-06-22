@@ -1829,6 +1829,16 @@ function AssunzionePage({ dipendenti, reload }) {
   const [contratti, setContratti] = useState([]);
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState("");
+  const [bulkRes, setBulkRes] = useState(null);
+  const [showAssumi, setShowAssumi] = useState(false);
+  const NUOVO0 = {
+    nome: "", cognome: "", codice_fiscale: "", data_nascita: "", luogo_nascita: "",
+    indirizzo: "", email: "", telefono: "", data_assunzione: "", contract_type: "indeterminato",
+    mansione: "", qualifica: "", livello: "", stipendio_orario: "", ore_settimanali: "40",
+    periodo_prova: "", ferie_giorni: "26", data_fine: "",
+  };
+  const [nuovo, setNuovo] = useState(NUOVO0);
+  const setN = (k, v) => setNuovo(n => ({ ...n, [k]: v }));
 
   const loadTemplates = () => axios.get(`${C}/templates`).then(r => setTemplates(r.data || [])).catch(() => {});
   useEffect(() => {
@@ -1872,8 +1882,54 @@ function AssunzionePage({ dipendenti, reload }) {
       const r = await axios.post(`${C}/generate/${dipId}`, { contract_type: tipo, additional_data: extra });
       const m = r.data?.stipendio_mensile;
       setMsg(m != null ? `Contratto generato. Lordo mensile teorico: € ${Number(m).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.` : "Contratto generato.");
+      const acc = (r.data?.accessori_mancanti || []);
+      const note = m != null ? ` Lordo mensile: € ${Number(m).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.` : "";
+      const warn = acc.length ? ` ⚠ Template accessori mancanti: ${acc.join(", ")}.` : " Generati anche regolamento, privacy e informativa.";
+      setMsg(`Contratto generato.${note}${warn}`);
       loadContratti(dipId);
     } catch (e) { setMsg(e?.response?.data?.detail || "Errore generazione"); }
+    setBusy("");
+  };
+  const generaMassivo = async () => {
+    if (!window.confirm("Genero i contratti (bozze) per tutti i dipendenti in forza, deducendo tipo e dati dalle buste paga? Chi ha già un contratto viene saltato. Nessun invio.")) return;
+    setBusy("bulk"); setMsg(""); setBulkRes(null);
+    try {
+      const r = await axios.post(`${C}/genera-massivo`, {});
+      setBulkRes(r.data);
+      setMsg(`Generati ${r.data.generati}, saltati ${r.data.saltati}.`);
+      reload && reload();
+    } catch (e) { setMsg(e?.response?.data?.detail || "Errore generazione massiva"); }
+    setBusy("");
+  };
+  const creaAssumi = async () => {
+    if (!nuovo.nome || !nuovo.cognome) { setMsg("Nome e cognome sono obbligatori."); return; }
+    if (!dispTemplate(nuovo.contract_type)) { setMsg("Carica prima il template di questo tipo di contratto."); return; }
+    setBusy("assumi"); setMsg("");
+    try {
+      const dipPayload = {
+        nome: nuovo.nome, cognome: nuovo.cognome, codice_fiscale: nuovo.codice_fiscale || null,
+        data_nascita: nuovo.data_nascita || null, indirizzo: nuovo.indirizzo || null,
+        email: nuovo.email || null, telefono: nuovo.telefono || null,
+        data_assunzione: nuovo.data_assunzione || null, ruolo: nuovo.mansione || null,
+        contratto: nuovo.contract_type.includes("determinato") && !nuovo.contract_type.includes("ind") ? "Determinato" : "Indeterminato",
+        data_fine_contratto: nuovo.data_fine || null,
+      };
+      const cr = await axios.post(`${API}/dipendenti`, dipPayload);
+      const newId = cr.data?.id || cr.data?.dipendente?.id || cr.data?._id;
+      if (!newId) throw new Error("ID nuovo dipendente non disponibile");
+      const additional = {
+        indirizzo: nuovo.indirizzo, luogo_nascita: nuovo.luogo_nascita, data_nascita: nuovo.data_nascita,
+        codice_fiscale: nuovo.codice_fiscale, mansione: nuovo.mansione, qualifica: nuovo.qualifica || nuovo.mansione,
+        livello: nuovo.livello, stipendio_orario: nuovo.stipendio_orario, ore_settimanali: nuovo.ore_settimanali,
+        periodo_prova: nuovo.periodo_prova, ferie_giorni: nuovo.ferie_giorni,
+        data_inizio: nuovo.data_assunzione, data_fine: nuovo.data_fine,
+      };
+      const gr = await axios.post(`${C}/generate/${newId}`, { contract_type: nuovo.contract_type, additional_data: additional });
+      const acc = (gr.data?.accessori_mancanti || []);
+      setShowAssumi(false); setNuovo(NUOVO0);
+      setMsg(`Dipendente assunto e contratto generato.${acc.length ? ` ⚠ Template accessori mancanti: ${acc.join(", ")}.` : " Con regolamento, privacy e informativa."}`);
+      reload && reload();
+    } catch (e) { setMsg(e?.response?.data?.detail || e.message || "Errore in fase di assunzione"); }
     setBusy("");
   };
   const scarica = async (cid, fname) => {
@@ -1928,10 +1984,69 @@ function AssunzionePage({ dipendenti, reload }) {
   const full = { ...lbl, gridColumn: "1 / -1" };
   return (
     <div className="dc-page">
-      <div className="dc-page-header"><div><h1>Assunzione & Contratti</h1>
-        <p>Carica i modelli, genera il contratto per il dipendente e invialo via email</p></div></div>
+      <div className="dc-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+        <div><h1>Assunzione & Contratti</h1>
+          <p>Carica i modelli, genera il contratto (con regolamento, privacy e informativa) e invialo</p></div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="dc-btn-primary" onClick={() => { setNuovo(NUOVO0); setShowAssumi(true); }}>+ Assumi dipendente</button>
+          <button className="dc-btn" disabled={busy === "bulk"} onClick={generaMassivo}>{busy === "bulk" ? "Genero…" : "Genera per i dipendenti in forza"}</button>
+        </div>
+      </div>
 
       {msg && <div style={{ background: "#eef3ef", border: "1px solid #d9e4dc", borderRadius: 10, padding: "10px 14px", marginBottom: 14 }}>{msg}</div>}
+
+      {bulkRes && (
+        <div className="dc-card" style={{ marginBottom: 16 }}>
+          <h3 style={{ marginTop: 0 }}>Generazione massiva — generati {bulkRes.generati}, saltati {bulkRes.saltati}</h3>
+          {(bulkRes.dettaglio || []).length > 0 && (
+            <div style={{ fontSize: 13 }}>{bulkRes.dettaglio.map((d, i) => (
+              <div key={i} style={{ borderTop: "1px solid #eee", padding: "4px 0" }}>✓ <b>{d.dipendente}</b> · {d.tipo}{d.dati_da_busta ? " · dati da busta" : " · dati anagrafica"}{(d.accessori_mancanti || []).length ? ` · ⚠ accessori mancanti: ${d.accessori_mancanti.join(", ")}` : ""}</div>
+            ))}</div>
+          )}
+          {(bulkRes.non_generati || []).length > 0 && (
+            <div style={{ fontSize: 13, marginTop: 8 }}>{bulkRes.non_generati.map((d, i) => (
+              <div key={i} style={{ borderTop: "1px solid #eee", padding: "4px 0", color: "#9a6b4a" }}>— {d.dipendente}: {d.motivo}</div>
+            ))}</div>
+          )}
+        </div>
+      )}
+
+      {showAssumi && (
+        <div onClick={() => setShowAssumi(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
+          <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 720, width: "100%", marginTop: 20 }}>
+            <h3 style={{ marginTop: 0 }}>Assumi dipendente</h3>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Crea l'anagrafica e genera subito contratto + regolamento + privacy + informativa (nessun invio automatico).</p>
+            <div style={grid}>
+              <label style={lbl}>Nome *<input className="dc-input" value={nuovo.nome} onChange={e => setN("nome", e.target.value)} /></label>
+              <label style={lbl}>Cognome *<input className="dc-input" value={nuovo.cognome} onChange={e => setN("cognome", e.target.value)} /></label>
+              <label style={lbl}>Codice fiscale<input className="dc-input" value={nuovo.codice_fiscale} onChange={e => setN("codice_fiscale", e.target.value.toUpperCase())} /></label>
+              <label style={lbl}>Luogo di nascita<input className="dc-input" value={nuovo.luogo_nascita} onChange={e => setN("luogo_nascita", e.target.value)} /></label>
+              <label style={lbl}>Data di nascita<input type="date" className="dc-input" value={nuovo.data_nascita} onChange={e => setN("data_nascita", e.target.value)} /></label>
+              <label style={full}>Indirizzo di residenza<input className="dc-input" value={nuovo.indirizzo} onChange={e => setN("indirizzo", e.target.value)} placeholder="Via/Piazza, n., CAP, Comune" /></label>
+              <label style={lbl}>Email<input className="dc-input" value={nuovo.email} onChange={e => setN("email", e.target.value)} /></label>
+              <label style={lbl}>Telefono<input className="dc-input" value={nuovo.telefono} onChange={e => setN("telefono", e.target.value)} /></label>
+
+              <div style={secTitle}>Contratto</div>
+              <label style={lbl}>Tipo contratto
+                <select className="dc-input" value={nuovo.contract_type} onChange={e => setN("contract_type", e.target.value)}>
+                  {tipi.filter(t => ["indeterminato", "determinato", "part_time_det", "part_time_ind"].includes(t.id)).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select></label>
+              <label style={lbl}>Mansione<input list="mansioni-list" className="dc-input" value={nuovo.mansione} onChange={e => setN("mansione", e.target.value)} placeholder="scegli o scrivi" /></label>
+              <label style={lbl}>Qualifica<input className="dc-input" value={nuovo.qualifica} onChange={e => setN("qualifica", e.target.value)} /></label>
+              <label style={lbl}>Livello CCNL<input className="dc-input" value={nuovo.livello} onChange={e => setN("livello", e.target.value)} /></label>
+              <label style={lbl}>Paga oraria (€)<input className="dc-input" value={nuovo.stipendio_orario} onChange={e => setN("stipendio_orario", e.target.value)} placeholder="es. 8,50" /></label>
+              <label style={lbl}>Ore settimanali<input type="number" min="1" max="48" className="dc-input" value={nuovo.ore_settimanali} onChange={e => setN("ore_settimanali", e.target.value)} /></label>
+              <label style={lbl}>Periodo di prova (giorni)<input className="dc-input" value={nuovo.periodo_prova} onChange={e => setN("periodo_prova", e.target.value)} /></label>
+              <label style={lbl}>Data assunzione<input type="date" className="dc-input" value={nuovo.data_assunzione} onChange={e => setN("data_assunzione", e.target.value)} /></label>
+              <label style={lbl}>Data fine (se determinato)<input type="date" className="dc-input" value={nuovo.data_fine} onChange={e => setN("data_fine", e.target.value)} /></label>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 14, justifyContent: "flex-end" }}>
+              <button className="dc-btn" onClick={() => setShowAssumi(false)}>Annulla</button>
+              <button className="dc-btn-primary" disabled={busy === "assumi"} onClick={creaAssumi}>{busy === "assumi" ? "Assumo…" : "Crea e genera contratto"}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="dc-card" style={{ marginBottom: 16 }}>
         <h3 style={{ marginTop: 0 }}>Modelli contratto (.docx)</h3>
