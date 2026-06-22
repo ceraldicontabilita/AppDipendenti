@@ -1239,7 +1239,7 @@ function TurniPage({ dipendenti, turni, reload }) {
     const om = {}; onom.forEach(o => { om[o.dipendente_id] = o; });
     setCfgRows(dipTurni.map(d => { const c = cfgDi(d.id); const o = om[d.id] || {}; return {
       dipendente_id: d.id, nome: `${d.cognome || ''} ${d.nome || ''}`.trim() || d.nome,
-      turno_id: c.turno_id || '', riposo_giorno: c.riposo_giorno || '', lunga_giorni: c.lunga_giorni || [],
+      turno_id: c.turno_id || '', riposo_giorno: c.riposo_giorno || '', lunga_giorni: c.lunga_giorni || [], rotazione: c.rotazione || '',
       onom_mese: o.mese ?? '', onom_giorno: o.giorno ?? '', onom_attivo: o.attivo ?? false, straniero: o.straniero || false }; }));
     setShowCfg(true);
   };
@@ -1250,7 +1250,7 @@ function TurniPage({ dipendenti, turni, reload }) {
     return { ...r, lunga_giorni: has ? r.lunga_giorni.filter(x => x !== g) : [...(r.lunga_giorni || []), g] };
   }));
   const salvaCfg = async () => {
-    await axios.post(`${API}/turni-config`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, turno_id: r.turno_id || null, riposo_giorno: r.riposo_giorno || null, lunga_giorni: r.lunga_giorni || [] })) });
+    await axios.post(`${API}/turni-config`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, turno_id: r.turno_id || null, riposo_giorno: r.riposo_giorno || null, lunga_giorni: r.lunga_giorni || [], rotazione: r.rotazione || null })) });
     await axios.post(`${API}/onomastici`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, mese: r.onom_mese ? Number(r.onom_mese) : null, giorno: r.onom_giorno ? Number(r.onom_giorno) : null, attivo: r.onom_attivo })) });
     await caricaCfg();
     axios.get(`${API}/onomastici/settimana?settimana=${settimana}`).then(r => setOnomSett(r.data || []));
@@ -1281,11 +1281,20 @@ function TurniPage({ dipendenti, turni, reload }) {
     const idFerie = idTurno("Ferie");
     const updates = [];
     const idLunga = idTurno("Lunga");
+    // Rotazione bar: una settimana mattina, una pomeriggio. settimanaPari decide la fase.
+    const idBarMattina = idTurno("Bar 6:30-15"), idBarPom = idTurno("Bar 15-21");
     let configurati = 0;
     dipTurni.forEach(dip => {
       const c = cfgDi(dip.id);
-      if (!c.turno_id && !c.riposo_giorno && !(c.lunga_giorni || []).length) return;  // genera solo chi è configurato
+      if (!c.turno_id && !c.riposo_giorno && !(c.lunga_giorni || []).length && !c.rotazione) return;  // genera solo chi è configurato
       configurati++;
+      // turno "di lavoro" della settimana: se in rotazione bar, alterna mattina/pomeriggio
+      let turnoLavoro = c.turno_id || null;
+      if (c.rotazione) {
+        const iniziaMattina = c.rotazione === "mattina";
+        const mattinaQuestaSett = settimanaPari ? iniziaMattina : !iniziaMattina;
+        turnoLavoro = mattinaQuestaSett ? idBarMattina : idBarPom;
+      }
       for (let gi = 0; gi < 7; gi++) {
         const date = new Date(lunedi); date.setDate(lunedi.getDate() + gi);
         const dStr = isoT(date);
@@ -1294,8 +1303,8 @@ function TurniPage({ dipendenti, turni, reload }) {
         if (ferieDataT(dip.id, dStr)) turnoId = idFerie || idRiposo;                 // ferie approvata
         else if (onomSett.some(o => o.dipendente_id === dip.id && o.giorno_nome === giorno)) turnoId = idRiposo; // onomastico
         else if (c.riposo_giorno && c.riposo_giorno === giorno) turnoId = idRiposo;  // riposo fisso settimanale
-        else if ((c.lunga_giorni || []).includes(giorno)) turnoId = idLunga || c.turno_id || null; // Lunga fissa (ven/sab/dom)
-        else turnoId = c.turno_id || null;                                            // turno abituale
+        else if ((c.lunga_giorni || []).includes(giorno)) turnoId = idLunga || turnoLavoro || null; // Lunga fissa (ven/sab/dom)
+        else turnoId = turnoLavoro || null;                                           // turno abituale / rotazione bar
         updates.push({ dipendente_id: dip.id, giorno, turno_id: turnoId || null });
       }
     });
@@ -1355,18 +1364,25 @@ function TurniPage({ dipendenti, turni, reload }) {
         <div onClick={() => setShowCfg(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
           <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 920, width: "100%", marginTop: 20 }}>
             <h3 style={{ marginTop: 0 }}>⚙️ Configura turni dipendenti</h3>
-            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Punto unico dei turni. Per ognuno: <b>turno abituale</b>, <b>giorno di riposo fisso</b>, chi fa la <b>Lunga</b> (Ven/Sab/Dom) e l’<b>onomastico</b>. “Genera settimana” usa tutto questo: turno abituale ogni giorno, Lunga nei giorni spuntati, Riposo nel giorno fisso e nell’onomastico, Ferie nei giorni approvati. Le celle restano modificabili a mano. Salva su database (MongoDB Atlas).</p>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Punto unico dei turni. Per ognuno: <b>turno abituale</b> oppure <b>rotazione bar</b> (alterna ogni settimana mattina/pomeriggio), <b>giorno di riposo fisso</b>, chi fa la <b>Lunga</b> (Ven/Sab/Dom) e l’<b>onomastico</b>. “Genera settimana” usa tutto questo: turno abituale (o la mattina/pomeriggio della settimana per chi è in rotazione), Lunga nei giorni spuntati, Riposo nel giorno fisso e nell’onomastico, Ferie nei giorni approvati. Le celle restano modificabili a mano. Salva su database (MongoDB Atlas).</p>
             <div style={{ maxHeight: "60vh", overflow: "auto" }}>
             <table className="dc-table">
-              <thead><tr><th>Dipendente</th><th>Turno abituale</th><th>Riposo fisso</th><th>Lunga<br/><span style={{fontWeight:400,fontSize:11}}>V · S · D</span></th><th>Onomastico<br/><span style={{fontWeight:400,fontSize:11}}>gg / mm · attivo</span></th></tr></thead>
+              <thead><tr><th>Dipendente</th><th>Turno abituale</th><th>Rotazione bar<br/><span style={{fontWeight:400,fontSize:11}}>mattina ↔ pom</span></th><th>Riposo fisso</th><th>Lunga<br/><span style={{fontWeight:400,fontSize:11}}>V · S · D</span></th><th>Onomastico<br/><span style={{fontWeight:400,fontSize:11}}>gg / mm · attivo</span></th></tr></thead>
               <tbody>
                 {cfgRows.map((r, i) => (
                   <tr key={r.dipendente_id}>
                     <td>{r.nome}{r.straniero ? <span className="dc-muted"> · straniero</span> : ""}</td>
                     <td>
-                      <select className="dc-input" value={r.turno_id} onChange={e => setCfgRow(i, "turno_id", e.target.value)}>
+                      <select className="dc-input" value={r.turno_id} onChange={e => setCfgRow(i, "turno_id", e.target.value)} disabled={!!r.rotazione} title={r.rotazione ? "In rotazione bar: il turno è alternato automaticamente" : ""}>
                         <option value="">— nessuno —</option>
                         {turni.map(t => <option key={t.id} value={t.id}>{t.nome}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <select className="dc-input" value={r.rotazione} onChange={e => setCfgRow(i, "rotazione", e.target.value)} title="Alterna ogni settimana mattina e pomeriggio bar">
+                        <option value="">— no —</option>
+                        <option value="mattina">Inizia mattina</option>
+                        <option value="pomeriggio">Inizia pomeriggio</option>
                       </select>
                     </td>
                     <td>
