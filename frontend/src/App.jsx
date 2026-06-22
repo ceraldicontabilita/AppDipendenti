@@ -2433,8 +2433,9 @@ function TimbraturePage({ dipendenti, getDipendente }) {
   const [timb, setTimb] = useState([]);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState("");
+  const [sedeOk, setSedeOk] = useState(null); // true = sede salvata sul server (geofencing attivo)
 
-  useEffect(() => { axios.get(`${T}/sede`).then(r => { if (r.data && r.data.lat != null) setSede(s => ({ ...s, ...r.data })); }).catch(() => {}); }, []);
+  useEffect(() => { axios.get(`${T}/sede`).then(r => { const ok = !!(r.data && r.data.lat != null); setSedeOk(ok); if (ok) setSede(s => ({ ...s, ...r.data })); }).catch(() => setSedeOk(false)); }, []);
   const loadTimb = () => axios.get(`${T}?data=${data}`).then(r => setTimb(r.data.timbrature || [])).catch(() => setTimb([]));
   useEffect(() => { loadTimb(); }, [data]);
 
@@ -2461,7 +2462,7 @@ function TimbraturePage({ dipendenti, getDipendente }) {
   const salvaSede = async () => {
     setBusy("sede"); setMsg("");
     try { await axios.post(`${T}/sede`, { ...sede, lat: parseFloat(sede.lat), lng: parseFloat(sede.lng), raggio_m: parseInt(sede.raggio_m) || 200 });
-      setMsg("Sede salvata."); } catch (e) { setMsg(e?.response?.data?.detail || "Errore salvataggio sede"); }
+      setSedeOk(true); setMsg("Sede salvata."); } catch (e) { setMsg(e?.response?.data?.detail || "Errore salvataggio sede"); }
     setBusy("");
   };
   const usaPosizione = () => {
@@ -2517,6 +2518,12 @@ function TimbraturePage({ dipendenti, getDipendente }) {
 
       {msg && <div style={{ background: "#eef3ef", border: "1px solid #d9e4dc", borderRadius: 10, padding: "10px 14px", marginBottom: 14 }}>{msg}</div>}
 
+      {sedeOk === false && (
+        <div className="dc-card" style={{ marginBottom: 14, borderLeft: "4px solid #d35f4e" }}>
+          <b>⚠ Sede non impostata — controllo “fuori sede” DISATTIVO.</b> Finché non salvi la sede, le timbrature non vengono verificate (nessuna risulta “fuori sede”). Nel pannello qui sotto, <b>stando al bar</b>, premi “Usa la mia posizione attuale” e poi “Salva sede”.
+        </div>
+      )}
+
       <div className="dc-card" style={{ marginBottom: 16 }}>
         <h3 style={{ marginTop: 0 }}>Sede di lavoro (geofencing)</h3>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14, alignItems: "end" }}>
@@ -2552,7 +2559,14 @@ function TimbraturePage({ dipendenti, getDipendente }) {
                   <td>{g.entrata?.ora || "—"}</td>
                   <td>{g.uscita?.ora || (g.entrata ? "in corso" : "—")}</td>
                   <td>{g.ore != null ? `${g.ore} h` : "—"}</td>
-                  <td>{g.entrata ? (g.fuori ? <Badge variant="danger">fuori sede</Badge> : <Badge variant="success">in sede</Badge>) : "—"}</td>
+                  <td>{(() => {
+                    const recs = [g.entrata, g.uscita].filter(Boolean);
+                    if (!recs.length) return "—";
+                    if (recs.some(r => r.fuori_sede)) { const ds = recs.map(r => r.distanza_m).filter(x => x != null); return <Badge variant="danger">fuori sede{ds.length ? ` · ${Math.max(...ds)} m` : ""}</Badge>; }
+                    if (recs.every(r => r.lat == null)) return <Badge variant="warning">no GPS</Badge>;
+                    if (sedeOk === false) return <Badge variant="warning">n/d · sede non impostata</Badge>;
+                    return <Badge variant="success">in sede</Badge>;
+                  })()}</td>
                   <td>{!g.entrata ? "—" : (g.uscita ? (g.validata ? <Badge variant="success">✓ valida</Badge> : <Badge variant="warning">da verificare</Badge>) : <Badge variant="info">in corso</Badge>)}</td>
                   <td><Badge variant={g.stato[1]}>{g.stato[0]}</Badge></td>
                 </tr>
