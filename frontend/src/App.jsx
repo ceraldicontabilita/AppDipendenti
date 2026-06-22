@@ -2192,6 +2192,10 @@ function DocumentiPage({ dipendenti, documenti, reload, getDipendente }) {
   const [formData, setFormData] = useState({
     dipendente_id: "", titolo: "", tipo: "Contratto", scadenza: ""
   });
+  const massRef = useRef(null);
+  const [massBusy, setMassBusy] = useState(false);
+  const [massMsg, setMassMsg] = useState(null);
+  const ETICHETTA = { UNILAV: "Unilav", CERTIFICAZIONE_UNICA: "Certificazione Unica (CU)", CONTRATTO: "Contratti", BONIFICO: "Bonifici", CODICE_FISCALE: "Codice fiscale / Tessera sanitaria", BUSTA_PAGA: "Buste paga", ALTRO: "Da classificare" };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -2200,11 +2204,40 @@ function DocumentiPage({ dipendenti, documenti, reload, getDipendente }) {
     reload();
   };
 
+  const handleMassUpload = async (e) => {
+    const fs = Array.from(e.target.files || []);
+    if (!fs.length) return;
+    setMassBusy(true); setMassMsg(null);
+    try {
+      const fd = new FormData();
+      fs.forEach(f => fd.append("files", f));
+      const r = await axios.post(`${API}/documenti/upload-massivo`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setMassMsg(r.data);
+      reload();
+    } catch (err) {
+      setMassMsg({ errore: err?.response?.data?.detail || "Errore upload" });
+    } finally {
+      setMassBusy(false);
+      if (massRef.current) massRef.current.value = "";
+    }
+  };
+
+  const apriDoc = async (doc) => {
+    try {
+      const r = await axios.get(`${API}/documenti/${doc.id}/file`, { responseType: "blob" });
+      window.open(URL.createObjectURL(r.data), "_blank");
+    } catch { alert("Impossibile aprire il documento (file non disponibile)."); }
+  };
+
   const handleDelete = async (id) => {
     if (!window.confirm("Eliminare questo documento?")) return;
     await axios.delete(`${API}/documenti/${id}`);
     reload();
   };
+
+  // Raggruppa i documenti in cartelle per tipo (categoria)
+  const cartelle = {};
+  (documenti || []).forEach(d => { const k = d.categoria || d.tipo || "ALTRO"; (cartelle[k] = cartelle[k] || []).push(d); });
 
   return (
     <div className="dc-page">
@@ -2213,35 +2246,61 @@ function DocumentiPage({ dipendenti, documenti, reload, getDipendente }) {
           <h1>Documenti Dipendenti</h1>
           <p>Archivio documenti e certificati</p>
         </div>
-        <button onClick={() => setShowModal(true)} className="dc-btn dc-btn-primary">
-          <Plus size={18} /> Nuovo Documento
-        </button>
+        <div className="dc-page-actions">
+          <input ref={massRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png" onChange={handleMassUpload} style={{ display: "none" }} />
+          <button onClick={() => massRef.current?.click()} disabled={massBusy} className="dc-btn dc-btn-primary" title="Carica più documenti: l'app riconosce il tipo e li mette nella cartella del dipendente">
+            {massBusy ? "Carico…" : "📂 Carica documenti (auto)"}
+          </button>
+          <button onClick={() => setShowModal(true)} className="dc-btn">
+            <Plus size={18} /> Nuovo Documento
+          </button>
+        </div>
       </div>
 
-      <div className="dc-documenti-grid">
-        {documenti.map((doc) => {
-          const dip = getDipendente(doc.dipendente_id);
-          const isExpiring = doc.scadenza && new Date(doc.scadenza) < new Date(Date.now() + 30*24*60*60*1000);
-          return (
-            <div key={doc.id} className="dc-documento-card">
-              <div className="dc-documento-header">
-                <div className="dc-documento-icon"><FileText size={24} /></div>
-                <button onClick={() => handleDelete(doc.id)} className="dc-btn-icon dc-btn-danger"><Trash2 size={16} /></button>
-              </div>
-              <h4>{doc.titolo}</h4>
-              <p className="dc-documento-user">{dip?.nome} {dip?.cognome}</p>
-              <div className="dc-documento-footer">
-                <Badge>{doc.tipo}</Badge>
-                {doc.scadenza && (
-                  <span className={isExpiring ? "dc-text-red" : "dc-text-gray"}>
-                    Scade: {formatDate(doc.scadenza)}
-                  </span>
-                )}
-              </div>
+      {massMsg && (
+        <div className="dc-card" style={{ marginBottom: 16, borderLeft: `4px solid ${massMsg.errore ? '#d35f4e' : '#3d8168'}` }}>
+          {massMsg.errore ? <div style={{ color: "#d35f4e", fontWeight: 600 }}>⚠ {massMsg.errore}</div> : (
+            <div style={{ fontSize: 14 }}>
+              <div style={{ fontWeight: 700 }}>✓ Caricati {massMsg.caricati} documenti{massMsg.duplicati?.length ? ` · ${massMsg.duplicati.length} duplicati saltati` : ""}{massMsg.non_assegnati?.length ? ` · ${massMsg.non_assegnati.length} senza dipendente` : ""}</div>
+              <div style={{ marginTop: 6, color: "#6b7669" }}>Per tipo: {Object.entries(massMsg.per_categoria || {}).map(([k, v]) => `${ETICHETTA[k] || k} (${v})`).join(" · ")}</div>
+              {massMsg.non_assegnati?.length > 0 && (
+                <div style={{ marginTop: 6, fontSize: 13, color: "#7d5526" }}>⚠ Da assegnare a mano (nessun codice fiscale/nome riconosciuto): {massMsg.non_assegnati.map(x => x.file).join(", ")}</div>
+              )}
             </div>
-          );
-        })}
-      </div>
+          )}
+        </div>
+      )}
+
+      {Object.keys(cartelle).length === 0 && (
+        <div className="dc-card dc-muted">Nessun documento. Usa “📂 Carica documenti (auto)” per caricarne in blocco: l'app riconosce il tipo e li smista nelle cartelle dei dipendenti.</div>
+      )}
+      {Object.keys(cartelle).sort((a, b) => (a === "ALTRO" ? 1 : b === "ALTRO" ? -1 : a.localeCompare(b))).map(cat => (
+        <div key={cat} className="dc-card" style={{ marginBottom: 12 }}>
+          <h3 style={{ marginTop: 0 }}>📁 {ETICHETTA[cat] || cat} <span className="dc-muted" style={{ fontWeight: 400 }}>· {cartelle[cat].length}</span></h3>
+          <div style={{ overflowX: "auto" }}>
+            <table className="dc-table" style={{ minWidth: 520 }}>
+              <thead><tr><th>Documento</th><th>Dipendente</th><th>Caricato</th><th></th></tr></thead>
+              <tbody>
+                {cartelle[cat].map(doc => {
+                  const dip = getDipendente(doc.dipendente_id);
+                  const nome = doc.dipendente_nome || (dip ? `${dip.cognome || ''} ${dip.nome || ''}`.trim() : null);
+                  return (
+                    <tr key={doc.id}>
+                      <td>{doc.titolo || doc.filename}</td>
+                      <td>{nome || <span className="dc-muted">⚠ non assegnato</span>}</td>
+                      <td className="dc-muted">{doc.data_caricamento ? formatDate(doc.data_caricamento) : "—"}</td>
+                      <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                        {doc.file_data || doc.hash ? <button onClick={() => apriDoc(doc)} className="dc-btn" style={{ padding: "4px 10px" }}>Apri</button> : null}
+                        <button onClick={() => handleDelete(doc.id)} className="dc-btn-icon dc-btn-danger" style={{ marginLeft: 6 }}><Trash2 size={16} /></button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
 
       {showModal && (
         <div className="dc-modal-overlay" onClick={() => setShowModal(false)}>

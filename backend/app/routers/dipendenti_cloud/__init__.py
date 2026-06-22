@@ -1943,6 +1943,113 @@ async def delete_documento(documento_id: str):
         raise HTTPException(status_code=404, detail="Documento non trovato")
     return {"message": "Documento eliminato"}
 
+
+_CF_DOC_RE = re.compile(r'\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b')
+CATEGORIE_DOC = ["UNILAV", "CERTIFICAZIONE_UNICA", "CONTRATTO", "BONIFICO", "CODICE_FISCALE", "BUSTA_PAGA", "ALTRO"]
+
+
+def classifica_documento(text: str) -> str:
+    """Riconosce il tipo di documento dal testo (regole sulle diciture standard italiane)."""
+    t = (text or "").lower()
+
+    def has(*ks):
+        return any(k in t for k in ks)
+    if has("unilav", "comunicazione obbligatoria", "modello unificato lav", "centro per l'impiego"):
+        return "UNILAV"
+    if has("certificazione unica", "redditi di lavoro dipendente e assimilati", " cud", "cu 20"):
+        return "CERTIFICAZIONE_UNICA"
+    if has("contratto individuale di lavoro", "contratto di lavoro", "patto di prova", "lettera di assunzione", "tempo indeterminato", "tempo determinato"):
+        return "CONTRATTO"
+    if has("bonifico", "ordinante", "beneficiario", "disposizione di pagamento", "sepa credit"):
+        return "BONIFICO"
+    if has("busta paga", "cedolino", "netto in busta", "retribuzione lorda"):
+        return "BUSTA_PAGA"
+    if has("tessera sanitaria", "servizio sanitario nazionale", "team ") and len(t) < 1800:
+        return "CODICE_FISCALE"
+    return "ALTRO"
+
+
+@router.post("/documenti/upload-massivo")
+async def upload_documenti_massivo(files: List[UploadFile] = File(...)):
+    """Carica più documenti insieme: per ognuno riconosce il tipo (UNILAV, C.U., contratto,
+    bonifico, codice fiscale…), trova il dipendente dal codice fiscale (o dal nome) nel testo,
+    e lo archivia nella sua cartella. Anti-duplicati per hash del file."""
+    import io
+    import pdfplumber
+    db = get_db()
+    dips = await db.dipendenti.find({"merged_into": {"$exists": False}},
+                                    {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "nome_completo": 1, "codice_fiscale": 1}).to_list(1000)
+
+    def norm(s):
+        return re.sub(r"\s+", " ", str(s or "").strip()).lower()
+    by_cf, by_nome = {}, {}
+    for d in dips:
+        cf = (d.get("codice_fiscale") or "").upper().strip()
+        if cf:
+            by_cf[cf] = d
+        n, c = norm(d.get("nome")), norm(d.get("cognome"))
+        for v in {norm(d.get("nome_completo")), f"{c} {n}".strip(), f"{n} {c}".strip()}:
+            if v and len(v) > 6:
+                by_nome[v] = d
+
+    caricati, duplicati, non_assegnati, per_categoria = [], [], [], {}
+    for f in files:
+        raw = await f.read()
+        if not raw:
+            continue
+        h = hashlib.sha256(raw).hexdigest()
+        if await db.documenti_cloud.find_one({"hash": h}):
+            duplicati.append(f.filename)
+            continue
+        text = ""
+        if raw[:4] == b"%PDF":
+            try:
+                with pdfplumber.open(io.BytesIO(raw)) as pdf:
+                    for p in pdf.pages[:6]:
+                        text += (p.extract_text() or "") + "\n"
+            except Exception:
+                text = ""
+        categoria = classifica_documento(text)
+        d = None
+        for cf in _CF_DOC_RE.findall((text or "").upper()):
+            if cf in by_cf:
+                d = by_cf[cf]
+                break
+        if not d:
+            tl = norm(text)
+            for nome_n, dd in by_nome.items():
+                if nome_n in tl:
+                    d = dd
+                    break
+        doc = {"id": generate_id(),
+               "dipendente_id": (d or {}).get("id"),
+               "dipendente_nome": (f"{d.get('cognome','')} {d.get('nome','')}".strip() if d else None),
+               "titolo": f.filename, "filename": f.filename,
+               "tipo": categoria, "categoria": categoria, "hash": h,
+               "file_data": base64.b64encode(raw).decode(),
+               "assegnato": bool(d), "origine": "upload_massivo", "data_caricamento": now_iso()}
+        await db.documenti_cloud.insert_one(doc)
+        per_categoria[categoria] = per_categoria.get(categoria, 0) + 1
+        if d:
+            caricati.append({"file": f.filename, "categoria": categoria, "dipendente": doc["dipendente_nome"]})
+        else:
+            non_assegnati.append({"file": f.filename, "categoria": categoria})
+    return {"caricati": len(caricati), "duplicati": duplicati,
+            "non_assegnati": non_assegnati, "per_categoria": per_categoria,
+            "dettaglio": caricati[:300]}
+
+
+@router.get("/documenti/{documento_id}/file")
+async def download_documento(documento_id: str):
+    from fastapi.responses import Response
+    doc = await get_db().documenti_cloud.find_one({"id": documento_id}, {"_id": 0})
+    if not doc or not doc.get("file_data"):
+        raise HTTPException(status_code=404, detail="File non disponibile")
+    data = base64.b64decode(doc["file_data"])
+    fn = doc.get("filename") or "documento.pdf"
+    media = "application/pdf" if fn.lower().endswith(".pdf") else "application/octet-stream"
+    return Response(content=data, media_type=media, headers={"Content-Disposition": f'inline; filename="{fn}"'})
+
 # ============ DASHBOARD STATS ============
 
 @router.get("/dashboard/stats")
