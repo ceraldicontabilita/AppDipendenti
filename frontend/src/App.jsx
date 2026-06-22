@@ -2254,6 +2254,11 @@ function TimbraturePage({ dipendenti, getDipendente }) {
   const giornoNomeDi = (ymd) => NOMI_G[new Date(ymd + "T12:00:00").getDay()];
   useEffect(() => { axios.get("/api/dipendenti-cloud/turni").then(r => setTipiTurno(r.data || [])).catch(() => {}); }, []);
   useEffect(() => { axios.get(`/api/dipendenti-cloud/assegnazioni-turni?settimana=${lunISOdi(data)}`).then(r => setAssegn(r.data || [])).catch(() => setAssegn([])); }, [data]);
+  const [riepilogo, setRiepilogo] = useState([]);
+  useEffect(() => {
+    const [a, m] = data.split("-");
+    axios.get(`${T}/riepilogo?anno=${a}&mese=${parseInt(m)}`).then(r => setRiepilogo(r.data.riepilogo || [])).catch(() => setRiepilogo([]));
+  }, [data]);
   const nomeTurno = (id) => (tipiTurno.find(t => t.id === id) || {}).nome;
   const pianificatoDi = (dipId) => {
     const a = assegn.find(x => x.dipendente_id === dipId && x.settimana === lunISOdi(data) && x.giorno === giornoNomeDi(data));
@@ -2360,6 +2365,21 @@ function TimbraturePage({ dipendenti, getDipendente }) {
           </table>
         )}
         <p className="dc-muted" style={{ fontSize: 12, marginTop: 10 }}>Confronta queste presenze reali con i turni pianificati nella pagina Presenze (il calendario sovrappone già i turni).</p>
+      </div>
+
+      <div className="dc-card" style={{ marginTop: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Riepilogo ore del mese ({data.slice(5, 7)}/{data.slice(0, 4)})</h3>
+        {riepilogo.length === 0 ? <p className="dc-muted">Nessuna ora timbrata in questo mese.</p> : (
+          <table className="dc-table">
+            <thead><tr><th>Dipendente</th><th>Giorni</th><th>Ore totali</th></tr></thead>
+            <tbody>
+              {riepilogo.map((r, i) => (
+                <tr key={i}><td>{r.nome}</td><td>{r.giorni}</td><td><b>{r.ore} h</b></td></tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <p className="dc-muted" style={{ fontSize: 12, marginTop: 10 }}>Ore calcolate dalle timbrature (entrata→uscita). Utile per il controllo delle buste paga.</p>
       </div>
     </div>
   );

@@ -154,6 +154,41 @@ async def lista(data: Optional[str] = Query(None), dipendente_id: Optional[str] 
     return {"totale": len(ts), "timbrature": ts}
 
 
+@router.get("/riepilogo", summary="Riepilogo ore mensili per dipendente (admin)")
+async def riepilogo(anno: int = Query(...), mese: int = Query(...),
+                    identity: Dict[str, Any] = Depends(require_roles("admin", "responsabile_turni"))) -> Dict[str, Any]:
+    """Totale ore timbrate e giorni lavorati nel mese, per dipendente
+    (utile per il controllo delle buste paga)."""
+    db = Database.get_db()
+    prefix = f"{anno}-{str(mese).zfill(2)}"
+    ts = await db[COLL].find({"data": {"$regex": f"^{prefix}"}}, {"_id": 0}).sort("ts", 1).to_list(20000)
+    by: Dict[str, Any] = {}
+    for t in ts:
+        dip = t["dipendente_id"]
+        rec = by.setdefault(dip, {"dipendente_id": dip, "nome": t.get("dipendente_nome", ""), "giorni": {}})
+        g = rec["giorni"].setdefault(t["data"], {"in": None, "out": None})
+        if t["tipo"] == "entrata" and not g["in"]:
+            g["in"] = t["ts"]
+        if t["tipo"] == "uscita":
+            g["out"] = t["ts"]
+    out = []
+    for rec in by.values():
+        tot, gg = 0.0, 0
+        for g in rec["giorni"].values():
+            if g["in"] and g["out"]:
+                try:
+                    h = (datetime.fromisoformat(g["out"]) - datetime.fromisoformat(g["in"])).total_seconds() / 3600
+                    if h > 0:
+                        tot += h
+                        gg += 1
+                except (ValueError, TypeError):
+                    pass
+        out.append({"dipendente_id": rec["dipendente_id"], "nome": rec["nome"],
+                    "ore": round(tot, 2), "giorni": gg})
+    out.sort(key=lambda x: (x["nome"] or "").lower())
+    return {"anno": anno, "mese": mese, "riepilogo": out}
+
+
 @router.get("/sede", summary="Sede di lavoro configurata")
 async def get_sede(identity: Dict[str, Any] = Depends(get_identity)) -> Dict[str, Any]:
     db = Database.get_db()
