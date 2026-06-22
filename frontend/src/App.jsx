@@ -1808,7 +1808,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
         {!vistaAnno && (
           <div style={{ overflowX: "auto", marginTop: 10 }}>
             <table className="dc-table" style={{ minWidth: 580, whiteSpace: "nowrap" }}>
-              <thead><tr><th>Dipendente</th><th style={{ textAlign: "right" }}>Busta €</th><th style={{ textAlign: "right" }}>Acconti €</th><th style={{ textAlign: "right" }}>Bonifico emesso €</th><th>Stato</th></tr></thead>
+              <thead><tr><th>Dipendente</th><th style={{ textAlign: "right" }}>Busta €</th><th style={{ textAlign: "right" }}>Acconti €</th><th style={{ textAlign: "right" }}>Bonifico €</th><th style={{ textAlign: "right" }}>Differenza</th><th>Stato</th></tr></thead>
               <tbody>
                 {dipendenti.map(d => {
                   const r = get(d.id);
@@ -1819,9 +1819,14 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                   if (!cat) return null;
                   if (soloMancanti && cat === "ok") return null;
                   const pagato = bon + acc;
+                  const diff = pagato - busta;  // <0 manca, >0 eccedenza
+                  const diffCell = busta <= 0 ? <span className="dc-muted">—</span>
+                    : diff < -0.5 ? <span style={{ color: "#d35f4e", fontWeight: 700 }}>manca € {eur(-diff)}</span>
+                    : diff > 0.5 ? <span style={{ color: "#7d5526", fontWeight: 700 }}>+€ {eur(diff)}</span>
+                    : <span style={{ color: "#3d8168", fontWeight: 700 }}>0,00</span>;
                   const stato = cat === "bonifico" ? <Badge variant="warning">bonifico senza busta</Badge>
                     : cat === "ok" ? <Badge variant="success">✓ pagato</Badge>
-                    : cat === "parziale" ? <Badge variant="warning">parziale · manca € {eur(busta - pagato)}</Badge>
+                    : cat === "parziale" ? <Badge variant="warning">parziale</Badge>
                     : <Badge variant="danger">⚠ da pagare</Badge>;
                   return (
                     <tr key={d.id}>
@@ -1829,6 +1834,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                       <td style={{ textAlign: "right" }}>{busta ? eur(busta) : "—"}</td>
                       <td style={{ textAlign: "right" }}>{acc ? eur(acc) : "—"}</td>
                       <td style={{ textAlign: "right" }}>{bon ? eur(bon) : "—"}</td>
+                      <td style={{ textAlign: "right" }}>{diffCell}</td>
                       <td>{stato}</td>
                     </tr>
                   );
@@ -1839,6 +1845,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                     <td style={{ textAlign: "right" }}>{eur(totBuste)}</td>
                     <td style={{ textAlign: "right" }}>{eur(totAcconti)}</td>
                     <td style={{ textAlign: "right" }}>{eur(totBonifici)}</td>
+                    <td style={{ textAlign: "right" }}>{eur(totBonifici + totAcconti - totBuste)}</td>
                     <td></td>
                   </tr>
                 )}
@@ -1851,13 +1858,18 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
         {vistaAnno && (
           <div style={{ overflowX: "auto", marginTop: 10 }}>
             {!annoMatrix ? <div className="dc-muted">Carico l'anno…</div> : (
-              <table className="dc-table" style={{ minWidth: 760, whiteSpace: "nowrap", fontSize: 13 }}>
-                <thead><tr><th>Dipendente</th>{mesi.map((m, i) => <th key={i} title={m} style={{ textAlign: "center" }}>{m.slice(0, 3)}</th>)}</tr></thead>
+              <table className="dc-table" style={{ minWidth: 920, whiteSpace: "nowrap", fontSize: 13 }}>
+                <thead><tr><th>Dipendente</th>{mesi.map((m, i) => <th key={i} title={m} style={{ textAlign: "center" }}>{m.slice(0, 3)}</th>)}<th style={{ textAlign: "right" }}>Tot Busta</th><th style={{ textAlign: "right" }}>Tot Bonifici</th><th style={{ textAlign: "right" }}>Differenza</th></tr></thead>
                 <tbody>
                   {dipendenti.map(d => {
-                    const celle = mesi.map((_, i) => statoPaga((annoMatrix[i + 1] || {})[d.id]));
+                    const paghe = mesi.map((_, i) => (annoMatrix[i + 1] || {})[d.id]);
+                    const celle = paghe.map(p => statoPaga(p));
                     if (soloMancanti && !celle.some(c => c && c !== "ok")) return null;
                     if (!soloMancanti && celle.every(c => !c)) return null;
+                    const tb = paghe.reduce((s, p) => s + (parseFloat(p?.importo_busta) || 0), 0);
+                    const tbon = paghe.reduce((s, p) => s + (parseFloat(p?.bonifico_importo) || 0), 0);
+                    const tacc = paghe.reduce((s, p) => s + ((p?.acconti || []).reduce((a, x) => a + (parseFloat(x.importo) || 0), 0)), 0);
+                    const tdiff = (tbon + tacc) - tb;
                     return (
                       <tr key={d.id}>
                         <td>{d.cognome ? `${d.cognome} ${d.nome?.[0] || ''}.` : d.nome}</td>
@@ -1866,6 +1878,11 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                           const col = c === "ok" ? "#3d8168" : c === "manca" ? "#d35f4e" : c === "parziale" ? "#b9770e" : c === "bonifico" ? "#5b7a6b" : "#cbd2c9";
                           return <td key={i} style={{ textAlign: "center", color: col, fontWeight: 700 }} title={`${mesi[i]}: ${c || "nessun dato"}`}>{sym}</td>;
                         })}
+                        <td style={{ textAlign: "right" }}>{tb ? eur(tb) : "—"}</td>
+                        <td style={{ textAlign: "right" }}>{tbon ? eur(tbon) : "—"}</td>
+                        <td style={{ textAlign: "right", fontWeight: 700, color: tb <= 0 ? "#94a3b8" : tdiff < -0.5 ? "#d35f4e" : tdiff > 0.5 ? "#7d5526" : "#3d8168" }}>
+                          {tb <= 0 ? "—" : tdiff < -0.5 ? `manca € ${eur(-tdiff)}` : tdiff > 0.5 ? `+€ ${eur(tdiff)}` : "0,00"}
+                        </td>
                       </tr>
                     );
                   })}
