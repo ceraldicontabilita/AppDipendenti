@@ -18,9 +18,13 @@ services:
         value: ceraldi
       - key: ANTHROPIC_API_KEY  # opzionale (estrazione AI documenti)
         sync: false
-      - key: IMAP_USER          # opzionale (import buste da Gmail)
+      - key: IMAP_HOST          # server IMAP (Gmail). Preimpostato; cambia solo se usi altra posta
+        value: imap.gmail.com
+      - key: IMAP_PORT
+        value: "993"
+      - key: IMAP_USER          # opzionale (import buste da email) = indirizzo email
         sync: false
-      - key: IMAP_PASSWORD      # opzionale (App Password Gmail)
+      - key: IMAP_PASSWORD      # opzionale (App Password Gmail, NON la password normale)
         sync: false
       - key: OPENAPI_CLIENT_ID      # OpenAPI.com eSignature/PEC/Marche Temporali (OAuth V2)
         sync: false
