@@ -25,6 +25,7 @@ COLL = "timbrature"
 COLL_SET = "impostazioni"
 RAGGIO_DEFAULT_M = 200
 MARGINE_GPS_MAX_M = 75  # tolleranza massima sull'accuracy dichiarata dal client
+MIN_PERMANENZA_MIN = 60  # permanenza minima in sede perché la presenza sia validata
 
 
 def _now() -> datetime:
@@ -122,20 +123,32 @@ async def timbra(payload: Dict[str, Any] = Body(...),
             "giustificativo": "P", "origine": "timbratura"}
     if tipo == "entrata":
         base["entrata"] = rec["ora"]
+        # Presenza ancora NON validata: serve l'uscita in sede dopo almeno 1 ora.
+        base["validata"] = False
     else:
         base["uscita"] = rec["ora"]
         if ultima:
             base["entrata"] = ultima.get("ora")
             try:
                 t_in = datetime.fromisoformat(ultima["ts"])
-                ore = round((now - t_in).total_seconds() / 3600, 2)
+                minuti = (now - t_in).total_seconds() / 60
+                ore = round(minuti / 60, 2)
                 base["ore_lavorate"] = ore
+                base["minuti"] = round(minuti)
+                # Presenza VALIDA solo se: entrata in sede + uscita in sede + permanenza ≥ 1 ora.
+                entrata_in_sede = not bool(ultima.get("fuori_sede"))
+                uscita_in_sede = not bool(fuori_sede)
+                base["validata"] = bool(entrata_in_sede and uscita_in_sede and minuti >= MIN_PERMANENZA_MIN)
             except (ValueError, TypeError, KeyError):
                 ore = None
+                base["validata"] = False
+        else:
+            base["validata"] = False
     await db["presenze_cloud"].update_one(
         {"dipendente_id": identity["id"], "data": oggi}, {"$set": base}, upsert=True)
 
-    return {"ok": True, "timbratura": rec, "ore_lavorate": ore, "fuori_sede": fuori_sede}
+    return {"ok": True, "timbratura": rec, "ore_lavorate": ore, "fuori_sede": fuori_sede,
+            "validata": base.get("validata", False)}
 
 
 @router.get("/mie/oggi", summary="Le mie timbrature di oggi + stato")

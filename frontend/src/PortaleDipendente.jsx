@@ -645,9 +645,12 @@ function Timbra() {
       api.post("/timbrature", { tipo, lat, lng, accuracy: acc })
         .then(r => {
           const t = r.data.timbratura;
-          setMsg(`Timbrata ${tipo} alle ${t.ora}` +
+          let m = `Timbrata ${tipo} alle ${t.ora}` +
             (r.data.fuori_sede ? " — ⚠ fuori sede" : "") +
-            (r.data.ore_lavorate != null ? ` · ${r.data.ore_lavorate} h` : "") + ".");
+            (r.data.ore_lavorate != null ? ` · ${r.data.ore_lavorate} h` : "") + ".";
+          if (tipo === "entrata") m += " La presenza sarà valida con l'uscita in sede dopo almeno 1 ora.";
+          else m += r.data.validata ? " ✓ Presenza validata." : " ⚠ Presenza NON validata (serve almeno 1 ora in sede).";
+          setMsg(m);
           load();
         })
         .catch(e => setMsg(e?.response?.data?.detail || "Errore timbratura"))

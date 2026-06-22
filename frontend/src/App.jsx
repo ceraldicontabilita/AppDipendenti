@@ -2501,7 +2501,9 @@ function TimbraturePage({ dipendenti, getDipendente }) {
       else if (!lavorativo(pian) && g.entrata) stato = [pian ? `Extra (${pian})` : "Extra (non in turno)", "warning"];
       else if (g.entrata && g.uscita) stato = ["OK", "success"];
       else if (g.entrata) stato = ["In corso", "info"];
-      return { ...g, ore, pian, stato };
+      // Presenza validata: entrata+uscita in sede e permanenza ≥ 1 ora
+      const validata = !!(g.entrata && g.uscita && !g.fuori && ore != null && ore >= 1);
+      return { ...g, ore, pian, stato, validata };
     }).sort((a, b) => (a.nome || "").localeCompare(b.nome || ""));
   })();
 
@@ -2540,8 +2542,8 @@ function TimbraturePage({ dipendenti, getDipendente }) {
         </div>
         {perDip.length === 0 ? <p className="dc-muted" style={{ marginTop: 12 }}>Nessuna timbratura per questa data.</p> : (
           <div style={{ overflowX: "auto", marginTop: 12, WebkitOverflowScrolling: "touch" }}>
-          <table className="dc-table" style={{ minWidth: 620, whiteSpace: "nowrap" }}>
-            <thead><tr><th>Dipendente</th><th>Turno pianificato</th><th>Entrata</th><th>Uscita</th><th>Ore</th><th>Sede</th><th>Esito</th></tr></thead>
+          <table className="dc-table" style={{ minWidth: 720, whiteSpace: "nowrap" }}>
+            <thead><tr><th>Dipendente</th><th>Turno pianificato</th><th>Entrata</th><th>Uscita</th><th>Ore</th><th>Sede</th><th>Validata</th><th>Esito</th></tr></thead>
             <tbody>
               {perDip.map((g, i) => (
                 <tr key={i}>
@@ -2551,6 +2553,7 @@ function TimbraturePage({ dipendenti, getDipendente }) {
                   <td>{g.uscita?.ora || (g.entrata ? "in corso" : "—")}</td>
                   <td>{g.ore != null ? `${g.ore} h` : "—"}</td>
                   <td>{g.entrata ? (g.fuori ? <Badge variant="danger">fuori sede</Badge> : <Badge variant="success">in sede</Badge>) : "—"}</td>
+                  <td>{!g.entrata ? "—" : (g.uscita ? (g.validata ? <Badge variant="success">✓ valida</Badge> : <Badge variant="warning">da verificare</Badge>) : <Badge variant="info">in corso</Badge>)}</td>
                   <td><Badge variant={g.stato[1]}>{g.stato[0]}</Badge></td>
                 </tr>
               ))}
