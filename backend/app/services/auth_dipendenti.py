@@ -61,16 +61,24 @@ async def lista_login() -> List[Dict[str, Any]]:
     db = Database.get_db()
     cursor = db[Collections.EMPLOYEES].find(
         {"attivo": {"$ne": False},
-         "merged_into": {"$exists": False}},
+         "merged_into": {"$exists": False},
+         "stato": {"$nin": ["cessato", "dimesso", "archiviato"]}},
         {"_id": 0, "id": 1, "nome_completo": 1, "nome": 1, "cognome": 1,
          "mansione": 1, "ruolo": 1, "ruolo_app": 1, "pin_hash": 1},
     )
+    # Gli amministratori accedono SOLO da "Accesso amministratore", non dalla lista.
+    ESCLUSI = [("vincenzo", "ceraldi"), ("valerio", "ceraldi")]
     out = []
     for d in await cursor.to_list(500):
         if not d.get("id"):
             continue
+        if d.get("ruolo_app") == "admin":
+            continue
         nome = (d.get("nome_completo") or f"{d.get('nome','')} {d.get('cognome','')}").strip()
         if not nome:
+            continue
+        _fn = nome.lower()
+        if any(a in _fn and b in _fn for a, b in ESCLUSI):
             continue
         out.append({
             "id": d.get("id"),

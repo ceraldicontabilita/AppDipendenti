@@ -362,15 +362,20 @@ function Richieste() {
 }
 
 /* ---------------- NOTIFICHE ---------------- */
-function Notifiche({ onChange }) {
+function Notifiche({ onChange, onOpen }) {
   const [list, setList] = useState([]);
   const load = useCallback(()=>{ api.get("/notifiche").then((r)=>{setList(r.data);onChange&&onChange();}).catch(()=>{}); },[onChange]);
   useEffect(()=>{load();},[load]);
-  const letta = async (n) => { await api.post(`/notifiche/${n.id}/letta`); load(); };
+  const apri = async (n) => {
+    if (!n.letta) { try { await api.post(`/notifiche/${n.id}/letta`); } catch {} }
+    onOpen && onOpen(n);
+    load();
+  };
   if (list.length===0) return <div className="empty">Nessuna notifica.</div>;
   return list.map((n)=>(
-    <div className="card" key={n.id} onClick={()=>!n.letta&&letta(n)} style={{opacity:n.letta?.7:1}}>
-      <div className="row"><b>{n.titolo}</b>{!n.letta&&<span className="pill info">nuova</span>}</div>
+    <div className="card" key={n.id} onClick={()=>apri(n)} style={{opacity:n.letta?.7:1, cursor:"pointer"}}>
+      <div className="row"><b>{n.titolo}</b>{!n.letta&&<span className="pill info">nuova</span>}
+        <span className="muted" style={{marginLeft:"auto",fontSize:12}}>apri ›</span></div>
       <div className="muted" style={{whiteSpace:"pre-line",marginTop:6}}>{n.messaggio}</div>
     </div>
   ));
@@ -734,7 +739,13 @@ export default function PortaleDipendente() {
         {tab==="buste" && <Buste/>}
         {tab==="documenti" && <Documenti/>}
         {tab==="richieste" && <Richieste/>}
-        {tab==="notifiche" && <Notifiche onChange={refreshBadge}/>}
+        {tab==="notifiche" && <Notifiche onChange={refreshBadge} onOpen={(n)=>{
+          const t = n.tipo;
+          if (t==="richiesta") setTab(role==="admin" ? "gestione" : "richieste");
+          else if (t==="richiesta_risolta") setTab("richieste");
+          else if (t==="turni" || t==="turno_pubblicato") setTab("turni");
+          else if (t==="busta_paga") setTab("buste");
+        }}/>}
         {tab==="gestione" && isGestore && <Gestione/>}
       </div>
       <div className="tabbar">
