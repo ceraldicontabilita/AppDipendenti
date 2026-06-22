@@ -64,6 +64,8 @@ def register_routers():
     from .routers import cedolini, cedolini_riconciliazione, tfr, attendance, dimissioni, richieste, portale_buste, turni, notifiche
     from .routers import dipendenti_cloud
     from .routers import portale_documenti
+    from .routers import timbrature
+    app.include_router(timbrature.router, prefix="/api/timbrature", tags=["Timbrature"])
     app.include_router(richieste.router, prefix="/api/richieste", tags=["Richieste"])
     app.include_router(portale_buste.router, prefix="/api/portale/buste", tags=["Portale Buste"])
     app.include_router(portale_documenti.router, prefix="/api/portale/documenti", tags=["Portale Documenti"])

@@ -3,7 +3,7 @@ import axios from "axios";
 import {
   Calendar, FileText, Inbox, Bell, Users, LogOut, Download,
   Check, ChevronLeft, Send, Eye, ClipboardList, Settings,
-  FolderOpen, Upload, Trash2, AlertTriangle, Grid3X3,
+  FolderOpen, Upload, Trash2, AlertTriangle, Grid3X3, Clock, MapPin,
 } from "lucide-react";
 import "./portale.css";
 
@@ -624,6 +624,76 @@ function Documenti() {
 }
 
 /* ---------------- SHELL ---------------- */
+/* ---------------- TIMBRATURA (geolocalizzata) ---------------- */
+function Timbra() {
+  const [stato, setStato] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const load = useCallback(() => {
+    api.get("/timbrature/mie/oggi").then(r => setStato(r.data)).catch(() => setStato({ stato: "fuori", timbrature: [] }));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const timbra = (tipo) => {
+    setMsg(""); setBusy(true);
+    const invia = (lat, lng, acc) => {
+      api.post("/timbrature", { tipo, lat, lng, accuracy: acc })
+        .then(r => {
+          const t = r.data.timbratura;
+          setMsg(`Timbrata ${tipo} alle ${t.ora}` +
+            (r.data.fuori_sede ? " — ⚠ fuori sede" : "") +
+            (r.data.ore_lavorate != null ? ` · ${r.data.ore_lavorate} h` : "") + ".");
+          load();
+        })
+        .catch(e => setMsg(e?.response?.data?.detail || "Errore timbratura"))
+        .finally(() => setBusy(false));
+    };
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        p => invia(p.coords.latitude, p.coords.longitude, Math.round(p.coords.accuracy)),
+        () => { setMsg("Posizione non disponibile: timbratura senza geolocalizzazione."); invia(null, null, null); },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
+    } else invia(null, null, null);
+  };
+
+  const dentro = stato?.stato === "dentro";
+  return (
+    <div>
+      <div className="card" style={{ textAlign: "center" }}>
+        <h3>Timbratura</h3>
+        <div className="muted" style={{ marginBottom: 14 }}>
+          {dentro ? "Sei al lavoro — entrata registrata" : "Non sei in turno"}
+        </div>
+        <button className="btn" disabled={busy || dentro} onClick={() => timbra("entrata")}
+          style={{ marginBottom: 10, background: dentro ? undefined : "var(--ok)" }}>
+          <Clock size={16} /> {busy ? "Attendi…" : "Timbra ENTRATA"}
+        </button>
+        <button className="btn" disabled={busy || !dentro} onClick={() => timbra("uscita")}
+          style={{ background: dentro ? "var(--danger)" : undefined }}>
+          <Clock size={16} /> {busy ? "Attendi…" : "Timbra USCITA"}
+        </button>
+        {msg && <div className="muted" style={{ marginTop: 12 }}>{msg}</div>}
+        <div className="muted" style={{ fontSize: 11, marginTop: 12 }}>
+          <MapPin size={11} /> Viene registrata la posizione del telefono al momento della timbratura.
+        </div>
+      </div>
+      <div className="card">
+        <h3>Oggi</h3>
+        {(stato?.timbrature || []).length === 0
+          ? <div className="muted">Nessuna timbratura.</div>
+          : stato.timbrature.map(t => (
+            <div key={t.id} className="row" style={{ padding: "7px 0", borderBottom: "1px solid var(--line)" }}>
+              <span><b>{t.tipo === "entrata" ? "Entrata" : "Uscita"}</b> · {t.ora}</span>
+              {t.fuori_sede
+                ? <span className="pill danger">fuori sede{t.distanza_m != null ? ` · ${t.distanza_m} m` : ""}</span>
+                : (t.lat != null ? <span className="pill ok">in sede</span> : <span className="pill muted">no GPS</span>)}
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
 export default function PortaleDipendente() {
   const [logged, setLogged] = useState(!!localStorage.getItem(TK));
   const [tab, setTab] = useState("turni");
@@ -638,6 +708,7 @@ export default function PortaleDipendente() {
   const logout = () => { localStorage.removeItem(TK); localStorage.removeItem("pt_role"); localStorage.removeItem("pt_name"); setLogged(false); };
 
   const tabs = [
+    { k:"timbra", l:"Timbra", icon:Clock },
     { k:"turni", l:"Turni", icon:Calendar },
     { k:"buste", l:"Buste", icon:FileText },
     { k:"documenti", l:"Documenti", icon:FolderOpen },
@@ -656,6 +727,7 @@ export default function PortaleDipendente() {
         <button className="logout" onClick={logout}><LogOut size={13}/> Esci</button>
       </div>
       <div className="pt-body">
+        {tab==="timbra" && <Timbra/>}
         {tab==="turni" && <Turni/>}
         {tab==="buste" && <Buste/>}
         {tab==="documenti" && <Documenti/>}
