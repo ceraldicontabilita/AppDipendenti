@@ -1400,6 +1400,7 @@ async def save_turni_config(data: dict = Body(...)):
             {"$set": {"dipendente_id": v["dipendente_id"],
                       "turno_id": v.get("turno_id") or None,
                       "riposo_giorno": v.get("riposo_giorno") or None,
+                      "lunga_giorni": v.get("lunga_giorni") or [],
                       "updated_at": now_iso()}}, upsert=True)
     return {"ok": True, "salvati": len(data.get("voci") or [])}
 

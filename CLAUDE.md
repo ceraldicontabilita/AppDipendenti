@@ -58,10 +58,16 @@ Fondo EST (sanitario), Fon.Te. (previdenza compl.).
   contratto finalizzato→aggiorna anagrafica; cessazione (pulsante)→handler completo;
   scadenzario (contratti/prova)→alert; timbratura→presenze reali.
 - Alert visibili nel **Pannello di controllo** (pannello "Avvisi & Scadenze").
+- **Turni data-driven** (pagina Turni, modale "⚙️ Configura turni" = punto unico):
+  per dipendente `turni_config` (collezione) = turno abituale + giorno di riposo fisso
+  + giorni di Lunga (Ven/Sab/Dom); + onomastico (`onomastici`). "Genera settimana"
+  (`generaProduzione` in App.jsx) assegna: turno abituale, Lunga nei giorni spuntati,
+  Riposo nel giorno fisso e nell'onomastico, Ferie nei giorni di ferie APPROVATE.
+  Niente più nomi cablati. Celle sempre modificabili a mano.
 - **Onomastici** (`dipendenti_cloud`: ONOMASTICI_DEFAULT + collezione `onomastici`):
-  nella pagina Turni, pannello che mostra gli onomastici della settimana (solo giorni
-  lavorativi, esclusi stranieri e dipendenti disattivati) e propone il riposo (l'admin
-  conferma con un clic → assegnazione "Riposo"). Date prefillate e modificabili.
+  gestiti nel modale "Configura turni"; nella pagina Turni un pannello mostra gli
+  onomastici della settimana (solo giorni lavorativi, esclusi stranieri/disattivati e
+  i non-turnisti). Date prefillate e modificabili.
 
 ## Moduli chiave
 - **Assunzione & Contratti** (`App.jsx` AssunzionePage + `routers/employees/employee_contracts.py`):
@@ -96,7 +102,8 @@ Fondo EST (sanitario), Fon.Te. (previdenza compl.).
 timbrature), `presenze` (LUL), `ferie_cloud`, `turni_settimane` + assegnazioni,
 `turni_indisponibilita`, `richieste`, `notifiche`, `timbrature`, `impostazioni`,
 `employee_contracts`, `contratti_dipendenti` (fascicolo), `alerts`, `partite_aperte`,
-`missioni_cloud`.
+`missioni_cloud`, `assegnazioni_turni_cloud`, `turni_config` (turno/riposo/Lunga per
+dipendente), `onomastici`.
 
 ## Bug noti / da fare
 - Buste paga "foglio bianco": `portale_buste.py::scarica_pdf` genera un riepilogo se

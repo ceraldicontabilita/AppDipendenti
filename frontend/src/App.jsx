@@ -1198,22 +1198,9 @@ function TurniPage({ dipendenti, turni, reload }) {
     } finally { setBusy(false); }
   };
 
-  // Onomastici: riposo nel giorno del santo (copertura prioritaria → l'admin conferma)
+  // Onomastici (gestiti nel modale unico "Configura turni"); qui solo il riepilogo settimanale.
   const [onomSett, setOnomSett] = useState([]);
-  const [showOnom, setShowOnom] = useState(false);
-  const [onomTab, setOnomTab] = useState([]);
-  const [onomMsg, setOnomMsg] = useState("");
   useEffect(() => { axios.get(`${API}/onomastici/settimana?settimana=${settimana}`).then(r => setOnomSett(r.data || [])).catch(() => setOnomSett([])); }, [settimana]);
-  const apriOnom = () => { axios.get(`${API}/onomastici`).then(r => { setOnomTab(r.data || []); setShowOnom(true); }).catch(() => {}); };
-  const setOnomRow = (i, k, v) => setOnomTab(t => t.map((r, j) => j === i ? { ...r, [k]: v } : r));
-  const salvaOnom = async () => {
-    setOnomMsg("");
-    try {
-      await axios.post(`${API}/onomastici`, { voci: onomTab.map(v => ({ dipendente_id: v.dipendente_id, mese: v.mese ? Number(v.mese) : null, giorno: v.giorno ? Number(v.giorno) : null, attivo: v.attivo })) });
-      setShowOnom(false);
-      axios.get(`${API}/onomastici/settimana?settimana=${settimana}`).then(r => setOnomSett(r.data || []));
-    } catch { setOnomMsg("Errore salvataggio"); }
-  };
   const mettiRiposoOnom = async (o) => {
     const idR = idTurno("Riposo");
     if (!idR) { alert("Manca il turno 'Riposo' tra i tipi di turno."); return; }
@@ -1245,16 +1232,29 @@ function TurniPage({ dipendenti, turni, reload }) {
   const ferieDataT = (dipId, dStr) => ferieTurni.find(f => f.dipendente_id === dipId
     && (f.stato === 'approvata' || !f.stato)
     && f.data_inizio <= dStr && (f.data_fine || f.data_inizio) >= dStr);
-  const apriCfg = () => {
-    setCfgRows(dipTurni.map(d => { const c = cfgDi(d.id); return {
+  const LUNGA_GIORNI = ["Venerdì", "Sabato", "Domenica"];  // giorni in cui si può fissare la Lunga
+  const apriCfg = async () => {
+    let onom = [];
+    try { onom = (await axios.get(`${API}/onomastici`)).data || []; } catch {}
+    const om = {}; onom.forEach(o => { om[o.dipendente_id] = o; });
+    setCfgRows(dipTurni.map(d => { const c = cfgDi(d.id); const o = om[d.id] || {}; return {
       dipendente_id: d.id, nome: `${d.cognome || ''} ${d.nome || ''}`.trim() || d.nome,
-      turno_id: c.turno_id || '', riposo_giorno: c.riposo_giorno || '' }; }));
+      turno_id: c.turno_id || '', riposo_giorno: c.riposo_giorno || '', lunga_giorni: c.lunga_giorni || [],
+      onom_mese: o.mese ?? '', onom_giorno: o.giorno ?? '', onom_attivo: o.attivo ?? false, straniero: o.straniero || false }; }));
     setShowCfg(true);
   };
   const setCfgRow = (i, k, v) => setCfgRows(rows => rows.map((r, j) => j === i ? { ...r, [k]: v } : r));
+  const toggleLunga = (i, g) => setCfgRows(rows => rows.map((r, j) => {
+    if (j !== i) return r;
+    const has = (r.lunga_giorni || []).includes(g);
+    return { ...r, lunga_giorni: has ? r.lunga_giorni.filter(x => x !== g) : [...(r.lunga_giorni || []), g] };
+  }));
   const salvaCfg = async () => {
-    await axios.post(`${API}/turni-config`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, turno_id: r.turno_id || null, riposo_giorno: r.riposo_giorno || null })) });
-    await caricaCfg(); setShowCfg(false);
+    await axios.post(`${API}/turni-config`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, turno_id: r.turno_id || null, riposo_giorno: r.riposo_giorno || null, lunga_giorni: r.lunga_giorni || [] })) });
+    await axios.post(`${API}/onomastici`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, mese: r.onom_mese ? Number(r.onom_mese) : null, giorno: r.onom_giorno ? Number(r.onom_giorno) : null, attivo: r.onom_attivo })) });
+    await caricaCfg();
+    axios.get(`${API}/onomastici/settimana?settimana=${settimana}`).then(r => setOnomSett(r.data || []));
+    setShowCfg(false);
   };
 
   // Riequilibrio automatico: se assegno una Lunga o un Riposo a una persona della
@@ -1280,10 +1280,11 @@ function TurniPage({ dipendenti, turni, reload }) {
     const idRiposo = idTurno("Riposo");
     const idFerie = idTurno("Ferie");
     const updates = [];
+    const idLunga = idTurno("Lunga");
     let configurati = 0;
     dipTurni.forEach(dip => {
       const c = cfgDi(dip.id);
-      if (!c.turno_id && !c.riposo_giorno) return;  // genera solo chi è stato configurato
+      if (!c.turno_id && !c.riposo_giorno && !(c.lunga_giorni || []).length) return;  // genera solo chi è configurato
       configurati++;
       for (let gi = 0; gi < 7; gi++) {
         const date = new Date(lunedi); date.setDate(lunedi.getDate() + gi);
@@ -1293,6 +1294,7 @@ function TurniPage({ dipendenti, turni, reload }) {
         if (ferieDataT(dip.id, dStr)) turnoId = idFerie || idRiposo;                 // ferie approvata
         else if (onomSett.some(o => o.dipendente_id === dip.id && o.giorno_nome === giorno)) turnoId = idRiposo; // onomastico
         else if (c.riposo_giorno && c.riposo_giorno === giorno) turnoId = idRiposo;  // riposo fisso settimanale
+        else if ((c.lunga_giorni || []).includes(giorno)) turnoId = idLunga || c.turno_id || null; // Lunga fissa (ven/sab/dom)
         else turnoId = c.turno_id || null;                                            // turno abituale
         updates.push({ dipendente_id: dip.id, giorno, turno_id: turnoId || null });
       }
@@ -1351,15 +1353,16 @@ function TurniPage({ dipendenti, turni, reload }) {
 
       {showCfg && (
         <div onClick={() => setShowCfg(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
-          <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 720, width: "100%", marginTop: 20 }}>
+          <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 920, width: "100%", marginTop: 20 }}>
             <h3 style={{ marginTop: 0 }}>⚙️ Configura turni dipendenti</h3>
-            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Per ogni dipendente scegli il <b>turno abituale</b> e il suo <b>giorno di riposo fisso</b>. “Genera settimana” assegnerà quel turno tutti i giorni, mettendo Riposo nel giorno scelto e nell’onomastico, e Ferie nei giorni di ferie approvate. Le celle restano comunque modificabili a mano.</p>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Punto unico dei turni. Per ognuno: <b>turno abituale</b>, <b>giorno di riposo fisso</b>, chi fa la <b>Lunga</b> (Ven/Sab/Dom) e l’<b>onomastico</b>. “Genera settimana” usa tutto questo: turno abituale ogni giorno, Lunga nei giorni spuntati, Riposo nel giorno fisso e nell’onomastico, Ferie nei giorni approvati. Le celle restano modificabili a mano. Salva su database (MongoDB Atlas).</p>
+            <div style={{ maxHeight: "60vh", overflow: "auto" }}>
             <table className="dc-table">
-              <thead><tr><th>Dipendente</th><th>Turno abituale</th><th>Riposo fisso</th></tr></thead>
+              <thead><tr><th>Dipendente</th><th>Turno abituale</th><th>Riposo fisso</th><th>Lunga<br/><span style={{fontWeight:400,fontSize:11}}>V · S · D</span></th><th>Onomastico<br/><span style={{fontWeight:400,fontSize:11}}>gg / mm · attivo</span></th></tr></thead>
               <tbody>
                 {cfgRows.map((r, i) => (
                   <tr key={r.dipendente_id}>
-                    <td>{r.nome}</td>
+                    <td>{r.nome}{r.straniero ? <span className="dc-muted"> · straniero</span> : ""}</td>
                     <td>
                       <select className="dc-input" value={r.turno_id} onChange={e => setCfgRow(i, "turno_id", e.target.value)}>
                         <option value="">— nessuno —</option>
@@ -1372,10 +1375,24 @@ function TurniPage({ dipendenti, turni, reload }) {
                         {giorni.map(g => <option key={g} value={g}>{g}</option>)}
                       </select>
                     </td>
+                    <td style={{ whiteSpace: "nowrap" }}>
+                      {LUNGA_GIORNI.map(g => (
+                        <label key={g} title={g} style={{ marginRight: 6, fontSize: 12 }}>
+                          <input type="checkbox" checked={(r.lunga_giorni || []).includes(g)} onChange={() => toggleLunga(i, g)} /> {g[0]}
+                        </label>
+                      ))}
+                    </td>
+                    <td style={{ whiteSpace: "nowrap" }}>
+                      <input className="dc-input" style={{ width: 48, display: "inline-block" }} type="number" min="1" max="31" value={r.onom_giorno ?? ""} onChange={e => setCfgRow(i, "onom_giorno", e.target.value)} />
+                      <span> / </span>
+                      <input className="dc-input" style={{ width: 48, display: "inline-block" }} type="number" min="1" max="12" value={r.onom_mese ?? ""} onChange={e => setCfgRow(i, "onom_mese", e.target.value)} />
+                      <input type="checkbox" style={{ marginLeft: 6 }} title="Riposo onomastico attivo" checked={!!r.onom_attivo} onChange={e => setCfgRow(i, "onom_attivo", e.target.checked)} />
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            </div>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
               <button className="dc-btn" onClick={() => setShowCfg(false)}>Chiudi</button>
               <button className="dc-btn-primary" onClick={salvaCfg}>Salva</button>
@@ -1387,7 +1404,7 @@ function TurniPage({ dipendenti, turni, reload }) {
       <div className="dc-card" style={{ marginBottom: 12 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
           <h3 style={{ margin: 0 }}>🎂 Onomastici di questa settimana</h3>
-          <button className="dc-btn" onClick={apriOnom}>Gestisci date onomastici</button>
+          <button className="dc-btn" onClick={apriCfg}>Gestisci (turni & onomastici)</button>
         </div>
         {onomSett.length === 0
           ? <p className="dc-muted" style={{ marginBottom: 0, marginTop: 8 }}>Nessun onomastico nei giorni lavorativi di questa settimana.</p>
@@ -1403,33 +1420,6 @@ function TurniPage({ dipendenti, turni, reload }) {
           )}
         <p className="dc-muted" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>Il riposo è impostato automaticamente nel giorno dell'onomastico (marcato 🎂 nella griglia). Se ti serve copertura, basta riassegnare un turno in quella cella: la tua scelta ha la precedenza.</p>
       </div>
-
-      {showOnom && (
-        <div onClick={() => setShowOnom(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
-          <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 620, width: "100%", marginTop: 20 }}>
-            <h3 style={{ marginTop: 0 }}>Date onomastici</h3>
-            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Date precompilate dal nome (standard italiane), modificabili. Disattiva chi non deve avere il riposo onomastico. I nomi senza onomastico italiano sono segnati “straniero”.</p>
-            {onomMsg && <div className="dc-muted">{onomMsg}</div>}
-            <table className="dc-table">
-              <thead><tr><th>Dipendente</th><th>Giorno</th><th>Mese</th><th>Attivo</th></tr></thead>
-              <tbody>
-                {onomTab.map((r, i) => (
-                  <tr key={r.dipendente_id}>
-                    <td>{r.nome}{r.straniero ? <span className="dc-muted"> · straniero</span> : ""}</td>
-                    <td><input className="dc-input" style={{ width: 64 }} type="number" min="1" max="31" value={r.giorno ?? ""} onChange={e => setOnomRow(i, "giorno", e.target.value)} /></td>
-                    <td><input className="dc-input" style={{ width: 64 }} type="number" min="1" max="12" value={r.mese ?? ""} onChange={e => setOnomRow(i, "mese", e.target.value)} /></td>
-                    <td><input type="checkbox" checked={!!r.attivo} onChange={e => setOnomRow(i, "attivo", e.target.checked)} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
-              <button className="dc-btn" onClick={() => setShowOnom(false)}>Chiudi</button>
-              <button className="dc-btn-primary" onClick={salvaOnom}>Salva</button>
-            </div>
-          </div>
-        </div>
-      )}
 
       <div className="dc-card dc-scroll-x">
         <table className="dc-table dc-turni-table">
