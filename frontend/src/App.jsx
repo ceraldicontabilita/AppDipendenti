@@ -2246,6 +2246,21 @@ function TimbraturePage({ dipendenti, getDipendente }) {
   const loadTimb = () => axios.get(`${T}?data=${data}`).then(r => setTimb(r.data.timbrature || [])).catch(() => setTimb([]));
   useEffect(() => { loadTimb(); }, [data]);
 
+  // Turni pianificati per il giorno selezionato (stessi endpoint della pagina Presenze)
+  const [tipiTurno, setTipiTurno] = useState([]);
+  const [assegn, setAssegn] = useState([]);
+  const NOMI_G = ["Domenica", "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato"];
+  const lunISOdi = (ymd) => { const d = new Date(ymd + "T12:00:00"); const off = (d.getDay() + 6) % 7; d.setDate(d.getDate() - off); return d.toISOString().slice(0, 10); };
+  const giornoNomeDi = (ymd) => NOMI_G[new Date(ymd + "T12:00:00").getDay()];
+  useEffect(() => { axios.get("/api/dipendenti-cloud/turni").then(r => setTipiTurno(r.data || [])).catch(() => {}); }, []);
+  useEffect(() => { axios.get(`/api/dipendenti-cloud/assegnazioni-turni?settimana=${lunISOdi(data)}`).then(r => setAssegn(r.data || [])).catch(() => setAssegn([])); }, [data]);
+  const nomeTurno = (id) => (tipiTurno.find(t => t.id === id) || {}).nome;
+  const pianificatoDi = (dipId) => {
+    const a = assegn.find(x => x.dipendente_id === dipId && x.settimana === lunISOdi(data) && x.giorno === giornoNomeDi(data));
+    return a ? (nomeTurno(a.turno_id) || null) : null;
+  };
+  const lavorativo = (n) => n && !["Riposo", "Ferie"].includes(n);
+
   const salvaSede = async () => {
     setBusy("sede"); setMsg("");
     try { await axios.post(`${T}/sede`, { ...sede, lat: parseFloat(sede.lat), lng: parseFloat(sede.lng), raggio_m: parseInt(sede.raggio_m) || 200 });
@@ -2259,16 +2274,23 @@ function TimbraturePage({ dipendenti, getDipendente }) {
       () => setMsg("Impossibile ottenere la posizione."), { enableHighAccuracy: true, timeout: 10000 });
   };
 
-  // Raggruppa per dipendente: entrata (prima), uscita (ultima), ore, stato sede
+  // Confronto atteso vs effettivo: unione di chi ha timbrato e di chi era
+  // pianificato a lavorare quel giorno (così emergono anche le assenze).
   const perDip = (() => {
     const m = {};
+    const ensure = (k, nome) => { if (!m[k]) m[k] = { dipId: k, nome: nome || "", entrata: null, uscita: null, fuori: false }; return m[k]; };
     for (const t of timb) {
-      const k = t.dipendente_id;
-      if (!m[k]) m[k] = { nome: t.dipendente_nome, entrata: null, uscita: null, fuori: false, items: [] };
-      m[k].items.push(t);
-      if (t.tipo === "entrata" && !m[k].entrata) m[k].entrata = t;
-      if (t.tipo === "uscita") m[k].uscita = t;
-      if (t.fuori_sede) m[k].fuori = true;
+      const g = ensure(t.dipendente_id, t.dipendente_nome);
+      if (t.tipo === "entrata" && !g.entrata) g.entrata = t;
+      if (t.tipo === "uscita") g.uscita = t;
+      if (t.fuori_sede) g.fuori = true;
+    }
+    // aggiungi i pianificati a lavorare che non hanno (ancora) timbrato
+    for (const a of assegn) {
+      if (a.settimana !== lunISOdi(data) || a.giorno !== giornoNomeDi(data)) continue;
+      if (!lavorativo(nomeTurno(a.turno_id))) continue;
+      const d = getDipendente ? getDipendente(a.dipendente_id) : null;
+      ensure(a.dipendente_id, d ? `${d.cognome || ""} ${d.nome || ""}`.trim() : a.dipendente_id);
     }
     return Object.values(m).map(g => {
       let ore = null;
@@ -2276,7 +2298,13 @@ function TimbraturePage({ dipendenti, getDipendente }) {
         const [h1, mi1] = g.entrata.ora.split(":").map(Number); const [h2, mi2] = g.uscita.ora.split(":").map(Number);
         ore = Math.round(((h2 * 60 + mi2) - (h1 * 60 + mi1)) / 6) / 10;
       }
-      return { ...g, ore };
+      const pian = pianificatoDi(g.dipId);
+      let stato = ["—", "default"];
+      if (lavorativo(pian) && !g.entrata) stato = ["Assente", "danger"];
+      else if (!lavorativo(pian) && g.entrata) stato = [pian ? `Extra (${pian})` : "Extra (non in turno)", "warning"];
+      else if (g.entrata && g.uscita) stato = ["OK", "success"];
+      else if (g.entrata) stato = ["In corso", "info"];
+      return { ...g, ore, pian, stato };
     }).sort((a, b) => (a.nome || "").localeCompare(b.nome || ""));
   })();
 
@@ -2315,15 +2343,17 @@ function TimbraturePage({ dipendenti, getDipendente }) {
         </div>
         {perDip.length === 0 ? <p className="dc-muted" style={{ marginTop: 12 }}>Nessuna timbratura per questa data.</p> : (
           <table className="dc-table" style={{ marginTop: 12 }}>
-            <thead><tr><th>Dipendente</th><th>Entrata</th><th>Uscita</th><th>Ore</th><th>Sede</th></tr></thead>
+            <thead><tr><th>Dipendente</th><th>Turno pianificato</th><th>Entrata</th><th>Uscita</th><th>Ore</th><th>Sede</th><th>Esito</th></tr></thead>
             <tbody>
               {perDip.map((g, i) => (
                 <tr key={i}>
                   <td>{g.nome}</td>
+                  <td>{g.pian || "—"}</td>
                   <td>{g.entrata?.ora || "—"}</td>
                   <td>{g.uscita?.ora || (g.entrata ? "in corso" : "—")}</td>
                   <td>{g.ore != null ? `${g.ore} h` : "—"}</td>
-                  <td>{g.fuori ? <Badge variant="danger">fuori sede</Badge> : <Badge variant="success">in sede</Badge>}</td>
+                  <td>{g.entrata ? (g.fuori ? <Badge variant="danger">fuori sede</Badge> : <Badge variant="success">in sede</Badge>) : "—"}</td>
+                  <td><Badge variant={g.stato[1]}>{g.stato[0]}</Badge></td>
                 </tr>
               ))}
             </tbody>
