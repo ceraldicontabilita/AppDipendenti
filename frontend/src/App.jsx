@@ -2503,7 +2503,8 @@ function TimbraturePage({ dipendenti, getDipendente }) {
           <input type="date" className="dc-input" style={{ width: "auto" }} value={data} onChange={e => setData(e.target.value)} />
         </div>
         {perDip.length === 0 ? <p className="dc-muted" style={{ marginTop: 12 }}>Nessuna timbratura per questa data.</p> : (
-          <table className="dc-table" style={{ marginTop: 12 }}>
+          <div style={{ overflowX: "auto", marginTop: 12, WebkitOverflowScrolling: "touch" }}>
+          <table className="dc-table" style={{ minWidth: 620, whiteSpace: "nowrap" }}>
             <thead><tr><th>Dipendente</th><th>Turno pianificato</th><th>Entrata</th><th>Uscita</th><th>Ore</th><th>Sede</th><th>Esito</th></tr></thead>
             <tbody>
               {perDip.map((g, i) => (
@@ -2519,6 +2520,7 @@ function TimbraturePage({ dipendenti, getDipendente }) {
               ))}
             </tbody>
           </table>
+          </div>
         )}
         <p className="dc-muted" style={{ fontSize: 12, marginTop: 10 }}>Confronta queste presenze reali con i turni pianificati nella pagina Presenze (il calendario sovrappone già i turni).</p>
       </div>
