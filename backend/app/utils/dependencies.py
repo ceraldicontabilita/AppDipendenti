@@ -23,17 +23,15 @@ async def get_current_user(
 ) -> Dict[str, Any]:
     """
     Dependency to get current authenticated user from JWT token.
-    Returns default user when auth is disabled (no token provided).
+    Fail-closed: senza token valido è 401 (nessun utente admin di default).
     """
-    # Auth bypass: return default user when no credentials provided
     if credentials is None:
-        return {
-            "user_id": "default_user",
-            "email": "admin@erp.local",
-            "name": "Amministratore",
-            "role": "admin"
-        }
-    
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Autenticazione richiesta",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     token = credentials.credentials
     
     try:

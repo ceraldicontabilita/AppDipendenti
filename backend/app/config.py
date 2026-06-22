@@ -29,7 +29,10 @@ def _shared_auth_secret() -> str:
             return val
     except Exception:
         pass
-    return os.environ.get("JWT_SECRET") or "changeme-secret-key"
+    # Ultima spiaggia: env JWT_SECRET, altrimenti un segreto casuale di processo
+    # (mai un literal prevedibile come "changeme": permetterebbe di forgiare token).
+    import secrets as _s
+    return os.environ.get("JWT_SECRET") or _s.token_hex(32)
 
 
 class Settings:

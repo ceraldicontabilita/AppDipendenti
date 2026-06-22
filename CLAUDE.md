@@ -38,8 +38,13 @@ Fondo EST (sanitario), Fon.Te. (previdenza compl.).
 - Login admin: dalla schermata PIN → **"Accesso amministratore"** (PIN = env `PIN_CODE`),
   NON dalla scheda di un dipendente.
 - Sessione admin **2 ore** (`ADMIN_TOKEN_EXPIRE_MINUTES`).
-- Backend strict: `require_admin` / `require_staff` in `utils/dependencies.py`.
-  `/api/contracts` = solo admin; `/api/dipendenti-cloud` = admin o responsabile_turni.
+- Backend strict: `require_admin` / `require_staff` in `utils/dependencies.py`
+  (fail-closed: senza token valido → 401, nessun "admin di default"). Protetti:
+  `/api/contracts`, `/api/cedolini`, `/api/tfr`, `/api/paghe`, `/api/bonifici`,
+  `/api/salari-v2`, `/api/dimissioni` = admin; `/api/dipendenti-cloud`,
+  `/api/dipendenti`, `/api/fascicolo`, `/api/giustificativi`, `/api/shifts`,
+  `/api/attendance` = staff (admin o responsabile_turni). Portale: `get_identity`/
+  `require_roles` per-endpoint. CORS senza wildcard; segreto JWT mai literal.
 - Frontend: `App.jsx` allega il token e su 401/403 riporta al PIN; `main.jsx`
   `RequireRole` valida ruolo + scadenza token.
 

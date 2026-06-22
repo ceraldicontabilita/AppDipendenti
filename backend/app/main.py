@@ -50,16 +50,20 @@ def register_routers():
     app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
     app.include_router(pin_login.router, prefix="/api/auth", tags=["PIN Login"])
 
+    # Dipendenze di sicurezza riusate. STAFF = admin o responsabile_turni; ADMIN = solo admin.
+    STAFF = [Depends(require_staff)]
+    ADMIN = [Depends(require_admin)]
+
     from .routers.employees import dipendenti, buste_paga, employee_contracts, giustificativi, shifts, fascicolo_dipendente, accessi
-    app.include_router(dipendenti.router, prefix="/api/dipendenti", tags=["Dipendenti"])
-    app.include_router(accessi.router, prefix="/api/accessi", tags=["Accessi"])
-    app.include_router(buste_paga.router, prefix="/api", tags=["Buste Paga"])
+    app.include_router(dipendenti.router, prefix="/api/dipendenti", tags=["Dipendenti"], dependencies=STAFF)
+    app.include_router(accessi.router, prefix="/api/accessi", tags=["Accessi"])  # già protetto per-endpoint (admin)
+    app.include_router(buste_paga.router, prefix="/api", tags=["Buste Paga"], dependencies=ADMIN)
     # Contratti: solo amministratore (JWT valido + ruolo admin).
     app.include_router(employee_contracts.router, prefix="/api/contracts", tags=["Contratti"],
-                       dependencies=[Depends(require_admin)])
-    app.include_router(giustificativi.router, prefix="/api/giustificativi", tags=["Giustificativi"])
-    app.include_router(shifts.router, prefix="/api/shifts", tags=["Turni"])
-    app.include_router(fascicolo_dipendente.router, prefix="/api", tags=["Fascicolo"])
+                       dependencies=ADMIN)
+    app.include_router(giustificativi.router, prefix="/api/giustificativi", tags=["Giustificativi"], dependencies=STAFF)
+    app.include_router(shifts.router, prefix="/api/shifts", tags=["Turni"], dependencies=STAFF)
+    app.include_router(fascicolo_dipendente.router, prefix="/api", tags=["Fascicolo"], dependencies=STAFF)
 
     from .routers import cedolini, cedolini_riconciliazione, tfr, attendance, dimissioni, richieste, portale_buste, turni, notifiche
     from .routers import dipendenti_cloud
@@ -76,17 +80,17 @@ def register_routers():
     # Turni del responsabile carica dati da questo router).
     app.include_router(dipendenti_cloud.router, prefix="/api", tags=["Dipendenti Cloud"],
                        dependencies=[Depends(require_staff)])
-    app.include_router(cedolini_riconciliazione.router, prefix="/api/cedolini", tags=["Cedolini Ric."])
-    app.include_router(cedolini.router, prefix="/api/cedolini", tags=["Cedolini"])
-    app.include_router(tfr.router, prefix="/api/tfr", tags=["TFR"])
-    app.include_router(attendance.router, prefix="/api/attendance", tags=["Presenze"])
-    app.include_router(dimissioni.router, prefix="/api/dimissioni", tags=["Dimissioni"])
+    app.include_router(cedolini_riconciliazione.router, prefix="/api/cedolini", tags=["Cedolini Ric."], dependencies=ADMIN)
+    app.include_router(cedolini.router, prefix="/api/cedolini", tags=["Cedolini"], dependencies=ADMIN)
+    app.include_router(tfr.router, prefix="/api/tfr", tags=["TFR"], dependencies=ADMIN)
+    app.include_router(attendance.router, prefix="/api/attendance", tags=["Presenze"], dependencies=STAFF)
+    app.include_router(dimissioni.router, prefix="/api/dimissioni", tags=["Dimissioni"], dependencies=ADMIN)
 
     from .routers import libro_unico_parser, f24_parser, bonifici_stipendi, salari_unificati_v2
-    app.include_router(libro_unico_parser.router, prefix="/api/paghe", tags=["Libro Unico"])
-    app.include_router(f24_parser.router, prefix="/api/paghe", tags=["F24 Parser"])
-    app.include_router(bonifici_stipendi.router, tags=["Bonifici Stipendi"])
-    app.include_router(salari_unificati_v2.router, prefix="/api/salari-v2", tags=["Salari V2"])
+    app.include_router(libro_unico_parser.router, prefix="/api/paghe", tags=["Libro Unico"], dependencies=ADMIN)
+    app.include_router(f24_parser.router, prefix="/api/paghe", tags=["F24 Parser"], dependencies=ADMIN)
+    app.include_router(bonifici_stipendi.router, tags=["Bonifici Stipendi"], dependencies=ADMIN)
+    app.include_router(salari_unificati_v2.router, prefix="/api/salari-v2", tags=["Salari V2"], dependencies=ADMIN)
 
     logger.info("✅ Router AppDipendenti registrati")
 
