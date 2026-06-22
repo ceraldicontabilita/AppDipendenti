@@ -1547,6 +1547,13 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
   const [importing, setImporting] = useState(false);
   const [importMsg, setImportMsg] = useState(null);
   const fileRef = useRef(null);
+  const [soloMancanti, setSoloMancanti] = useState(false);
+  const [vistaAnno, setVistaAnno] = useState(false);
+  const [annoMatrix, setAnnoMatrix] = useState(null);
+  const [cercaQ, setCercaQ] = useState("");
+  const [cercaRes, setCercaRes] = useState(null);
+  const [cercaBusy, setCercaBusy] = useState(false);
+  const [rescanMsg, setRescanMsg] = useState("");
   const mesi = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
 
   const vuota = () => ({ importo_busta: "", bonifico_ricevuto: false, bonifico_importo: "", bonifico_data: "", acconti: [] });
@@ -1595,6 +1602,58 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
   };
 
   const eur = (n) => (n || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  // Stato pagamento di una paga: ok / parziale / manca / bonifico-senza-busta / null
+  const statoPaga = (p) => {
+    if (!p) return null;
+    const busta = parseFloat(p.importo_busta) || 0;
+    const bon = parseFloat(p.bonifico_importo) || 0;
+    const acc = (p.acconti || []).reduce((a, x) => a + (parseFloat(x.importo) || 0), 0);
+    if (busta <= 0 && bon <= 0 && acc <= 0) return null;
+    const pagato = bon + acc;
+    if (busta <= 0 && bon > 0) return "bonifico";
+    if (pagato + 0.5 >= busta) return "ok";
+    if (pagato > 0) return "parziale";
+    return "manca";
+  };
+
+  // Vista annuale: carica i 12 mesi dell'anno selezionato
+  useEffect(() => {
+    if (!vistaAnno) return;
+    let vivo = true;
+    (async () => {
+      const res = await Promise.all([1,2,3,4,5,6,7,8,9,10,11,12].map(m =>
+        axios.get(`${API}/paghe?anno=${anno}&mese=${m}`).then(r => [m, r.data || []]).catch(() => [m, []])));
+      if (!vivo) return;
+      const mtx = {};
+      res.forEach(([m, rows]) => { mtx[m] = {}; rows.forEach(p => { mtx[m][p.dipendente_id] = p; }); });
+      setAnnoMatrix(mtx);
+    })();
+    return () => { vivo = false; };
+  }, [vistaAnno, anno]);
+
+  const cercaVoce = async () => {
+    const q = cercaQ.trim();
+    if (!q) return;
+    setCercaBusy(true); setCercaRes(null);
+    const isCode = /^[A-Za-z]\d{3,5}$/.test(q);
+    const params = isCode ? `codice=${encodeURIComponent(q.toUpperCase())}` : `testo=${encodeURIComponent(q)}`;
+    try {
+      const r = await axios.get(`${API}/cedolini/cerca-voce?${params}`);
+      setCercaRes(r.data);
+    } catch (e) {
+      setCercaRes({ risultati: [], totale: 0, errore: e?.response?.data?.detail || "Errore ricerca" });
+    } finally { setCercaBusy(false); }
+  };
+
+  const riscansiona = async () => {
+    if (!window.confirm("Riscansiona i cedolini storici con PDF salvato? Può richiedere fino a un minuto.")) return;
+    setRescanMsg("Riscansione in corso…");
+    try {
+      const r = await axios.post(`${API}/cedolini/riscansiona`);
+      setRescanMsg(`✓ Riscansione completata: ${r.data.aggiornati} cedolini aggiornati, ${r.data.errori} senza PDF/errore.`);
+    } catch (e) { setRescanMsg("⚠ " + (e?.response?.data?.detail || "Errore riscansione")); }
+  };
 
   const handleImportLul = async (e) => {
     const fs = Array.from(e.target.files || []);
@@ -1660,52 +1719,113 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
         </div>
       </div>
 
-      {/* Riepilogo a colpo d'occhio: busta vs bonifico emesso per il mese selezionato */}
+      {/* Motore di ricerca voci cedolino + riscansione storico */}
       <div className="dc-card" style={{ marginBottom: 16 }}>
-        <h3 style={{ marginTop: 0 }}>Riepilogo {mesi[mese - 1]} {anno} — busta vs bonifico emesso</h3>
-        <div style={{ overflowX: "auto" }}>
-          <table className="dc-table" style={{ minWidth: 580, whiteSpace: "nowrap" }}>
-            <thead><tr>
-              <th>Dipendente</th>
-              <th style={{ textAlign: "right" }}>Busta €</th>
-              <th style={{ textAlign: "right" }}>Acconti €</th>
-              <th style={{ textAlign: "right" }}>Bonifico emesso €</th>
-              <th>Stato</th>
-            </tr></thead>
-            <tbody>
-              {dipendenti.map(d => {
-                const r = get(d.id);
-                const busta = parseFloat(r.importo_busta) || 0;
-                const bon = parseFloat(r.bonifico_importo) || 0;
-                const acc = (r.acconti || []).reduce((a, x) => a + (parseFloat(x.importo) || 0), 0);
-                if (busta <= 0 && bon <= 0 && acc <= 0) return null;
-                const pagato = bon + acc;
-                let stato;
-                if (busta <= 0 && bon > 0) stato = <Badge variant="warning">bonifico senza busta</Badge>;
-                else if (pagato + 0.5 >= busta) stato = <Badge variant="success">✓ pagato</Badge>;
-                else if (pagato > 0) stato = <Badge variant="warning">parziale · manca € {eur(busta - pagato)}</Badge>;
-                else stato = <Badge variant="danger">⚠ da pagare</Badge>;
-                return (
-                  <tr key={d.id}>
-                    <td>{d.cognome ? `${d.cognome} ${d.nome?.[0] || ''}.` : d.nome}</td>
-                    <td style={{ textAlign: "right" }}>{busta ? eur(busta) : "—"}</td>
-                    <td style={{ textAlign: "right" }}>{acc ? eur(acc) : "—"}</td>
-                    <td style={{ textAlign: "right" }}>{bon ? eur(bon) : "—"}</td>
-                    <td>{stato}</td>
-                  </tr>
-                );
-              })}
-              <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4" }}>
-                <td>Totale</td>
-                <td style={{ textAlign: "right" }}>{eur(totBuste)}</td>
-                <td style={{ textAlign: "right" }}>{eur(totAcconti)}</td>
-                <td style={{ textAlign: "right" }}>{eur(totBonifici)}</td>
-                <td></td>
-              </tr>
-            </tbody>
-          </table>
+        <h3 style={{ marginTop: 0 }}>🔎 Cerca nelle buste (qualsiasi voce)</h3>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <input className="dc-input" style={{ flex: "1 1 240px" }} placeholder="Codice (es. F09081) o testo (es. 730, 13ma, L.207)"
+            value={cercaQ} onChange={e => setCercaQ(e.target.value)} onKeyDown={e => e.key === "Enter" && cercaVoce()} />
+          <button className="dc-btn-primary" disabled={cercaBusy} onClick={cercaVoce}>{cercaBusy ? "Cerco…" : "Cerca"}</button>
+          <button className="dc-btn" onClick={riscansiona} title="Rilegge i PDF dei cedolini già caricati per popolare la ricerca sullo storico">Riscansiona storico</button>
         </div>
-        <p className="dc-muted" style={{ fontSize: 12, marginTop: 8 }}>“Pagato” = bonifico emesso + acconti ≥ importo busta. Cambia mese/anno in alto per altri periodi.</p>
+        {rescanMsg && <div className="dc-muted" style={{ marginTop: 8 }}>{rescanMsg}</div>}
+        {cercaRes && (
+          <div style={{ marginTop: 10, overflowX: "auto" }}>
+            {cercaRes.errore ? <div className="dc-muted">⚠ {cercaRes.errore}</div>
+              : cercaRes.totale === 0 ? <div className="dc-muted">Nessun risultato. Per lo storico premi prima “Riscansiona storico”.</div>
+              : <table className="dc-table" style={{ minWidth: 560, whiteSpace: "nowrap" }}>
+                  <thead><tr><th>Dipendente</th><th>Periodo</th><th>Codice</th><th>Descrizione</th><th style={{ textAlign: "right" }}>Importo</th></tr></thead>
+                  <tbody>
+                    {cercaRes.risultati.map((x, i) => (
+                      <tr key={i}><td>{x.dipendente}</td><td>{mesi[(x.mese || 1) - 1]} {x.anno}</td><td>{x.codice}</td><td>{x.descrizione}</td><td style={{ textAlign: "right" }}>{x.importo || "—"}</td></tr>
+                    ))}
+                  </tbody>
+                </table>}
+            {cercaRes.totale > 0 && <p className="dc-muted" style={{ fontSize: 12, marginTop: 6 }}>{cercaRes.totale} risultati.</p>}
+          </div>
+        )}
+      </div>
+
+      {/* Riepilogo busta vs bonifico — mensile o annuale */}
+      <div className="dc-card" style={{ marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <h3 style={{ margin: 0 }}>{vistaAnno ? `Riepilogo anno ${anno}` : `Riepilogo ${mesi[mese - 1]} ${anno}`} — busta vs bonifico</h3>
+          <div style={{ display: "flex", gap: 14, fontSize: 13 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}><input type="checkbox" checked={soloMancanti} onChange={e => setSoloMancanti(e.target.checked)} /> Solo chi manca</label>
+            <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}><input type="checkbox" checked={vistaAnno} onChange={e => setVistaAnno(e.target.checked)} /> Vista annuale</label>
+          </div>
+        </div>
+
+        {!vistaAnno && (
+          <div style={{ overflowX: "auto", marginTop: 10 }}>
+            <table className="dc-table" style={{ minWidth: 580, whiteSpace: "nowrap" }}>
+              <thead><tr><th>Dipendente</th><th style={{ textAlign: "right" }}>Busta €</th><th style={{ textAlign: "right" }}>Acconti €</th><th style={{ textAlign: "right" }}>Bonifico emesso €</th><th>Stato</th></tr></thead>
+              <tbody>
+                {dipendenti.map(d => {
+                  const r = get(d.id);
+                  const busta = parseFloat(r.importo_busta) || 0;
+                  const bon = parseFloat(r.bonifico_importo) || 0;
+                  const acc = (r.acconti || []).reduce((a, x) => a + (parseFloat(x.importo) || 0), 0);
+                  const cat = statoPaga(r);
+                  if (!cat) return null;
+                  if (soloMancanti && cat === "ok") return null;
+                  const pagato = bon + acc;
+                  const stato = cat === "bonifico" ? <Badge variant="warning">bonifico senza busta</Badge>
+                    : cat === "ok" ? <Badge variant="success">✓ pagato</Badge>
+                    : cat === "parziale" ? <Badge variant="warning">parziale · manca € {eur(busta - pagato)}</Badge>
+                    : <Badge variant="danger">⚠ da pagare</Badge>;
+                  return (
+                    <tr key={d.id}>
+                      <td>{d.cognome ? `${d.cognome} ${d.nome?.[0] || ''}.` : d.nome}</td>
+                      <td style={{ textAlign: "right" }}>{busta ? eur(busta) : "—"}</td>
+                      <td style={{ textAlign: "right" }}>{acc ? eur(acc) : "—"}</td>
+                      <td style={{ textAlign: "right" }}>{bon ? eur(bon) : "—"}</td>
+                      <td>{stato}</td>
+                    </tr>
+                  );
+                })}
+                {!soloMancanti && (
+                  <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4" }}>
+                    <td>Totale</td>
+                    <td style={{ textAlign: "right" }}>{eur(totBuste)}</td>
+                    <td style={{ textAlign: "right" }}>{eur(totAcconti)}</td>
+                    <td style={{ textAlign: "right" }}>{eur(totBonifici)}</td>
+                    <td></td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+            <p className="dc-muted" style={{ fontSize: 12, marginTop: 8 }}>“Pagato” = bonifico emesso + acconti ≥ importo busta.</p>
+          </div>
+        )}
+
+        {vistaAnno && (
+          <div style={{ overflowX: "auto", marginTop: 10 }}>
+            {!annoMatrix ? <div className="dc-muted">Carico l'anno…</div> : (
+              <table className="dc-table" style={{ minWidth: 760, whiteSpace: "nowrap", fontSize: 13 }}>
+                <thead><tr><th>Dipendente</th>{mesi.map((m, i) => <th key={i} title={m} style={{ textAlign: "center" }}>{m.slice(0, 3)}</th>)}</tr></thead>
+                <tbody>
+                  {dipendenti.map(d => {
+                    const celle = mesi.map((_, i) => statoPaga((annoMatrix[i + 1] || {})[d.id]));
+                    if (soloMancanti && !celle.some(c => c && c !== "ok")) return null;
+                    if (!soloMancanti && celle.every(c => !c)) return null;
+                    return (
+                      <tr key={d.id}>
+                        <td>{d.cognome ? `${d.cognome} ${d.nome?.[0] || ''}.` : d.nome}</td>
+                        {celle.map((c, i) => {
+                          const sym = c === "ok" ? "✓" : c === "manca" ? "⚠" : c === "parziale" ? "~" : c === "bonifico" ? "€" : "·";
+                          const col = c === "ok" ? "#3d8168" : c === "manca" ? "#d35f4e" : c === "parziale" ? "#b9770e" : c === "bonifico" ? "#5b7a6b" : "#cbd2c9";
+                          return <td key={i} style={{ textAlign: "center", color: col, fontWeight: 700 }} title={`${mesi[i]}: ${c || "nessun dato"}`}>{sym}</td>;
+                        })}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+            <p className="dc-muted" style={{ fontSize: 12, marginTop: 8 }}>✓ pagato · ⚠ da pagare · ~ parziale · € bonifico senza busta · · nessun dato. Passa il mouse su una cella per il dettaglio.</p>
+          </div>
+        )}
       </div>
 
       {importMsg && (
