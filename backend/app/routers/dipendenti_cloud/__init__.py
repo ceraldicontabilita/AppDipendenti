@@ -1700,7 +1700,10 @@ async def get_dashboard_stats():
     today = datetime.now().strftime("%Y-%m-%d")
     presenze_oggi = await get_db().presenze_cloud.count_documents({"data": today, "stato": "presente"})
 
-    alert_aperti = await get_db().alerts.count_documents({"stato": "aperto"})
+    # Solo alert HR: la collezione `alerts` è condivisa con l'ERP contabile, qui
+    # mostriamo soltanto i moduli del personale (niente fatture/fornitori/banca…).
+    alert_aperti = await get_db().alerts.count_documents(
+        {"stato": "aperto", "modulo": {"$in": MODULI_HR}})
 
     return {
         "totale_dipendenti": len(dipendenti),
@@ -1712,12 +1715,22 @@ async def get_dashboard_stats():
     }
 
 
+# Moduli di competenza HR (gli altri appartengono all'ERP contabile OpenClaw).
+MODULI_HR = ["dipendenti", "cedolini"]
+
+
 @router.get("/alerts")
 async def lista_alert(modulo: str = "", severita: str = ""):
-    """Elenco degli alert aperti (scadenze, contestazioni, dati incompleti...)."""
+    """Elenco degli alert aperti HR (scadenze contratti/prova, contestazioni…).
+    La collezione `alerts` è condivisa con la contabilità: qui filtriamo ai soli
+    moduli del personale."""
     q = {"stato": "aperto"}
     if modulo:
+        if modulo not in MODULI_HR:
+            return {"totale": 0, "alerts": []}
         q["modulo"] = modulo
+    else:
+        q["modulo"] = {"$in": MODULI_HR}
     if severita:
         q["severita"] = severita
     alerts = await get_db().alerts.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
