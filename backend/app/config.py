@@ -57,10 +57,13 @@ PIN_CODE = settings.PIN_CODE
 # Feature flag (usati da require_feature). Vuoto = nessuna feature gated attiva.
 FEATURES: dict = {}
 
+# Origini consentite (CORS). NIENTE wildcard "*": con endpoint pubblici + credenziali
+# permetterebbe a qualunque sito di leggere i dati dal browser di un visitatore.
+# Il frontend dell'app è servito dallo stesso dominio (same-origin, non serve CORS).
 CORS_ORIGINS: List[str] = [
     "http://localhost:3000",
     "http://localhost:5173",
     "https://ceraldicontabilita.github.io",
     "https://gestionale-ceraldi.onrender.com",
-    "*",
+    "https://appdipendenti.onrender.com",
 ]

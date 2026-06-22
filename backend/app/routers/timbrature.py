@@ -24,6 +24,7 @@ router = APIRouter()
 COLL = "timbrature"
 COLL_SET = "impostazioni"
 RAGGIO_DEFAULT_M = 200
+MARGINE_GPS_MAX_M = 75  # tolleranza massima sull'accuracy dichiarata dal client
 
 
 def _now() -> datetime:
@@ -78,12 +79,19 @@ async def timbra(payload: Dict[str, Any] = Body(...),
             fuori_sede = True
         else:
             try:
-                distanza_m = round(_haversine_m(float(lat), float(lng), float(sede["lat"]), float(sede["lng"])))
-                # tolleranza per l'imprecisione GPS riportata dal telefono
-                margine = int(accuracy) if isinstance(accuracy, (int, float)) else 0
+                la, lo = float(lat), float(lng)
+                if not (-90 <= la <= 90 and -180 <= lo <= 180):
+                    raise ValueError("coordinate fuori range")
+                distanza_m = round(_haversine_m(la, lo, float(sede["lat"]), float(sede["lng"])))
+                # Tolleranza per l'imprecisione GPS, ma CAPPATA: un client malevolo
+                # non può dichiarare accuracy enorme per aggirare il geofence.
+                margine = 0
+                if isinstance(accuracy, (int, float)) and accuracy > 0:
+                    margine = min(int(accuracy), MARGINE_GPS_MAX_M)
                 fuori_sede = max(0, distanza_m - margine) > raggio
             except (ValueError, TypeError):
                 distanza_m = None
+                fuori_sede = bool(sede.get("blocca_fuori_sede"))
         if fuori_sede and sede.get("blocca_fuori_sede"):
             raise HTTPException(403,
                 f"Sei fuori sede ({'~' + str(distanza_m) + ' m dalla sede' if distanza_m is not None else 'posizione non valida'}). "
