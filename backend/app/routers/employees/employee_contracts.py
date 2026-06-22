@@ -439,6 +439,7 @@ async def _genera_doc(db, employee: Dict[str, Any], ct: Dict[str, str],
         "file_data": file_base64,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "stipendio_mensile": mensile,
+        "iter_stato": "bozza",
         "additional_data": additional_data or {},
     }
     await db["employee_contracts"].insert_one(record.copy())
@@ -702,9 +703,10 @@ def _smtp_send(to_addr: str, subject: str, body: str, allegati: List[Dict[str, A
     msg["Subject"] = subject
     msg.set_content(body)
     for a in allegati:
-        msg.add_attachment(a["data"], maintype="application",
-                           subtype="vnd.openxmlformats-officedocument.wordprocessingml.document",
-                           filename=a["filename"])
+        fn = a["filename"]
+        subtype = "pdf" if fn.lower().endswith(".pdf") else \
+            "vnd.openxmlformats-officedocument.wordprocessingml.document"
+        msg.add_attachment(a["data"], maintype="application", subtype=subtype, filename=fn)
     if port == 465:
         with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context()) as s:
             s.login(user, pwd)
@@ -768,18 +770,156 @@ async def send_contract(contract_id: str, data: Dict[str, Any] = Body(default={}
     elenco = ", ".join(d["filename"] for d in documenti)
     corpo = (
         f"Gentile {nome},\n\n"
-        f"in allegato trova i documenti da sottoscrivere per l'assunzione: {elenco}.\n"
-        f"La preghiamo di prenderne visione e di firmarli per accettazione.\n\n"
+        f"in allegato trova i documenti di assunzione da sottoscrivere: {elenco}.\n"
+        f"La preghiamo di firmarli per accettazione e di restituirli a Ceraldi Group, che "
+        f"provvederà alla controfirma e all'invio della copia definitiva.\n\n"
         f"Ceraldi Group S.r.l."
     )
     import asyncio
     await asyncio.to_thread(_smtp_send, to_addr,
-                            f"Documenti di assunzione — {contract.get('contract_name','')}", corpo, allegati)
+                            f"Documenti di assunzione da firmare — {contract.get('contract_name','')}", corpo, allegati)
     await db["employee_contracts"].update_one(
         {"id": contract_id},
-        {"$set": {"inviato_il": datetime.now(timezone.utc).isoformat(), "inviato_a": to_addr}})
+        {"$set": {"inviato_il": datetime.now(timezone.utc).isoformat(), "inviato_a": to_addr,
+                  "iter_stato": "inviata"}})
     return {"ok": True, "inviato_a": to_addr, "allegati": len(allegati),
             "documenti": [d["filename"] for d in documenti], "accessori_mancanti": mancanti}
+
+
+# ---------------------------------------------------------------------------
+# Iter di sottoscrizione (manuale): bozza -> inviata -> firmato_dipendente ->
+# definitivo (controfirma Ceraldi + invio + archiviazione nel fascicolo).
+# ---------------------------------------------------------------------------
+ITER_STATI = ["bozza", "inviata", "firmato_dipendente", "definitivo"]
+
+
+@router.post("/carica-firmato/{contract_id}")
+@handle_errors
+async def carica_firmato(contract_id: str, file: UploadFile = File(...)) -> Dict[str, Any]:
+    """Carica il contratto FIRMATO dal dipendente e restituito a Ceraldi (PDF).
+    Porta lo stato a 'firmato_dipendente'."""
+    db = Database.get_db()
+    contract = await db["employee_contracts"].find_one({"id": contract_id}, {"_id": 0, "id": 1})
+    if not contract:
+        raise HTTPException(404, "Contratto non trovato")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "File vuoto")
+    if len(raw) > 20 * 1024 * 1024:
+        raise HTTPException(400, "File troppo grande (max 20MB)")
+    await db["employee_contracts"].update_one(
+        {"id": contract_id},
+        {"$set": {
+            "pdf_firmato_dipendente": base64.b64encode(raw).decode("ascii"),
+            "firmato_filename": file.filename or "contratto_firmato.pdf",
+            "iter_stato": "firmato_dipendente",
+            "firmato_dipendente_il": datetime.now(timezone.utc).isoformat(),
+        }})
+    return {"ok": True, "stato": "firmato_dipendente"}
+
+
+@router.post("/finalizza/{contract_id}")
+@handle_errors
+async def finalizza_contratto(contract_id: str, file: Optional[UploadFile] = File(default=None),
+                              pec: str = "", email: str = "") -> Dict[str, Any]:
+    """Controfirma Ceraldi + invio definitivo + archiviazione nel fascicolo.
+
+    Se `file` è presente è il PDF controfirmato da Ceraldi (definitivo); altrimenti
+    si usa il PDF firmato dal dipendente. Invia la copia definitiva al dipendente
+    (email e, se indicata, PEC) e la salva nel fascicolo (contratti_dipendenti).
+    Porta lo stato a 'definitivo'."""
+    db = Database.get_db()
+    contract = await db["employee_contracts"].find_one({"id": contract_id}, {"_id": 0})
+    if not contract:
+        raise HTTPException(404, "Contratto non trovato")
+
+    if file is not None:
+        definitivo = await file.read()
+        def_name = file.filename or "contratto_definitivo.pdf"
+    elif contract.get("pdf_firmato_dipendente"):
+        definitivo = base64.b64decode(contract["pdf_firmato_dipendente"])
+        def_name = contract.get("firmato_filename", "contratto_definitivo.pdf")
+    else:
+        raise HTTPException(400, "Manca il contratto firmato: caricalo prima, o allega il PDF controfirmato.")
+    if not def_name.lower().endswith(".pdf"):
+        def_name += ".pdf"
+
+    emp = await db[Collections.EMPLOYEES].find_one(
+        {"id": contract.get("employee_id")}, {"_id": 0, "nome": 1, "cognome": 1, "email": 1}) or {}
+    to_addr = (email or emp.get("email") or "").strip()
+
+    def_b64 = base64.b64encode(definitivo).decode("ascii")
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Invio definitivo al dipendente (email + PEC opzionale)
+    inviato = []
+    nome = f"{emp.get('nome','')} {emp.get('cognome','')}".strip() or "Gentile collaboratore"
+    corpo = (f"Gentile {nome},\n\nin allegato la copia definitiva del contratto "
+             f"({contract.get('contract_name','')}), controfirmata da Ceraldi Group.\n\n"
+             f"Ceraldi Group S.r.l.")
+    if to_addr:
+        import asyncio
+        await asyncio.to_thread(_smtp_send, to_addr,
+                                f"Contratto definitivo — {contract.get('contract_name','')}",
+                                corpo, [{"filename": def_name, "data": definitivo}])
+        inviato.append(to_addr)
+    if pec:
+        client = get_client()
+        if client.configured:
+            try:
+                await client.send_pec(to_addr=pec,
+                                      subject=f"Contratto definitivo — {contract.get('contract_name','')}",
+                                      body=corpo, attachments=[{"filename": def_name, "content": definitivo}])
+                inviato.append(f"PEC:{pec}")
+            except OpenAPIError as e:
+                logger.warning(f"PEC finalizza: {e}")
+
+    # Archiviazione nel fascicolo del dipendente (collezione contratti_dipendenti)
+    add = contract.get("additional_data", {}) or {}
+    fasc = {
+        "id": str(uuid.uuid4()),
+        "dipendente_id": contract.get("employee_id"),
+        "tipo_contratto": contract.get("contract_type"),
+        "nome": contract.get("contract_name"),
+        "data_inizio": add.get("data_inizio"),
+        "data_fine": add.get("data_fine") or None,
+        "stato": "attivo",
+        "firmato": True,
+        "filename": def_name,
+        "file_data": def_b64,
+        "contract_ref": contract_id,
+        "archiviato_il": now,
+    }
+    await db["contratti_dipendenti"].insert_one(fasc.copy())
+
+    await db["employee_contracts"].update_one(
+        {"id": contract_id},
+        {"$set": {
+            "pdf_definitivo": def_b64,
+            "definitivo_filename": def_name,
+            "iter_stato": "definitivo",
+            "definitivo_il": now,
+            "definitivo_inviato_a": inviato,
+            "fascicolo_id": fasc["id"],
+        }})
+    return {"ok": True, "stato": "definitivo", "inviato_a": inviato, "archiviato": True}
+
+
+@router.get("/pdf/{contract_id}/{versione}")
+@handle_errors
+async def download_pdf_versione(contract_id: str, versione: str):
+    """Scarica il PDF firmato dal dipendente o quello definitivo controfirmato."""
+    campo = {"firmato": "pdf_firmato_dipendente", "definitivo": "pdf_definitivo"}.get(versione)
+    if not campo:
+        raise HTTPException(400, "Versione non valida (firmato|definitivo)")
+    db = Database.get_db()
+    contract = await db["employee_contracts"].find_one({"id": contract_id}, {"_id": 0})
+    if not contract or not contract.get(campo):
+        raise HTTPException(404, "PDF non disponibile")
+    name = contract.get("definitivo_filename" if versione == "definitivo" else "firmato_filename",
+                        f"contratto_{versione}.pdf")
+    return Response(content=base64.b64decode(contract[campo]), media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 # ---------------------------------------------------------------------------

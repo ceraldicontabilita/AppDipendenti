@@ -1946,31 +1946,37 @@ function AssunzionePage({ dipendenti, reload }) {
     } catch (e) { setMsg(e?.response?.data?.detail || "Errore invio email"); }
     setBusy("");
   };
-  const avviaFirma = async (cid) => {
-    if (!window.confirm("Avviare la firma digitale OpenAPI? Il dipendente riceverà la richiesta di firma con OTP (marca temporale + eSignature).")) return;
-    setBusy("sign-" + cid); setMsg("");
-    try { const r = await axios.post(`${C}/sign/${cid}`, {});
-      setMsg(`Firma avviata: inviata a ${r.data.firmatario} (stato: ${r.data.stato}).`); loadContratti(dipId);
-    } catch (e) { setMsg(e?.response?.data?.detail || "Errore avvio firma"); }
-    setBusy("");
+  const caricaFirmato = async (cid, ev) => {
+    const file = ev.target.files?.[0]; if (!file) return;
+    const fd = new FormData(); fd.append("file", file);
+    setBusy("cf-" + cid); setMsg("");
+    try { await axios.post(`${C}/carica-firmato/${cid}`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setMsg("Contratto firmato dal dipendente caricato. Ora controfirma e invia il definitivo."); loadContratti(dipId);
+    } catch (e) { setMsg(e?.response?.data?.detail || "Errore caricamento firmato"); }
+    setBusy(""); ev.target.value = "";
   };
-  const checkFirma = async (cid) => {
-    setBusy("chk-" + cid); setMsg("");
-    try { const r = await axios.get(`${C}/sign/${cid}/status`);
-      setMsg(`Stato firma: ${r.data.stato}.`); loadContratti(dipId);
-    } catch (e) { setMsg(e?.response?.data?.detail || "Errore controllo firma"); }
-    setBusy("");
+  const finalizza = async (cid, ev) => {
+    const file = ev?.target?.files?.[0];
+    if (!file && !window.confirm("Finalizzare usando il PDF firmato dal dipendente come definitivo (senza un file controfirmato separato)?")) return;
+    const fd = new FormData(); if (file) fd.append("file", file);
+    setBusy("fz-" + cid); setMsg("");
+    try { const r = await axios.post(`${C}/finalizza/${cid}`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+      const dest = (r.data.inviato_a || []).join(", ");
+      setMsg(`Contratto definitivo archiviato nel fascicolo${dest ? ` e inviato a ${dest}` : ""}.`); loadContratti(dipId); reload && reload();
+    } catch (e) { setMsg(e?.response?.data?.detail || "Errore finalizzazione"); }
+    setBusy(""); if (ev?.target) ev.target.value = "";
   };
-  const inviaPec = async (cid) => {
-    const pec = window.prompt("Indirizzo PEC destinatario:");
-    if (!pec) return;
-    setBusy("pec-" + cid); setMsg("");
-    try { const r = await axios.post(`${C}/pec/${cid}`, { pec });
-      setMsg(`PEC inviata a ${r.data.pec} (stato: ${r.data.stato}).`); loadContratti(dipId);
-    } catch (e) { setMsg(e?.response?.data?.detail || "Errore invio PEC"); }
-    setBusy("");
+  const scaricaPdf = async (cid, versione) => {
+    try { const r = await axios.get(`${C}/pdf/${cid}/${versione}`, { responseType: "blob" });
+      const url = URL.createObjectURL(r.data); const a = document.createElement("a"); a.href = url; a.download = `contratto_${versione}.pdf`; a.click(); URL.revokeObjectURL(url);
+    } catch { setMsg("PDF non disponibile"); }
   };
-  const STATO_FIRMA = { inviato: ["Firma inviata", "#c4894a", "#fdf0dd"], firmato: ["Firmato", "#3d8168", "#e7f6ec"], accettato: ["Accettato (PEC)", "#3d8168", "#e7f6ec"] };
+  const ITER = {
+    bozza: ["Bozza", "#6b7669", "#eef1ec"],
+    inviata: ["Inviata al dipendente", "#c4894a", "#fdf0dd"],
+    firmato_dipendente: ["Firmata dal dipendente", "#3d8168", "#e7f6ec"],
+    definitivo: ["Definitivo · in fascicolo", "#2a3329", "#dfeede"],
+  };
 
   const dip = dipendenti.find(d => d.id === dipId);
   const num = (v) => { const n = parseFloat(String(v).replace(",", ".")); return isNaN(n) ? null : n; };
@@ -2132,24 +2138,44 @@ function AssunzionePage({ dipendenti, reload }) {
         <div className="dc-card">
           <h3 style={{ marginTop: 0 }}>Contratti di {dip?.cognome} {dip?.nome}</h3>
           {contratti.length === 0 ? <p className="dc-muted">Nessun contratto generato.</p> :
-            contratti.map(c => (
+            contratti.map(c => {
+              const st = c.iter_stato || "bozza";
+              const badge = ITER[st] || ITER.bozza;
+              return (
               <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "space-between", borderTop: "1px solid #eee", padding: "8px 0", flexWrap: "wrap" }}>
                 <div>
                   <b>{c.contract_name}</b>
-                  {c.firma_stato && STATO_FIRMA[c.firma_stato] && (
-                    <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 999, color: STATO_FIRMA[c.firma_stato][1], background: STATO_FIRMA[c.firma_stato][2] }}>{STATO_FIRMA[c.firma_stato][0]}</span>
-                  )}
+                  <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 999, color: badge[1], background: badge[2] }}>{badge[0]}</span>
                   <div className="dc-muted" style={{ fontSize: 12 }}>{c.filename}{c.inviato_a ? ` · inviato a ${c.inviato_a}` : ""}{c.stipendio_mensile != null ? ` · €/mese ${Number(c.stipendio_mensile).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ""}</div>
                 </div>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  <button className="dc-btn" onClick={() => scarica(c.id, c.filename)}>Scarica</button>
-                  <button className="dc-btn-primary" disabled={busy === "send-" + c.id} onClick={() => invia(c.id)}>{busy === "send-" + c.id ? "Invio…" : "Invia email"}</button>
-                  <button className="dc-btn" disabled={busy === "sign-" + c.id} onClick={() => avviaFirma(c.id)}>{busy === "sign-" + c.id ? "Firma…" : "Firma (OpenAPI)"}</button>
-                  {c.firma_request_id && <button className="dc-btn" disabled={busy === "chk-" + c.id} onClick={() => checkFirma(c.id)}>{busy === "chk-" + c.id ? "…" : "Stato firma"}</button>}
-                  {c.firma_stato === "firmato" && <button className="dc-btn" disabled={busy === "pec-" + c.id} onClick={() => inviaPec(c.id)}>{busy === "pec-" + c.id ? "PEC…" : "Invia PEC"}</button>}
+                  <button className="dc-btn" onClick={() => scarica(c.id, c.filename)}>Scarica bozza</button>
+                  {(st === "bozza") && (
+                    <button className="dc-btn-primary" disabled={busy === "send-" + c.id} onClick={() => invia(c.id)}>{busy === "send-" + c.id ? "Invio…" : "Invia bozza per firma"}</button>
+                  )}
+                  {st === "inviata" && (
+                    <label className="dc-btn-primary" style={{ cursor: "pointer" }}>
+                      {busy === "cf-" + c.id ? "Carico…" : "Carica firmato dal dipendente"}
+                      <input type="file" accept=".pdf" style={{ display: "none" }} onChange={(e) => caricaFirmato(c.id, e)} />
+                    </label>
+                  )}
+                  {st === "firmato_dipendente" && (<>
+                    <button className="dc-btn" onClick={() => scaricaPdf(c.id, "firmato")}>Scarica firmato</button>
+                    <label className="dc-btn-primary" style={{ cursor: "pointer" }}>
+                      {busy === "fz-" + c.id ? "Finalizzo…" : "Controfirma e invia definitivo"}
+                      <input type="file" accept=".pdf" style={{ display: "none" }} onChange={(e) => finalizza(c.id, e)} />
+                    </label>
+                  </>)}
+                  {st === "definitivo" && (
+                    <button className="dc-btn" onClick={() => scaricaPdf(c.id, "definitivo")}>Scarica definitivo</button>
+                  )}
+                  {st !== "bozza" && st !== "definitivo" && st !== "inviata" && st !== "firmato_dipendente" && (
+                    <button className="dc-btn-primary" disabled={busy === "send-" + c.id} onClick={() => invia(c.id)}>{busy === "send-" + c.id ? "Invio…" : "Invia bozza per firma"}</button>
+                  )}
                 </div>
               </div>
-            ))}
+              );
+            })}
         </div>
       )}
     </div>
