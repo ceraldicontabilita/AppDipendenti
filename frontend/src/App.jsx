@@ -1283,6 +1283,12 @@ function TurniPage({ dipendenti, turni, reload }) {
     const idLunga = idTurno("Lunga");
     // Rotazione bar: una settimana mattina, una pomeriggio. settimanaPari decide la fase.
     const idBarMattina = idTurno("Bar 6:30-15"), idBarPom = idTurno("Bar 15-21");
+    // Ricarica le ferie fresche: una ferie appena approvata viene subito considerata.
+    let ferieFresh = ferieTurni;
+    try { ferieFresh = (await axios.get(`${API}/ferie`)).data || []; setFerieTurni(ferieFresh); } catch { /* uso lo stato attuale */ }
+    const ferieIn = (dipId, dStr) => ferieFresh.find(f => f.dipendente_id === dipId
+      && (f.stato === 'approvata' || !f.stato)
+      && f.data_inizio <= dStr && (f.data_fine || f.data_inizio) >= dStr);
     let configurati = 0;
     dipTurni.forEach(dip => {
       const c = cfgDi(dip.id);
@@ -1300,7 +1306,7 @@ function TurniPage({ dipendenti, turni, reload }) {
         const dStr = isoT(date);
         const giorno = giorni[gi];
         let turnoId;
-        if (ferieDataT(dip.id, dStr)) turnoId = idFerie || idRiposo;                 // ferie approvata
+        if (ferieIn(dip.id, dStr)) turnoId = idFerie || idRiposo;                     // ferie approvata
         else if (onomSett.some(o => o.dipendente_id === dip.id && o.giorno_nome === giorno)) turnoId = idRiposo; // onomastico
         else if (c.riposo_giorno && c.riposo_giorno === giorno) turnoId = idRiposo;  // riposo fisso settimanale
         else if ((c.lunga_giorni || []).includes(giorno)) turnoId = idLunga || turnoLavoro || null; // Lunga fissa (ven/sab/dom)
