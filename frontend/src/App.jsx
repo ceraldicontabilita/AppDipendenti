@@ -1547,6 +1547,8 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
   const [importing, setImporting] = useState(false);
   const [importMsg, setImportMsg] = useState(null);
   const fileRef = useRef(null);
+  const excelRef = useRef(null);
+  const [pnMsg, setPnMsg] = useState(null);
   const [soloMancanti, setSoloMancanti] = useState(false);
   const [vistaAnno, setVistaAnno] = useState(false);
   const [annoMatrix, setAnnoMatrix] = useState(null);
@@ -1688,6 +1690,23 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
       setImporting(false);
     }
   };
+  const handleImportPrimaNota = async (e) => {
+    const fl = (e.target.files || [])[0];
+    if (!fl) return;
+    setImporting(true); setPnMsg(null);
+    try {
+      const fd = new FormData(); fd.append("file", fl);
+      const r = await axios.post(`${API}/paghe/importa-prima-nota`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setPnMsg(r.data);
+      await load();
+      if (vistaAnno) { setVistaAnno(false); setTimeout(() => setVistaAnno(true), 50); }
+    } catch (err) {
+      setPnMsg({ errore: err?.response?.data?.detail || "Errore import Prima Nota" });
+    } finally {
+      setImporting(false);
+      if (excelRef.current) excelRef.current.value = "";
+    }
+  };
   const totBuste = dipendenti.reduce((s, d) => s + (parseFloat(get(d.id).importo_busta) || 0), 0);
   const totBonifici = dipendenti.reduce((s, d) => s + (parseFloat(get(d.id).bonifico_importo) || 0), 0);
   const totAcconti = dipendenti.reduce((s, d) => s + (get(d.id).acconti || []).reduce((a, x) => a + (parseFloat(x.importo) || 0), 0), 0);
@@ -1710,6 +1729,11 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
             style={{ background: "#3f5a4e", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
             {importing ? "…" : "Importa da email"}
           </button>
+          <input ref={excelRef} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={handleImportPrimaNota} style={{ display: "none" }} />
+          <button onClick={() => excelRef.current?.click()} disabled={importing} title="Importa la Prima Nota Salari (Excel): inserisce i bonifici nei mesi corrispondenti"
+            style={{ background: "#4f6b5d", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
+            {importing ? "…" : "Importa Prima Nota (Excel)"}
+          </button>
           <select value={mese} onChange={e => setMese(+e.target.value)} className="dc-select">
             {mesi.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
           </select>
@@ -1718,6 +1742,31 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
           </select>
         </div>
       </div>
+
+      {pnMsg && (
+        <div className="dc-card" style={{ marginBottom: 16, borderLeft: `4px solid ${pnMsg.errore ? '#d35f4e' : '#3d8168'}` }}>
+          {pnMsg.errore ? <div style={{ color: "#d35f4e", fontWeight: 600 }}>⚠ {pnMsg.errore}</div> : (
+            <div>
+              <div style={{ fontWeight: 700 }}>✓ Prima Nota importata: {pnMsg.aggiornati} mesi/dipendente aggiornati su {pnMsg.righe_aggregate} totali.</div>
+              {pnMsg.non_trovati > 0 && (
+                <div style={{ marginTop: 6, fontSize: 13, color: "#7d5526" }}>
+                  ⚠ {pnMsg.non_trovati} voci con dipendente non in anagrafica (non importate): {(pnMsg.nomi_non_trovati || []).join(", ")}
+                </div>
+              )}
+              {pnMsg.discrepanze?.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: "#7d5526" }}>Differenze importo busta (app vs Excel) — {pnMsg.discrepanze.length}:</div>
+                  <div style={{ fontSize: 13, display: "flex", flexDirection: "column", gap: 2, marginTop: 2 }}>
+                    {pnMsg.discrepanze.slice(0, 60).map((x, i) => (
+                      <span key={i}>{x.dipendente} · {mesi[x.mese - 1]} {x.anno}: app € {eur(x.busta_app)} · Excel € {eur(x.busta_excel)}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Motore di ricerca voci cedolino + riscansione storico */}
       <div className="dc-card" style={{ marginBottom: 16 }}>

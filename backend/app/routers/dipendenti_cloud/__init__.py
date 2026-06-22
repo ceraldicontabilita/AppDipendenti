@@ -1638,6 +1638,111 @@ async def riscansiona_cedolini(anno: Optional[int] = None, dipendente_id: Option
             "nota": "I cedolini senza PDF salvato non possono essere riscansionati: vanno re-importati dal Libro Unico."}
 
 
+# ============ IMPORT PRIMA NOTA SALARI (Excel) ============
+
+@router.post("/paghe/importa-prima-nota")
+async def importa_prima_nota(file: UploadFile = File(...)):
+    """Importa la 'Prima Nota Salari' (Excel: Dipendente, Mese, Anno, Stipendio Netto,
+    Importo Erogato). Per ogni dipendente/mese/anno SOMMA gli Importi Erogati (più bonifici
+    nello stesso mese) e li scrive in paghe_mensili.bonifico_importo. Riempie l'importo
+    busta se mancante. Confronta col dato già in app e segnala differenze e nomi non trovati."""
+    import io
+    import openpyxl
+    raw = await file.read()
+    if raw[:2] != b"PK":
+        raise HTTPException(400, "Il file deve essere un .xlsx")
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(raw), data_only=True, read_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"Excel non valido: {e}")
+    ws = wb["Salari"] if "Salari" in wb.sheetnames else wb[wb.sheetnames[0]]
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        raise HTTPException(400, "Foglio vuoto")
+    header = [(str(c).strip().lower() if c is not None else "") for c in rows[0]]
+
+    def col(*names):
+        for i, h in enumerate(header):
+            if h in names:
+                return i
+        return None
+    ci_dip, ci_mese, ci_anno = col("dipendente"), col("mese"), col("anno")
+    ci_netto = col("stipendio netto", "netto", "importo busta")
+    ci_erog = col("importo erogato", "erogato", "bonifico")
+    if None in (ci_dip, ci_mese, ci_anno, ci_erog):
+        raise HTTPException(400, "Colonne attese: Dipendente, Mese, Anno, Stipendio Netto, Importo Erogato")
+
+    MESI = {"gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
+            "luglio": 7, "agosto": 8, "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12}
+
+    def norm(s):
+        return re.sub(r"\s+", " ", str(s or "").strip()).lower()
+
+    def fnum(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    agg = {}
+    for r in rows[1:]:
+        if ci_dip >= len(r) or not r[ci_dip]:
+            continue
+        mese = MESI.get(norm(r[ci_mese]))
+        try:
+            anno = int(r[ci_anno])
+        except (TypeError, ValueError):
+            anno = None
+        if not mese or not anno:
+            continue
+        k = (norm(r[ci_dip]), mese, anno)
+        a = agg.setdefault(k, {"nome": str(r[ci_dip]).strip(), "netto": 0.0, "erogato": 0.0})
+        a["erogato"] += fnum(r[ci_erog])
+        if ci_netto is not None and ci_netto < len(r):
+            a["netto"] += fnum(r[ci_netto])
+
+    db = get_db()
+    dips = await db.dipendenti.find({"merged_into": {"$exists": False}},
+                                    {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "nome_completo": 1}).to_list(1000)
+    by_nome = {}
+    for d in dips:
+        n, c = norm(d.get("nome")), norm(d.get("cognome"))
+        for v in {norm(d.get("nome_completo")), f"{c} {n}".strip(), f"{n} {c}".strip()}:
+            if v:
+                by_nome[v] = d
+
+    aggiornati, non_trovati, discrepanze = [], [], []
+    for (nome_n, mese, anno), a in agg.items():
+        erog, netto = round(a["erogato"], 2), round(a["netto"], 2)
+        if erog <= 0 and netto <= 0:
+            continue
+        d = by_nome.get(nome_n)
+        if not d:
+            non_trovati.append({"nome": a["nome"], "mese": mese, "anno": anno, "bonifico": erog})
+            continue
+        existing = await db.paghe_mensili.find_one(
+            {"dipendente_id": d["id"], "anno": anno, "mese": mese}, {"importo_busta": 1}) or {}
+        set_doc = {"dipendente_id": d["id"], "anno": anno, "mese": mese,
+                   "bonifico_importo": erog, "bonifico_ricevuto": erog > 0,
+                   "bonifico_da_prima_nota": True, "updated_at": now_iso()}
+        busta_app = existing.get("importo_busta")
+        if (busta_app in (None, 0, "")) and netto > 0:
+            set_doc["importo_busta"] = netto
+        elif busta_app and netto > 0 and abs(float(busta_app) - netto) > 1:
+            discrepanze.append({"dipendente": a["nome"], "mese": mese, "anno": anno,
+                                "busta_app": round(float(busta_app), 2), "busta_excel": netto})
+        await db.paghe_mensili.update_one(
+            {"dipendente_id": d["id"], "anno": anno, "mese": mese}, {"$set": set_doc}, upsert=True)
+        aggiornati.append({"dipendente": a["nome"], "mese": mese, "anno": anno, "bonifico": erog})
+
+    nomi_non_trovati = sorted({x["nome"] for x in non_trovati})
+    return {"aggiornati": len(aggiornati),
+            "righe_aggregate": len(agg),
+            "non_trovati": len(non_trovati),
+            "nomi_non_trovati": nomi_non_trovati,
+            "discrepanze": sorted(discrepanze, key=lambda x: (x["anno"], x["mese"]))}
+
+
 # ============ BUSTE PAGA ============
 
 @router.get("/buste-paga")
