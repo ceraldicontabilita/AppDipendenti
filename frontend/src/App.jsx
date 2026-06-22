@@ -652,14 +652,23 @@ function PresenzePage({ dipendenti, reload }) {
   const nomeTurnoId = (id) => (tipiTurno.find(t => t.id === id) || {}).nome;
 
   // Codice giustificativo derivato per una cella: presenza salvata > ferie/permesso > turno.
+  // Regola: NON si può essere "presenti" in un giorno futuro (oggi compreso = ok).
   const codiceDerivato = (dipId, day) => {
-    const pres = getPresenza(dipId, day);
-    if (pres) return pres.giustificativo || (pres.stato === 'presente' ? 'P' : pres.stato === 'assente' ? 'AS' : null);
     const date = new Date(anno, mese - 1, day);
-    const fer = ferieDi(dipId, isoD(date));
+    const dStr = isoD(date);
+    const futuro = dStr > isoD(new Date());
+    const pres = getPresenza(dipId, day);
+    if (pres) {
+      const g = pres.giustificativo;
+      if (g === 'P' || (!g && pres.stato === 'presente')) return futuro ? null : 'P';
+      if (g) return g;
+      if (pres.stato === 'assente') return 'AS';
+      return null;
+    }
+    const fer = ferieDi(dipId, dStr);
     if (fer) return fer.tipo === 'Permesso' ? 'PE' : fer.tipo === 'Malattia' ? 'M' : fer.tipo === 'ROL' ? 'R' : 'F';
     const t = turnoDi(dipId, date);
-    if (t) { const n = nomeTurnoId(t.turno_id); return n === 'Riposo' ? 'RS' : n === 'Ferie' ? 'F' : n ? 'P' : null; }
+    if (t) { const n = nomeTurnoId(t.turno_id); if (n === 'Riposo') return 'RS'; if (n === 'Ferie') return 'F'; return (n && !futuro) ? 'P' : null; }
     return null;
   };
 
@@ -684,7 +693,7 @@ function PresenzePage({ dipendenti, reload }) {
 
   const handleTuttiPresenti = async () => {
     if (!window.confirm("Segnare tutti come presenti per oggi?")) return;
-    const oggi = new Date().toISOString().split('T')[0];
+    const oggi = isoD(new Date());  // data LOCALE (non UTC: evita l'errore di un giorno)
     const batch = dipendenti.map(d => ({
       dipendente_id: d.id,
       data: oggi,
@@ -706,7 +715,7 @@ function PresenzePage({ dipendenti, reload }) {
     for (let d = start; d <= end; d.setDate(d.getDate() + 1)) {
       batch.push({
         dipendente_id: formData.dipendente_id,
-        data: d.toISOString().split('T')[0],
+        data: isoD(d),  // data LOCALE (non UTC)
         stato: formData.tipo === 'P' ? 'presente' : formData.tipo === 'UN' ? 'assente' : 'giustificato',
         giustificativo: formData.tipo,
         note: formData.nota
