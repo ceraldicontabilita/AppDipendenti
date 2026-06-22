@@ -53,6 +53,10 @@ Fondo EST (sanitario), Fon.Te. (previdenza compl.).
   contratto finalizzato→aggiorna anagrafica; cessazione (pulsante)→handler completo;
   scadenzario (contratti/prova)→alert; timbratura→presenze reali.
 - Alert visibili nel **Pannello di controllo** (pannello "Avvisi & Scadenze").
+- **Onomastici** (`dipendenti_cloud`: ONOMASTICI_DEFAULT + collezione `onomastici`):
+  nella pagina Turni, pannello che mostra gli onomastici della settimana (solo giorni
+  lavorativi, esclusi stranieri e dipendenti disattivati) e propone il riposo (l'admin
+  conferma con un clic → assegnazione "Riposo"). Date prefillate e modificabili.
 
 ## Moduli chiave
 - **Assunzione & Contratti** (`App.jsx` AssunzionePage + `routers/employees/employee_contracts.py`):

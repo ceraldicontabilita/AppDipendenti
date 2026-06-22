@@ -13,7 +13,7 @@ import zipfile
 import hashlib
 import base64
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from backend.app.database import Database
 
@@ -1374,6 +1374,103 @@ async def create_or_update_assegnazione(data: dict):
             await get_db().assegnazioni_turni_cloud.delete_one({"id": existing["id"]})
     
     return {"message": "Assegnazione salvata"}
+
+# ============ ONOMASTICI (riposo per onomastico nei turni) ============
+# Date standard italiane (mese, giorno) per nome proprio. Prefillate e
+# MODIFICABILI in gestione. I nomi non presenti sono "stranieri" → esclusi.
+ONOMASTICI_DEFAULT = {
+    "angela": (1, 27), "angelo": (10, 2), "anna": (7, 26), "antonella": (6, 13),
+    "antonietta": (6, 13), "antonio": (6, 13), "carmela": (7, 16), "carmine": (7, 16),
+    "caterina": (11, 25), "ciro": (1, 31), "domenico": (8, 8), "elena": (8, 18),
+    "emanuele": (3, 26), "fabio": (5, 11), "francesca": (3, 9), "francesco": (10, 4),
+    "gaetano": (8, 7), "gennaro": (9, 19), "giorgio": (4, 23), "giovanna": (5, 30),
+    "giovanni": (6, 24), "giulia": (5, 22), "giuliano": (1, 9), "giuseppa": (3, 19),
+    "giuseppe": (3, 19), "ignazio": (7, 31), "liliana": (7, 27), "lucia": (12, 13),
+    "luigi": (6, 21), "luigia": (6, 21), "marcella": (1, 31), "marco": (4, 25),
+    "margherita": (2, 22), "maria": (9, 12), "mariano": (8, 19), "marina": (7, 17),
+    "mario": (1, 19), "michele": (9, 29), "ottavio": (11, 20), "pasquale": (5, 17),
+    "paolo": (6, 29), "pietro": (6, 29), "raffaele": (9, 29), "rosa": (8, 23),
+    "salvatore": (8, 6), "simone": (10, 28), "stefano": (12, 26), "teresa": (10, 15),
+    "valerio": (1, 29), "vincenzo": (1, 22), "vincenza": (1, 22),
+}
+NOMI_GIORNO_IT = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
+
+
+def _nome_proprio(dip: dict) -> str:
+    n = (dip.get("nome") or "").strip()
+    if not n and dip.get("nome_completo"):
+        n = dip["nome_completo"].split()[0]
+    return n.split()[0].lower() if n else ""
+
+
+@router.get("/onomastici")
+async def get_onomastici():
+    """Onomastico per ogni dipendente attivo: data (prefillata dal nome o salvata),
+    attivo e flag 'straniero' (nome senza onomastico italiano)."""
+    db = get_db()
+    dips = await db.dipendenti.find(
+        {"merged_into": {"$exists": False}}, {"_id": 0}).to_list(1000)
+    salvati = {o["dipendente_id"]: o async for o in db.onomastici.find({}, {"_id": 0})}
+    out = []
+    for d in dips:
+        if d.get("attivo") is False or (d.get("stato") or "attivo") in ("cessato", "dimesso", "archiviato"):
+            continue
+        nome = _nome_proprio(d)
+        default = ONOMASTICI_DEFAULT.get(nome)
+        straniero = default is None
+        s = salvati.get(d.get("id"))
+        if s:
+            mese, giorno, attivo = s.get("mese"), s.get("giorno"), s.get("attivo", True)
+        else:
+            mese, giorno = (default if default else (None, None))
+            attivo = not straniero
+        out.append({
+            "dipendente_id": d.get("id"),
+            "nome": d.get("nome_completo") or f"{d.get('cognome','')} {d.get('nome','')}".strip(),
+            "mese": mese, "giorno": giorno, "attivo": bool(attivo), "straniero": straniero,
+        })
+    out.sort(key=lambda x: (x["nome"] or "").lower())
+    return out
+
+
+@router.post("/onomastici")
+async def save_onomastici(data: dict = Body(...)):
+    """Salva le date/attivo onomastico. Body: {voci: [{dipendente_id, mese, giorno, attivo}]}."""
+    db = get_db()
+    for v in (data.get("voci") or []):
+        if not v.get("dipendente_id"):
+            continue
+        await db.onomastici.update_one(
+            {"dipendente_id": v["dipendente_id"]},
+            {"$set": {"dipendente_id": v["dipendente_id"],
+                      "mese": v.get("mese"), "giorno": v.get("giorno"),
+                      "attivo": bool(v.get("attivo", True)),
+                      "updated_at": now_iso()}}, upsert=True)
+    return {"ok": True, "salvati": len(data.get("voci") or [])}
+
+
+@router.get("/onomastici/settimana")
+async def onomastici_settimana(settimana: str):
+    """Onomastici (idonei al riposo) che cadono nella settimana indicata (lunedì
+    ISO). Esclude stranieri, esclusi (attivo=False) e la domenica (bar chiuso)."""
+    try:
+        lun = datetime.strptime(settimana, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="settimana deve essere YYYY-MM-DD (lunedì)")
+    voci = await get_onomastici()
+    giorni_sett = [(lun + timedelta(days=i)) for i in range(7)]
+    out = []
+    for v in voci:
+        if not v["attivo"] or v["straniero"] or not v["mese"] or not v["giorno"]:
+            continue
+        for i, gd in enumerate(giorni_sett):
+            if gd.month == v["mese"] and gd.day == v["giorno"] and i < 6:  # esclude domenica
+                out.append({
+                    "dipendente_id": v["dipendente_id"], "nome": v["nome"],
+                    "data": gd.strftime("%Y-%m-%d"), "giorno_nome": NOMI_GIORNO_IT[i],
+                    "data_label": gd.strftime("%d/%m"),
+                })
+    return out
 
 # ============ BUSTE PAGA ============
 

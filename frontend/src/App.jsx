@@ -1189,6 +1189,28 @@ function TurniPage({ dipendenti, turni, reload }) {
     } finally { setBusy(false); }
   };
 
+  // Onomastici: riposo nel giorno del santo (copertura prioritaria → l'admin conferma)
+  const [onomSett, setOnomSett] = useState([]);
+  const [showOnom, setShowOnom] = useState(false);
+  const [onomTab, setOnomTab] = useState([]);
+  const [onomMsg, setOnomMsg] = useState("");
+  useEffect(() => { axios.get(`${API}/onomastici/settimana?settimana=${settimana}`).then(r => setOnomSett(r.data || [])).catch(() => setOnomSett([])); }, [settimana]);
+  const apriOnom = () => { axios.get(`${API}/onomastici`).then(r => { setOnomTab(r.data || []); setShowOnom(true); }).catch(() => {}); };
+  const setOnomRow = (i, k, v) => setOnomTab(t => t.map((r, j) => j === i ? { ...r, [k]: v } : r));
+  const salvaOnom = async () => {
+    setOnomMsg("");
+    try {
+      await axios.post(`${API}/onomastici`, { voci: onomTab.map(v => ({ dipendente_id: v.dipendente_id, mese: v.mese ? Number(v.mese) : null, giorno: v.giorno ? Number(v.giorno) : null, attivo: v.attivo })) });
+      setShowOnom(false);
+      axios.get(`${API}/onomastici/settimana?settimana=${settimana}`).then(r => setOnomSett(r.data || []));
+    } catch { setOnomMsg("Errore salvataggio"); }
+  };
+  const mettiRiposoOnom = async (o) => {
+    const idR = idTurno("Riposo");
+    if (!idR) { alert("Manca il turno 'Riposo' tra i tipi di turno."); return; }
+    await salva([{ dipendente_id: o.dipendente_id, giorno: o.giorno_nome, turno_id: idR }]);
+  };
+
   // Riequilibrio automatico: se assegno una Lunga o un Riposo a una persona della
   // produzione, chi aveva quel turno quel giorno si scambia il turno con lei,
   // così il giorno resta sempre con una sola lunga e un solo riposo.
@@ -1295,6 +1317,53 @@ function TurniPage({ dipendenti, turni, reload }) {
           {busy ? "Attendi…" : "Genera settimana"}
         </button>
       </div>
+
+      <div className="dc-card" style={{ marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <h3 style={{ margin: 0 }}>🎂 Onomastici di questa settimana</h3>
+          <button className="dc-btn" onClick={apriOnom}>Gestisci date onomastici</button>
+        </div>
+        {onomSett.length === 0
+          ? <p className="dc-muted" style={{ marginBottom: 0, marginTop: 8 }}>Nessun onomastico nei giorni lavorativi di questa settimana.</p>
+          : (
+            <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+              {onomSett.map((o, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, borderTop: "1px solid #eee", paddingTop: 8, flexWrap: "wrap" }}>
+                  <span><b>{o.nome}</b> · {o.giorno_nome} {o.data_label}</span>
+                  <button className="dc-btn-primary" disabled={busy} onClick={() => mettiRiposoOnom(o)}>Metti a riposo</button>
+                </div>
+              ))}
+            </div>
+          )}
+        <p className="dc-muted" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>La copertura ha priorità: il riposo lo applichi tu con un clic, valutando l'organico del giorno.</p>
+      </div>
+
+      {showOnom && (
+        <div onClick={() => setShowOnom(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
+          <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 620, width: "100%", marginTop: 20 }}>
+            <h3 style={{ marginTop: 0 }}>Date onomastici</h3>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Date precompilate dal nome (standard italiane), modificabili. Disattiva chi non deve avere il riposo onomastico. I nomi senza onomastico italiano sono segnati “straniero”.</p>
+            {onomMsg && <div className="dc-muted">{onomMsg}</div>}
+            <table className="dc-table">
+              <thead><tr><th>Dipendente</th><th>Giorno</th><th>Mese</th><th>Attivo</th></tr></thead>
+              <tbody>
+                {onomTab.map((r, i) => (
+                  <tr key={r.dipendente_id}>
+                    <td>{r.nome}{r.straniero ? <span className="dc-muted"> · straniero</span> : ""}</td>
+                    <td><input className="dc-input" style={{ width: 64 }} type="number" min="1" max="31" value={r.giorno ?? ""} onChange={e => setOnomRow(i, "giorno", e.target.value)} /></td>
+                    <td><input className="dc-input" style={{ width: 64 }} type="number" min="1" max="12" value={r.mese ?? ""} onChange={e => setOnomRow(i, "mese", e.target.value)} /></td>
+                    <td><input type="checkbox" checked={!!r.attivo} onChange={e => setOnomRow(i, "attivo", e.target.checked)} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
+              <button className="dc-btn" onClick={() => setShowOnom(false)}>Chiudi</button>
+              <button className="dc-btn-primary" onClick={salvaOnom}>Salva</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="dc-card dc-scroll-x">
         <table className="dc-table dc-turni-table">
