@@ -76,7 +76,7 @@ function Login({ onLogin }) {
         <ChevronLeft size={16} /> indietro</button>
       <h2 style={{ marginTop: 18 }}>Ciao {sel.nome_completo.split(" ")[0]}</h2>
       <div className="muted" style={{ textAlign: "center" }}>Inserisci il tuo PIN</div>
-      <div className="pin-dots">{Array.from({length: Math.max(6, pin.length)}).map((_,i)=><i key={i} className={pin.length>i?"on":""} />)}</div>
+      <div className="pin-dots">{Array.from({length: Math.max(4, pin.length)}).map((_,i)=><i key={i} className={pin.length>i?"on":""} />)}</div>
       {err && <div className="err">{err}</div>}
       <div className="pinpad">
         {[1,2,3,4,5,6,7,8,9].map((n)=><button key={n} onClick={()=>press(n)}>{n}</button>)}
@@ -695,7 +695,9 @@ function Timbra() {
 }
 
 export default function PortaleDipendente() {
-  const [logged, setLogged] = useState(!!localStorage.getItem(TK));
+  // Sicurezza: il portale chiede SEMPRE il PIN all'apertura (niente ingresso
+  // automatico per via di un token salvato nel browser).
+  const [logged, setLogged] = useState(false);
   const [tab, setTab] = useState("turni");
   const [nonLette, setNonLette] = useState(0);
   const role = localStorage.getItem("pt_role");
