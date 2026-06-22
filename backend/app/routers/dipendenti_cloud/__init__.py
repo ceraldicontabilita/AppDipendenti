@@ -1945,26 +1945,48 @@ async def delete_documento(documento_id: str):
 
 
 _CF_DOC_RE = re.compile(r'\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b')
-CATEGORIE_DOC = ["UNILAV", "CERTIFICAZIONE_UNICA", "CONTRATTO", "BONIFICO", "CODICE_FISCALE", "BUSTA_PAGA", "ALTRO"]
+CATEGORIE_DOC = ["UNILAV", "CERTIFICAZIONE_UNICA", "CONTRATTO", "BONIFICO",
+                 "CODICE_FISCALE", "CARTA_IDENTITA", "BUSTA_PAGA", "ALTRO"]
 
 
-def classifica_documento(text: str) -> str:
-    """Riconosce il tipo di documento dal testo (regole sulle diciture standard italiane)."""
+def classifica_documento(text: str, filename: str = "") -> str:
+    """Riconosce il tipo di documento dal testo e, in fallback, dal nome del file
+    (utile per le scansioni-immagine senza testo). Diciture standard italiane."""
     t = (text or "").lower()
+    fn = (filename or "").lower()
 
-    def has(*ks):
-        return any(k in t for k in ks)
-    if has("unilav", "comunicazione obbligatoria", "modello unificato lav", "centro per l'impiego"):
+    def H(s, *ks):
+        return any(k in s for k in ks)
+    # 1) Segnali forti dal TESTO
+    if H(t, "unilav", "comunicazione obbligatoria", "modello unificato lav", "centro per l'impiego"):
         return "UNILAV"
-    if has("certificazione unica", "redditi di lavoro dipendente e assimilati", " cud", "cu 20"):
+    if H(t, "certificazione unica", "redditi di lavoro dipendente e assimilati"):
         return "CERTIFICAZIONE_UNICA"
-    if has("contratto individuale di lavoro", "contratto di lavoro", "patto di prova", "lettera di assunzione", "tempo indeterminato", "tempo determinato"):
+    if H(t, "contratto individuale di lavoro", "contratto di lavoro", "patto di prova", "lettera di assunzione"):
         return "CONTRATTO"
-    if has("bonifico", "ordinante", "beneficiario", "disposizione di pagamento", "sepa credit"):
+    if H(t, "bonifico", "ordinante", "beneficiario", "disposizione di pagamento", "sepa credit"):
         return "BONIFICO"
-    if has("busta paga", "cedolino", "netto in busta", "retribuzione lorda"):
+    if H(t, "busta paga", "cedolino", "netto in busta", "retribuzione lorda"):
         return "BUSTA_PAGA"
-    if has("tessera sanitaria", "servizio sanitario nazionale", "team ") and len(t) < 1800:
+    if H(t, "carta di identità", "carta d'identità", "documento di identità", "carta d identita"):
+        return "CARTA_IDENTITA"
+    # 2) Nome FILE (per scansioni senza testo)
+    if H(fn, "unilav"):
+        return "UNILAV"
+    if H(fn, "certificazione_unica", "certificazione unica", "_cu_", "cud"):
+        return "CERTIFICAZIONE_UNICA"
+    if H(fn, "contratto"):
+        return "CONTRATTO"
+    if H(fn, "bonific"):
+        return "BONIFICO"
+    if H(fn, "carta_di_identit", "carta d'identit", "carta identit", "carta_identit"):
+        return "CARTA_IDENTITA"
+    if H(fn, "codice_fiscale", "codice fiscale", "tessera_sanitaria", "tessera sanitaria"):
+        return "CODICE_FISCALE"
+    if H(fn, "busta", "cedolino"):
+        return "BUSTA_PAGA"
+    # 3) Segnale debole dal testo
+    if H(t, "tessera sanitaria", "servizio sanitario nazionale"):
         return "CODICE_FISCALE"
     return "ALTRO"
 
@@ -1982,7 +2004,7 @@ async def upload_documenti_massivo(files: List[UploadFile] = File(...)):
 
     def norm(s):
         return re.sub(r"\s+", " ", str(s or "").strip()).lower()
-    by_cf, by_nome = {}, {}
+    by_cf, by_nome, by_cogn = {}, {}, {}
     for d in dips:
         cf = (d.get("codice_fiscale") or "").upper().strip()
         if cf:
@@ -1991,6 +2013,8 @@ async def upload_documenti_massivo(files: List[UploadFile] = File(...)):
         for v in {norm(d.get("nome_completo")), f"{c} {n}".strip(), f"{n} {c}".strip()}:
             if v and len(v) > 6:
                 by_nome[v] = d
+        if len(c) >= 4:
+            by_cogn.setdefault(c, []).append(d)
 
     caricati, duplicati, non_assegnati, per_categoria = [], [], [], {}
     for f in files:
@@ -2009,18 +2033,32 @@ async def upload_documenti_massivo(files: List[UploadFile] = File(...)):
                         text += (p.extract_text() or "") + "\n"
             except Exception:
                 text = ""
-        categoria = classifica_documento(text)
+        categoria = classifica_documento(text, f.filename or "")
         d = None
+        # 1) codice fiscale nel testo
         for cf in _CF_DOC_RE.findall((text or "").upper()):
             if cf in by_cf:
                 d = by_cf[cf]
                 break
+        # 2) nome completo nel testo
         if not d:
             tl = norm(text)
             for nome_n, dd in by_nome.items():
                 if nome_n in tl:
                     d = dd
                     break
+        # 3) nome/cognome nel NOME FILE (per scansioni senza testo)
+        if not d:
+            fn_norm = norm((f.filename or "").replace("_", " ").replace("-", " "))
+            for nome_n, dd in by_nome.items():
+                if nome_n in fn_norm:
+                    d = dd
+                    break
+            if not d:
+                for cogn, lst in by_cogn.items():
+                    if cogn in fn_norm and len(lst) == 1:  # cognome univoco
+                        d = lst[0]
+                        break
         doc = {"id": generate_id(),
                "dipendente_id": (d or {}).get("id"),
                "dipendente_nome": (f"{d.get('cognome','')} {d.get('nome','')}".strip() if d else None),

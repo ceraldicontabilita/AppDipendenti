@@ -2195,7 +2195,7 @@ function DocumentiPage({ dipendenti, documenti, reload, getDipendente }) {
   const massRef = useRef(null);
   const [massBusy, setMassBusy] = useState(false);
   const [massMsg, setMassMsg] = useState(null);
-  const ETICHETTA = { UNILAV: "Unilav", CERTIFICAZIONE_UNICA: "Certificazione Unica (CU)", CONTRATTO: "Contratti", BONIFICO: "Bonifici", CODICE_FISCALE: "Codice fiscale / Tessera sanitaria", BUSTA_PAGA: "Buste paga", ALTRO: "Da classificare" };
+  const ETICHETTA = { UNILAV: "Unilav", CERTIFICAZIONE_UNICA: "Certificazione Unica (CU)", CONTRATTO: "Contratti", BONIFICO: "Bonifici", CODICE_FISCALE: "Codice fiscale / Tessera sanitaria", CARTA_IDENTITA: "Carta d'identità", BUSTA_PAGA: "Buste paga", ALTRO: "Da classificare" };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
