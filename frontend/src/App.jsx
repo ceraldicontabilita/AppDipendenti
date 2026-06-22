@@ -143,6 +143,7 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     { id: "presenze", label: "Presenze", icon: Calendar, section: "DIPENDENTI" },
     { id: "ferie-permessi", label: "Ferie & Permessi", icon: Calendar, section: "DIPENDENTI" },
     { id: "turni", label: "Turni", icon: Grid3X3, section: "DIPENDENTI" },
+    { id: "timbrature", label: "Timbrature", icon: Clock, section: "DIPENDENTI" },
     { id: "buste-paga", label: "Buste Paga", icon: Euro, section: "DIPENDENTI" },
     { id: "documenti", label: "Documenti", icon: FolderOpen, section: "DIPENDENTI" },
     { id: "assunzione", label: "Assunzione & Contratti", icon: Briefcase, section: "DIPENDENTI" },
@@ -154,6 +155,7 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     presenze: "Presenze",
     "ferie-permessi": "Ferie & Permessi",
     turni: "Turni",
+    timbrature: "Timbrature",
     "buste-paga": "Buste Paga",
     missioni: "Missioni",
     documenti: "Documenti",
@@ -181,6 +183,8 @@ export default function DipendentiCloudApp({ page: pageProp }) {
         return <FeriePage dipendenti={activeDipendenti} ferie={ferie} reload={loadData} getDipendente={getDipendente} />;
       case "turni":
         return <TurniPage dipendenti={activeDipendenti} turni={turni} reload={loadData} />;
+      case "timbrature":
+        return <TimbraturePage dipendenti={dipendenti} getDipendente={getDipendente} />;
       case "buste-paga":
         return <BustePagaPage dipendenti={activeDipendenti} reload={loadData} getDipendente={getDipendente} />;
       case "missioni":
@@ -2225,6 +2229,108 @@ function AssunzionePage({ dipendenti, reload }) {
             })}
         </div>
       )}
+    </div>
+  );
+}
+
+// ===== Timbrature & Sede =====
+function TimbraturePage({ dipendenti, getDipendente }) {
+  const T = "/api/timbrature";
+  const [sede, setSede] = useState({ nome: "Ceraldi Caffè", indirizzo: "Piazza Carità, 14 — 80134 Napoli", lat: 40.842949, lng: 14.2489, raggio_m: 200, blocca_fuori_sede: true });
+  const [data, setData] = useState(new Date().toISOString().slice(0, 10));
+  const [timb, setTimb] = useState([]);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState("");
+
+  useEffect(() => { axios.get(`${T}/sede`).then(r => { if (r.data && r.data.lat != null) setSede(s => ({ ...s, ...r.data })); }).catch(() => {}); }, []);
+  const loadTimb = () => axios.get(`${T}?data=${data}`).then(r => setTimb(r.data.timbrature || [])).catch(() => setTimb([]));
+  useEffect(() => { loadTimb(); }, [data]);
+
+  const salvaSede = async () => {
+    setBusy("sede"); setMsg("");
+    try { await axios.post(`${T}/sede`, { ...sede, lat: parseFloat(sede.lat), lng: parseFloat(sede.lng), raggio_m: parseInt(sede.raggio_m) || 200 });
+      setMsg("Sede salvata."); } catch (e) { setMsg(e?.response?.data?.detail || "Errore salvataggio sede"); }
+    setBusy("");
+  };
+  const usaPosizione = () => {
+    if (!navigator.geolocation) { setMsg("Geolocalizzazione non disponibile."); return; }
+    navigator.geolocation.getCurrentPosition(
+      p => { setSede(s => ({ ...s, lat: p.coords.latitude.toFixed(6), lng: p.coords.longitude.toFixed(6) })); setMsg("Posizione attuale inserita: salva per confermare."); },
+      () => setMsg("Impossibile ottenere la posizione."), { enableHighAccuracy: true, timeout: 10000 });
+  };
+
+  // Raggruppa per dipendente: entrata (prima), uscita (ultima), ore, stato sede
+  const perDip = (() => {
+    const m = {};
+    for (const t of timb) {
+      const k = t.dipendente_id;
+      if (!m[k]) m[k] = { nome: t.dipendente_nome, entrata: null, uscita: null, fuori: false, items: [] };
+      m[k].items.push(t);
+      if (t.tipo === "entrata" && !m[k].entrata) m[k].entrata = t;
+      if (t.tipo === "uscita") m[k].uscita = t;
+      if (t.fuori_sede) m[k].fuori = true;
+    }
+    return Object.values(m).map(g => {
+      let ore = null;
+      if (g.entrata && g.uscita) {
+        const [h1, mi1] = g.entrata.ora.split(":").map(Number); const [h2, mi2] = g.uscita.ora.split(":").map(Number);
+        ore = Math.round(((h2 * 60 + mi2) - (h1 * 60 + mi1)) / 6) / 10;
+      }
+      return { ...g, ore };
+    }).sort((a, b) => (a.nome || "").localeCompare(b.nome || ""));
+  })();
+
+  const set = (k, v) => setSede(s => ({ ...s, [k]: v }));
+  const lbl = { display: "flex", flexDirection: "column", gap: 5, fontSize: 13, fontWeight: 600 };
+
+  return (
+    <div className="dc-page">
+      <div className="dc-page-header"><div><h1>Timbrature</h1>
+        <p>Timbratura dei dipendenti dal portale (solo in sede) e confronto con i turni</p></div></div>
+
+      {msg && <div style={{ background: "#eef3ef", border: "1px solid #d9e4dc", borderRadius: 10, padding: "10px 14px", marginBottom: 14 }}>{msg}</div>}
+
+      <div className="dc-card" style={{ marginBottom: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Sede di lavoro (geofencing)</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14, alignItems: "end" }}>
+          <label style={lbl}>Nome sede<input className="dc-input" value={sede.nome || ""} onChange={e => set("nome", e.target.value)} /></label>
+          <label style={{ ...lbl, gridColumn: "span 2" }}>Indirizzo<input className="dc-input" value={sede.indirizzo || ""} onChange={e => set("indirizzo", e.target.value)} /></label>
+          <label style={lbl}>Latitudine<input className="dc-input" value={sede.lat ?? ""} onChange={e => set("lat", e.target.value)} /></label>
+          <label style={lbl}>Longitudine<input className="dc-input" value={sede.lng ?? ""} onChange={e => set("lng", e.target.value)} /></label>
+          <label style={lbl}>Raggio ammesso (m)<input type="number" className="dc-input" value={sede.raggio_m ?? 200} onChange={e => set("raggio_m", e.target.value)} /></label>
+        </div>
+        <div style={{ display: "flex", gap: 14, alignItems: "center", marginTop: 12, flexWrap: "wrap" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600, margin: 0 }}>
+            <input type="checkbox" checked={!!sede.blocca_fuori_sede} onChange={e => set("blocca_fuori_sede", e.target.checked)} /> Consenti la timbratura solo in sede
+          </label>
+          <button className="dc-btn" onClick={usaPosizione}>Usa la mia posizione attuale</button>
+          <button className="dc-btn-primary" disabled={busy === "sede"} onClick={salvaSede}>{busy === "sede" ? "Salvo…" : "Salva sede"}</button>
+        </div>
+      </div>
+
+      <div className="dc-card">
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <h3 style={{ margin: 0 }}>Timbrature del giorno</h3>
+          <input type="date" className="dc-input" style={{ width: "auto" }} value={data} onChange={e => setData(e.target.value)} />
+        </div>
+        {perDip.length === 0 ? <p className="dc-muted" style={{ marginTop: 12 }}>Nessuna timbratura per questa data.</p> : (
+          <table className="dc-table" style={{ marginTop: 12 }}>
+            <thead><tr><th>Dipendente</th><th>Entrata</th><th>Uscita</th><th>Ore</th><th>Sede</th></tr></thead>
+            <tbody>
+              {perDip.map((g, i) => (
+                <tr key={i}>
+                  <td>{g.nome}</td>
+                  <td>{g.entrata?.ora || "—"}</td>
+                  <td>{g.uscita?.ora || (g.entrata ? "in corso" : "—")}</td>
+                  <td>{g.ore != null ? `${g.ore} h` : "—"}</td>
+                  <td>{g.fuori ? <Badge variant="danger">fuori sede</Badge> : <Badge variant="success">in sede</Badge>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <p className="dc-muted" style={{ fontSize: 12, marginTop: 10 }}>Confronta queste presenze reali con i turni pianificati nella pagina Presenze (il calendario sovrappone già i turni).</p>
+      </div>
     </div>
   );
 }

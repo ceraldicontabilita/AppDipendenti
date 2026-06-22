@@ -64,16 +64,30 @@ async def timbra(payload: Dict[str, Any] = Body(...),
     if tipo == "uscita" and not ultima:
         raise HTTPException(409, "Devi prima timbrare l'entrata.")
 
-    # Geofencing opzionale
+    # Geofencing
     distanza_m = None
     fuori_sede = None
     sede = await _sede(db)
-    if sede and sede.get("lat") is not None and lat is not None and lng is not None:
-        try:
-            distanza_m = round(_haversine_m(float(lat), float(lng), float(sede["lat"]), float(sede["lng"])))
-            fuori_sede = distanza_m > int(sede.get("raggio_m") or RAGGIO_DEFAULT_M)
-        except (ValueError, TypeError):
-            distanza_m = None
+    raggio = int((sede or {}).get("raggio_m") or RAGGIO_DEFAULT_M)
+    if sede and sede.get("lat") is not None:
+        if lat is None or lng is None:
+            # Sede attiva ma posizione assente
+            if sede.get("blocca_fuori_sede"):
+                raise HTTPException(403, "Posizione non disponibile: attiva il GPS e consenti la "
+                                         "localizzazione per timbrare in sede.")
+            fuori_sede = True
+        else:
+            try:
+                distanza_m = round(_haversine_m(float(lat), float(lng), float(sede["lat"]), float(sede["lng"])))
+                # tolleranza per l'imprecisione GPS riportata dal telefono
+                margine = int(accuracy) if isinstance(accuracy, (int, float)) else 0
+                fuori_sede = max(0, distanza_m - margine) > raggio
+            except (ValueError, TypeError):
+                distanza_m = None
+        if fuori_sede and sede.get("blocca_fuori_sede"):
+            raise HTTPException(403,
+                f"Sei fuori sede ({'~' + str(distanza_m) + ' m dalla sede' if distanza_m is not None else 'posizione non valida'}). "
+                f"La timbratura è ammessa solo presso {sede.get('nome') or 'la sede di lavoro'}.")
 
     nome = identity.get("name") or ""
     if not nome:
@@ -154,10 +168,12 @@ async def imposta_sede(payload: Dict[str, Any] = Body(...),
         lat = float(payload["lat"]); lng = float(payload["lng"])
     except (KeyError, ValueError, TypeError):
         raise HTTPException(400, "lat e lng obbligatori e numerici")
+    raggio = int(payload.get("raggio_m") or RAGGIO_DEFAULT_M)
     await db[COLL_SET].update_one(
         {"chiave": "sede_lavoro"},
-        {"$set": {"chiave": "sede_lavoro", "lat": lat, "lng": lng,
-                  "raggio_m": int(payload.get("raggio_m") or RAGGIO_DEFAULT_M),
-                  "indirizzo": payload.get("indirizzo", "")}},
+        {"$set": {"chiave": "sede_lavoro", "lat": lat, "lng": lng, "raggio_m": raggio,
+                  "nome": payload.get("nome", ""), "indirizzo": payload.get("indirizzo", ""),
+                  "blocca_fuori_sede": bool(payload.get("blocca_fuori_sede", True))}},
         upsert=True)
-    return {"ok": True, "lat": lat, "lng": lng, "raggio_m": int(payload.get("raggio_m") or RAGGIO_DEFAULT_M)}
+    return {"ok": True, "lat": lat, "lng": lng, "raggio_m": raggio,
+            "blocca_fuori_sede": bool(payload.get("blocca_fuori_sede", True))}
