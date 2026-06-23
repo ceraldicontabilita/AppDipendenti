@@ -1800,6 +1800,59 @@ async def importa_anagrafica(file: UploadFile = File(...)):
     return {"creati": creati, "aggiornati": aggiornati}
 
 
+@router.post("/riduzioni-orario")
+async def save_riduzioni_orario(data: dict = Body(...)):
+    """Salva la riduzione oraria per dipendente: ore/giorno ridotte, paga oraria,
+    data inizio e data fine (scadenza sorvegliata). Body: {voci:[{dipendente_id,...}]}."""
+    db = get_db()
+    n = 0
+    for v in (data.get("voci") or []):
+        did = v.get("dipendente_id")
+        if not did:
+            continue
+
+        def num(x):
+            try:
+                return float(str(x).replace(",", ".")) if x not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+        rid = {"attiva": bool(v.get("attiva")),
+               "ore_giorno": num(v.get("ore_giorno")),
+               "paga_oraria": num(v.get("paga_oraria")),
+               "data_inizio": v.get("data_inizio") or None,
+               "data_fine": v.get("data_fine") or None,
+               "note": (v.get("note") or "").strip(),
+               "updated_at": now_iso()}
+        await db.dipendenti.update_one({"id": did}, {"$set": {"riduzione_orario": rid}})
+        n += 1
+    return {"salvati": n}
+
+
+@router.get("/riduzioni-orario/scadenze")
+async def riduzioni_in_scadenza(giorni: int = 30):
+    """Riduzioni attive con scadenza entro N giorni (o già scadute) — vigilanza contratto."""
+    db = get_db()
+    oggi = datetime.now(timezone.utc).date()
+    out = []
+    async for d in db.dipendenti.find({"riduzione_orario.attiva": True}, {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "riduzione_orario": 1}):
+        rid = d.get("riduzione_orario") or {}
+        df = rid.get("data_fine")
+        if not df:
+            continue
+        try:
+            scad = datetime.strptime(df[:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        gg = (scad - oggi).days
+        if gg <= giorni:
+            out.append({"dipendente_id": d.get("id"),
+                        "nome": f"{d.get('cognome','')} {d.get('nome','')}".strip(),
+                        "data_fine": df, "giorni_alla_scadenza": gg,
+                        "scaduta": gg < 0, "ore_giorno": rid.get("ore_giorno")})
+    out.sort(key=lambda x: x["giorni_alla_scadenza"])
+    return out
+
+
 @router.post("/paghe/importa-pagamenti")
 async def importa_pagamenti(file: UploadFile = File(...)):
     """Importa i bonifici/pagamenti dal CSV banca (Esecuzione;Ordinante;Beneficiario;Importo;

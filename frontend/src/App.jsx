@@ -438,6 +438,21 @@ function AnagraficaPage({ dipendenti, reload }) {
     } catch (err) { alert(err?.response?.data?.detail || "Errore import anagrafica"); }
     finally { setAnagBusy(false); if (anagRef.current) anagRef.current.value = ""; }
   };
+  const [showRid, setShowRid] = useState(false);
+  const [ridRows, setRidRows] = useState([]);
+  const apriRid = () => {
+    setRidRows(dipendenti.map(d => { const r = d.riduzione_orario || {}; return {
+      dipendente_id: d.id, nome: `${d.cognome || ''} ${d.nome || ''}`.trim() || d.nome,
+      attiva: !!r.attiva, ore_giorno: r.ore_giorno ?? "", paga_oraria: r.paga_oraria ?? "",
+      data_inizio: r.data_inizio || "", data_fine: r.data_fine || "" }; }));
+    setShowRid(true);
+  };
+  const setRidRow = (i, k, v) => setRidRows(rs => rs.map((r, j) => j === i ? { ...r, [k]: v } : r));
+  const salvaRid = async () => {
+    await axios.post(`${API}/riduzioni-orario`, { voci: ridRows.map(r => ({ dipendente_id: r.dipendente_id, attiva: r.attiva, ore_giorno: r.ore_giorno, paga_oraria: r.paga_oraria, data_inizio: r.data_inizio || null, data_fine: r.data_fine || null })) });
+    setShowRid(false); reload && reload();
+  };
+  const oggiISO = new Date().toISOString().slice(0, 10);
 
   const filteredDipendenti = dipendenti.filter(d => {
     if (filter === "attivi") return d.stato === "attivo";
@@ -511,6 +526,9 @@ function AnagraficaPage({ dipendenti, reload }) {
           <input ref={anagRef} type="file" accept=".xlsx" onChange={handleImportAnagrafica} style={{ display: "none" }} />
           <button onClick={() => anagRef.current?.click()} disabled={anagBusy} className="dc-btn" title="Importa/aggiorna l'anagrafica da Excel (Cognome, Nome, CF, …)">
             {anagBusy ? "Importo…" : "📥 Importa anagrafica (Excel)"}
+          </button>
+          <button onClick={apriRid} className="dc-btn" title="Riduzione oraria collettiva: ore/giorno, paga oraria e scadenza sorvegliata">
+            ⏱️ Riduzione orario
           </button>
           <button onClick={() => openModal()} className="dc-btn dc-btn-primary" data-testid="add-dipendente">
             <Plus size={18} /> Nuovo Dipendente
@@ -611,6 +629,41 @@ function AnagraficaPage({ dipendenti, reload }) {
                 <button type="submit" className="dc-btn dc-btn-primary">{editingDip ? "Salva" : "Crea"}</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {showRid && (
+        <div onClick={() => setShowRid(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
+          <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 880, width: "100%", marginTop: 20 }}>
+            <h3 style={{ marginTop: 0 }}>⏱️ Riduzione oraria collettiva</h3>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Per ogni dipendente: spunta <b>Attiva</b>, imposta le <b>ore/giorno</b> ridotte, l'eventuale <b>paga oraria</b> e le date <b>dal/al</b>. Il sistema sorveglia la <b>scadenza</b> (data fine): in rosso se scaduta, in arancione se entro 30 giorni. Serve per ridurre le ore ed evitare licenziamenti.</p>
+            <div style={{ maxHeight: "62vh", overflow: "auto" }}>
+              <table className="dc-table" style={{ minWidth: 800, whiteSpace: "nowrap" }}>
+                <thead><tr><th>Dipendente</th><th>Attiva</th><th>Ore/giorno</th><th>Paga oraria €</th><th>Dal</th><th>Al (scadenza)</th><th>Stato</th></tr></thead>
+                <tbody>
+                  {ridRows.map((r, i) => {
+                    const scaduta = r.attiva && r.data_fine && r.data_fine < oggiISO;
+                    const vicina = r.attiva && r.data_fine && r.data_fine >= oggiISO && (new Date(r.data_fine) - new Date(oggiISO)) / 86400000 <= 30;
+                    return (
+                      <tr key={r.dipendente_id}>
+                        <td>{r.nome}</td>
+                        <td style={{ textAlign: "center" }}><input type="checkbox" checked={r.attiva} onChange={e => setRidRow(i, "attiva", e.target.checked)} /></td>
+                        <td><input className="dc-input" style={{ width: 70 }} type="number" min="0" max="24" step="0.5" value={r.ore_giorno} onChange={e => setRidRow(i, "ore_giorno", e.target.value)} /></td>
+                        <td><input className="dc-input" style={{ width: 84 }} type="number" min="0" step="0.01" value={r.paga_oraria} onChange={e => setRidRow(i, "paga_oraria", e.target.value)} /></td>
+                        <td><input className="dc-input" type="date" value={r.data_inizio} onChange={e => setRidRow(i, "data_inizio", e.target.value)} /></td>
+                        <td><input className="dc-input" type="date" value={r.data_fine} onChange={e => setRidRow(i, "data_fine", e.target.value)} /></td>
+                        <td>{!r.attiva ? <span className="dc-muted">—</span> : scaduta ? <Badge variant="danger">scaduta</Badge> : vicina ? <Badge variant="warning">in scadenza</Badge> : <Badge variant="success">attiva</Badge>}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
+              <button className="dc-btn" onClick={() => setShowRid(false)}>Chiudi</button>
+              <button className="dc-btn-primary" onClick={salvaRid}>Salva</button>
+            </div>
           </div>
         </div>
       )}
