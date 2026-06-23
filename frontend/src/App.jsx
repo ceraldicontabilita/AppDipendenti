@@ -1852,6 +1852,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
   const totAcconti = dipendenti.reduce((s, d) => s + (get(d.id).acconti || []).reduce((a, x) => a + (parseFloat(x.importo) || 0), 0), 0);
   const inp = { border: "1px solid #d1d5db", borderRadius: 8, padding: "7px 9px", fontSize: 14, width: "100%", boxSizing: "border-box" };
 
+  const [showImport, setShowImport] = useState(false);
   return (
     <div className="dc-page">
       <div className="dc-page-header">
@@ -1859,26 +1860,25 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
           <h1>Buste Paga</h1>
           <p>Importo busta, bonifico ricevuto e acconti · tutto salvato sul database</p>
         </div>
-        <div className="dc-page-actions">
+        <div className="dc-page-actions" style={{ position: "relative" }}>
           <input ref={fileRef} type="file" accept=".pdf,.zip,application/pdf,application/zip,application/x-zip-compressed" multiple onChange={handleImportLul} style={{ display: "none" }} />
-          <button onClick={() => fileRef.current?.click()} disabled={importing}
-            style={{ background: "#5b7a6b", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
-            {importing ? "Importo…" : "Importa tutti i documenti"}
-          </button>
-          <button onClick={handleImportEmail} disabled={importing} title="Scarica gli allegati PDF dalla casella di posta (inbox e cartelle)"
-            style={{ background: "#3f5a4e", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
-            {importing ? "…" : "Importa da email"}
-          </button>
           <input ref={excelRef} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={handleImportPrimaNota} style={{ display: "none" }} />
-          <button onClick={() => excelRef.current?.click()} disabled={importing} title="Importa la Prima Nota Salari (Excel): inserisce i bonifici nei mesi corrispondenti"
-            style={{ background: "#4f6b5d", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
-            {importing ? "…" : "Importa Prima Nota (Excel)"}
-          </button>
           <input ref={csvRef} type="file" accept=".csv,text/csv" onChange={handleImportPagamenti} style={{ display: "none" }} />
-          <button onClick={() => csvRef.current?.click()} disabled={importing} title="Importa il CSV banca dei pagamenti (esiti bonifici)"
-            style={{ background: "#6e8377", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
-            {importing ? "…" : "Importa pagamenti (CSV)"}
+          <button onClick={() => setShowImport(s => !s)} disabled={importing}
+            style={{ background: "#5b7a6b", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
+            {importing ? "Importo…" : "⤵ Importa  ▾"}
           </button>
+          {showImport && (
+            <div style={{ position: "absolute", top: "100%", left: 0, marginTop: 6, background: "#fffefb", border: "1px solid #e6e0d4", borderRadius: 10, boxShadow: "0 6px 20px rgba(0,0,0,.12)", zIndex: 30, minWidth: 250, overflow: "hidden" }}>
+              {[["Libro Unico (PDF/ZIP)", () => fileRef.current?.click()],
+                ["Buste da email", handleImportEmail],
+                ["Prima Nota (Excel)", () => excelRef.current?.click()],
+                ["Pagamenti banca (CSV)", () => csvRef.current?.click()]].map(([label, fn], i) => (
+                <button key={i} onClick={() => { setShowImport(false); fn(); }}
+                  style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", borderBottom: i < 3 ? "1px solid #f0ebe0" : "none", padding: "11px 14px", fontSize: 14, cursor: "pointer", color: "#2a3329" }}>{label}</button>
+              ))}
+            </div>
+          )}
           <select value={mese} onChange={e => setMese(+e.target.value)} className="dc-select">
             {mesi.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
           </select>
@@ -2237,18 +2237,19 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                   {salvato[dip.id] ? "✓ Salvato" : "Salva"}
                 </button>
               </div>
-              {(d.prestito_importo !== "" || d.tfr_anticipo_importo !== "" || d.acconto_cedolino !== "") && (
+              {(Number(d.acconto_cedolino) > 0 || Number(d.prestito_importo) > 0 || Number(d.tfr_anticipo_importo) > 0) && (
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8, paddingTop: 8, borderTop: "1px dashed #e6e0d4" }}>
-                  {d.acconto_cedolino !== "" && (
+                  {Number(d.acconto_cedolino) > 0 && (
                     <span style={{ background: "#e8efe9", color: "#2a4d3a", border: "1px solid #cfe0d4", borderRadius: 8, padding: "3px 10px", fontSize: 12, fontWeight: 700 }}>
-                      Acconto dal cedolino: € {eur(d.acconto_cedolino)}{d.saldo_residuo !== "" ? ` · saldo da pagare € ${eur(d.saldo_residuo)}` : ""}
+                      Acconto dal cedolino: € {eur(d.acconto_cedolino)}{Number(d.saldo_residuo) ? ` · saldo da pagare € ${eur(d.saldo_residuo)}` : ""}
                     </span>
                   )}
-                    <span style={{ background: "#efe9f6", color: "#6a4a86", border: "1px solid #ddd0ec", borderRadius: 8, padding: "3px 10px", fontSize: 12, fontWeight: 700 }}>
+                  {Number(d.prestito_importo) > 0 && (
+                    <span style={{ background: "#f3ead9", color: "#56442d", border: "1px solid #e7d6b9", borderRadius: 8, padding: "3px 10px", fontSize: 12, fontWeight: 700 }}>
                       Prestito {mesi[mese - 1]}: € {eur(d.prestito_importo)} · saldo € {eur(d.prestito_saldo)}
                     </span>
                   )}
-                  {d.tfr_anticipo_importo !== "" && (
+                  {Number(d.tfr_anticipo_importo) > 0 && (
                     <span style={{ background: "#f3ead9", color: "#56442d", border: "1px solid #e7d6b9", borderRadius: 8, padding: "3px 10px", fontSize: 12, fontWeight: 700 }}>
                       Anticipo TFR: € {eur(d.tfr_anticipo_importo)} (fuori dal saldo)
                     </span>
