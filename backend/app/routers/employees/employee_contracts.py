@@ -899,6 +899,26 @@ async def finalizza_contratto(contract_id: str, file: Optional[UploadFile] = Fil
     }
     await db["contratti_dipendenti"].insert_one(fasc.copy())
 
+    # A→B: il contratto definitivo entra ANCHE nei Documenti del dipendente (cartella),
+    # così anagrafica, fascicolo e documenti restano collegati. Dedup per hash.
+    try:
+        import hashlib
+        ctype0 = contract.get("contract_type", "")
+        h = hashlib.sha256(definitivo).hexdigest()
+        if not await db["documenti_cloud"].find_one({"hash": h}):
+            cat = "RIDUZIONE_ORARIO" if "riduzione" in ctype0 else "CONTRATTO"
+            await db["documenti_cloud"].insert_one({
+                "id": str(uuid.uuid4()),
+                "dipendente_id": contract.get("employee_id"),
+                "dipendente_nome": nome,
+                "titolo": contract.get("contract_name") or def_name,
+                "filename": def_name, "tipo": cat, "categoria": cat, "hash": h,
+                "file_data": def_b64, "assegnato": True,
+                "origine": "contratto_finalizzato", "data_caricamento": now,
+            })
+    except Exception:
+        logger.warning("documenti_cloud da contratto finalizzato: skip")
+
     # A→B: il contratto definitivo aggiorna l'anagrafica del dipendente.
     add_dati = contract.get("additional_data", {}) or {}
     ctype = contract.get("contract_type", "")
