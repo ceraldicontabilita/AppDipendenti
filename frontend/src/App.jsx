@@ -2046,7 +2046,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
         {vistaAnno && (
           <div style={{ overflowX: "auto", marginTop: 10 }}>
             {!annoMatrix ? <div className="dc-muted">Carico l'anno…</div> : (
-              <table className="dc-table" style={{ minWidth: 1040, whiteSpace: "nowrap", fontSize: 13 }}>
+              <table className="dc-table" style={{ minWidth: 1280, whiteSpace: "nowrap", fontSize: 12 }}>
                 <thead><tr><th>Dipendente</th>{mesi.map((m, i) => <th key={i} title={m} style={{ textAlign: "center" }}>{m.slice(0, 3)}</th>)}<th style={{ textAlign: "right" }}>Tot Busta</th><th style={{ textAlign: "right" }}>Tot Bonifici</th><th style={{ textAlign: "right" }}>Differenza</th></tr></thead>
                 <tbody>
                   {dipendenti.map(d => {
@@ -2069,9 +2069,9 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                           let txt, col, title;
                           if (!c) { txt = "·"; col = "#cbd2c9"; title = `${mesi[i]}: nessun dato`; }
                           else if (c === "ok") { txt = "✓"; col = "#3d8168"; title = `${mesi[i]}: pagato (busta € ${eur(bm)})`; }
-                          else if (c === "bonifico") { txt = "+" + Math.round(em).toLocaleString('it-IT'); col = "#7d5526"; title = `${mesi[i]}: bonifico € ${eur(em)} senza busta`; }
-                          else if (manca > 0.5) { txt = Math.round(manca).toLocaleString('it-IT'); col = "#d35f4e"; title = `${mesi[i]}: manca € ${eur(manca)} (busta € ${eur(bm)}, erogato € ${eur(em)})`; }
-                          else { txt = "+" + Math.round(-manca).toLocaleString('it-IT'); col = "#7d5526"; title = `${mesi[i]}: eccedenza € ${eur(-manca)}`; }
+                          else if (c === "bonifico") { txt = "+" + eur(em); col = "#7d5526"; title = `${mesi[i]}: bonifico € ${eur(em)} senza busta`; }
+                          else if (manca > 0.5) { txt = eur(manca); col = "#d35f4e"; title = `${mesi[i]}: manca € ${eur(manca)} (busta € ${eur(bm)}, erogato € ${eur(em)})`; }
+                          else { txt = "+" + eur(-manca); col = "#7d5526"; title = `${mesi[i]}: eccedenza € ${eur(-manca)}`; }
                           return <td key={i} style={{ textAlign: "right", color: col, fontWeight: 700, fontSize: 12 }} title={title}>{txt}</td>;
                         })}
                         <td style={{ textAlign: "right" }}>{tb ? eur(tb) : "—"}</td>
@@ -2085,7 +2085,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                 </tbody>
               </table>
             )}
-            <p className="dc-muted" style={{ fontSize: 12, marginTop: 8 }}>In ogni mese: <b style={{ color: "#d35f4e" }}>numero rosso</b> = importo che manca · <b style={{ color: "#7d5526" }}>+numero</b> = eccedenza · <b style={{ color: "#3d8168" }}>✓</b> = pagato · · = nessun dato. Importi arrotondati; passa il mouse per il dettaglio al centesimo.</p>
+            <p className="dc-muted" style={{ fontSize: 12, marginTop: 8 }}>In ogni mese: <b style={{ color: "#d35f4e" }}>importo rosso</b> = quanto manca · <b style={{ color: "#7d5526" }}>+importo</b> = eccedenza · <b style={{ color: "#3d8168" }}>✓</b> = pagato · · = nessun dato. Importi in euro (es. 1.000,00). Scorri in orizzontale per vedere tutti i mesi.</p>
           </div>
         )}
       </div>
