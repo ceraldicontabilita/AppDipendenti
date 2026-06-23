@@ -1893,10 +1893,15 @@ async def riduzioni_in_scadenza(giorni: int = 30):
 
 @router.post("/paghe/importa-pagamenti")
 async def importa_pagamenti(file: UploadFile = File(...)):
-    """Importa i bonifici/pagamenti dal CSV banca (Esecuzione;Ordinante;Beneficiario;Importo;
-    Div;Descrizione Causale;CRO). Mese di competenza dalla causale (es. '9-2025', 'luglio')
-    o, in mancanza, dalla data. Idempotente (dedup per CRO/riga). Aggiorna bonifico del mese
-    = somma dei pagamenti di quel mese (alimenta anche la prima nota)."""
+    """Importa i bonifici/pagamenti dal CSV banca. Riconosce due formati dall'intestazione:
+    1) ESITI bonifici (Esecuzione;Ordinante;Beneficiario;Importo;Div;Causale;CRO);
+    2) ANDAMENTO conto (Ragione Sociale;Data contabile;Data valuta;Banca;Rapporto;Importo;
+       Divisa;Descrizione;Categoria;Hashtag): tiene solo le USCITE (importo negativo),
+       scarta commissioni bancarie, estrae il nominativo dal 'FAVORE <Nome>' nella descrizione.
+    In entrambi i casi aggancia solo chi è in anagrafica (fornitori esclusi automaticamente).
+    Mese di competenza dalla causale (es. '9-2025', 'luglio') o, in mancanza, dalla data del
+    movimento. Idempotente (dedup per CRO o hash riga). Aggiorna il bonifico del mese = somma
+    dei pagamenti di quel mese e ricalcola lo stato paga (alimenta la prima nota)."""
     import io
     import csv as _csv
     raw = await file.read()
@@ -1947,25 +1952,65 @@ async def importa_pagamenti(file: UploadFile = File(...)):
                 return n, int(y.group(1)) if y else data_dt.year
         return data_dt.month, data_dt.year
 
-    start = 1 if righe and "benefic" in (righe[0][2].lower() if len(righe[0]) > 2 else "") else 0
+    def favore(s):
+        m = re.search(r'favore\s+(.+?)(?:\s+-|\s+notprovide|$)', norm(s))
+        return (m.group(1) if m else norm(s))[:50]
+
+    # Rileva il formato dall'intestazione: ESITI bonifici o ESTRATTO CONTO (entrate/uscite)
+    hdr = [norm(c) for c in (righe[0] if righe else [])]
+
+    def col(*names):
+        return next((i for i, h in enumerate(hdr) if any(n in h for n in names)), None)
+    i_ben = col("beneficiario")
+    if i_ben is not None:
+        formato = "esiti"
+        i_data = col("esecuzione", "data") if col("esecuzione", "data") is not None else 0
+        i_imp = col("importo") if col("importo") is not None else 3
+        i_caus = col("causale", "descrizione")
+        i_cro = col("cro")
+        i_cat = None
+    else:
+        formato = "andamento"
+        i_data = col("data contabile", "data valuta", "data")
+        i_imp = col("importo")
+        i_caus = col("descrizione")
+        i_cat = col("categoria")
+        i_cro = None
+        i_ben = i_caus
+
     importati, non_trovati, affected = 0, [], set()
-    for r in righe[start:]:
-        if len(r) < 4:
+    for r in righe[1:]:
+        if i_imp is None or i_imp >= len(r) or i_data is None or i_data >= len(r):
+            continue
+        importo = to_float(r[i_imp])
+        if importo is None:
             continue
         try:
-            data_dt = datetime.strptime(r[0].strip()[:10], "%d/%m/%Y")
-        except (ValueError, IndexError):
+            data_dt = datetime.strptime(str(r[i_data]).strip()[:10], "%d/%m/%Y")
+        except (ValueError, TypeError):
             continue
-        beneficiario, importo, causale = r[2].strip(), to_float(r[3]), (r[5] if len(r) > 5 else "")
-        cro = (r[6].strip() if len(r) > 6 and r[6] else "")
-        if not importo or importo <= 0:
+        causale = (r[i_caus] if i_caus is not None and i_caus < len(r) else "") or ""
+        if formato == "andamento":
+            if importo >= 0:  # solo uscite = pagamenti
+                continue
+            cat = (r[i_cat] if i_cat is not None and i_cat < len(r) else "") or ""
+            if "commission" in norm(cat) or norm(causale).startswith("comm"):
+                continue  # niente commissioni bancarie
+            importo = -importo
+            beneficiario = favore(causale)
+        else:
+            if importo <= 0:
+                continue
+            beneficiario = (r[i_ben] if i_ben is not None and i_ben < len(r) else "") or ""
+        if importo < 5:
             continue
-        d = trova_dip(beneficiario)
+        d = trova_dip(beneficiario if formato == "esiti" else causale)
         if not d:
-            non_trovati.append(beneficiario)
+            non_trovati.append(beneficiario or favore(causale))
             continue
         mese, anno = mese_anno(causale, data_dt)
-        key = cro or hashlib.sha1(f"{beneficiario}|{r[0]}|{importo}|{causale}".encode()).hexdigest()
+        cro = (r[i_cro].strip() if i_cro is not None and i_cro < len(r) and r[i_cro] else "")
+        key = cro or hashlib.sha1(f"{d['id']}|{r[i_data]}|{importo}|{causale}".encode()).hexdigest()
         await db.pagamenti_esiti.update_one(
             {"key": key},
             {"$set": {"key": key, "dipendente_id": d["id"], "data": data_dt.strftime("%Y-%m-%d"),
