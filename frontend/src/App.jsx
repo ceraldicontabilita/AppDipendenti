@@ -291,8 +291,10 @@ function DashboardPage({ stats, dipendenti, ferie, missioni, getDipendente }) {
   const pendingFerie = ferie.filter(f => f.stato === "in_attesa");
   const pendingMissioni = missioni.filter(m => m.stato === "in_attesa");
   const [alerts, setAlerts] = useState([]);
+  const [pendenze, setPendenze] = useState(null);
   const loadAlerts = () => axios.get(`${API}/alerts`).then(r => setAlerts(r.data.alerts || [])).catch(() => {});
-  useEffect(() => { loadAlerts(); }, []);
+  useEffect(() => { loadAlerts(); axios.get(`${API}/paghe/in-attesa`).then(r => setPendenze(r.data)).catch(() => {}); }, []);
+  const mesiIt = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"];
   const risolviAlert = async (id) => {
     try { await axios.post(`${API}/alerts/${id}/risolvi`); loadAlerts(); } catch {}
   };
@@ -342,6 +344,14 @@ function DashboardPage({ stats, dipendenti, ferie, missioni, getDipendente }) {
             <span className="dc-stat-value">{stats.alert_aperti ?? alerts.length}</span>
           </div>
         </div>
+        <div className="dc-stat-card" style={{ borderLeft: "4px solid #d35f4e" }}>
+          <div className="dc-stat-icon"><FileText size={24} /></div>
+          <div className="dc-stat-content">
+            <span className="dc-stat-label">BUSTE DA PAGARE</span>
+            <span className="dc-stat-value">{stats.buste_in_attesa ?? 0}</span>
+            <span className="dc-stat-sub">€ {(stats.importo_in_attesa || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} da erogare</span>
+          </div>
+        </div>
       </div>
 
       <div className="dc-card" style={{ marginBottom: 16 }}>
@@ -363,6 +373,29 @@ function DashboardPage({ stats, dipendenti, ferie, missioni, getDipendente }) {
           </div>
         )}
       </div>
+
+      {pendenze && pendenze.totale > 0 && (
+        <div className="dc-card" style={{ marginBottom: 16, borderLeft: "4px solid #d35f4e" }}>
+          <h3><FileText size={18} /> Buste in attesa di pagamento <span className="dc-muted" style={{ fontWeight: 400 }}>· {pendenze.totale} · € {(pendenze.importo || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></h3>
+          <div style={{ overflowX: "auto" }}>
+            <table className="dc-table" style={{ minWidth: 480 }}>
+              <thead><tr><th>Dipendente</th><th>Periodo</th><th style={{ textAlign: "right" }}>Busta €</th><th style={{ textAlign: "right" }}>Manca €</th><th>Stato</th></tr></thead>
+              <tbody>
+                {pendenze.righe.slice(0, 30).map((x, i) => (
+                  <tr key={i}>
+                    <td>{x.dipendente}</td>
+                    <td>{mesiIt[(x.mese || 1) - 1]} {x.anno}</td>
+                    <td style={{ textAlign: "right" }}>{x.busta ? x.busta.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—"}</td>
+                    <td style={{ textAlign: "right", color: "#d35f4e", fontWeight: 700 }}>{x.saldo.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    <td><Badge variant={x.stato === "parziale" ? "warning" : "danger"}>{x.stato === "parziale" ? "parziale" : "in attesa"}</Badge></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="dc-muted" style={{ fontSize: 12, marginTop: 8 }}>Aggancio automatico: appena arriva il bonifico (PDF/Excel/CSV) la riga sparisce. Dettaglio in Buste Paga.</p>
+        </div>
+      )}
 
       <div className="dc-dashboard-grid">
         <div className="dc-card">

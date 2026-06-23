@@ -1988,6 +1988,30 @@ async def importa_pagamenti(file: UploadFile = File(...)):
             "non_trovati": sorted(set(non_trovati))}
 
 
+@router.get("/paghe/in-attesa")
+async def paghe_in_attesa():
+    """Buste in attesa di pagamento (o parziali): elenco per il pannello/avvisi."""
+    db = get_db()
+    dip_map = {d["id"]: f"{d.get('cognome','')} {d.get('nome','')}".strip()
+               async for d in db.dipendenti.find({}, {"_id": 0, "id": 1, "nome": 1, "cognome": 1})}
+    out = []
+    async for p in db.paghe_mensili.find(
+            {"stato_pagamento": {"$in": ["in_attesa_pagamento", "parziale"]}}, {"_id": 0}):
+        saldo = p.get("saldo")
+        if saldo is None:
+            saldo = round(float(p.get("importo_busta") or 0) - float(p.get("bonifico_importo") or 0), 2)
+        if not saldo or saldo <= 0.5:
+            continue
+        out.append({"dipendente_id": p.get("dipendente_id"),
+                    "dipendente": dip_map.get(p.get("dipendente_id"), p.get("dipendente_id")),
+                    "anno": p.get("anno"), "mese": p.get("mese"),
+                    "stato": p.get("stato_pagamento"),
+                    "busta": round(float(p.get("importo_busta") or 0), 2),
+                    "saldo": round(saldo, 2)})
+    out.sort(key=lambda x: (x["anno"] or 0, x["mese"] or 0))
+    return {"righe": out, "totale": len(out), "importo": round(sum(x["saldo"] for x in out), 2)}
+
+
 @router.get("/paghe/prima-nota")
 async def prima_nota(dipendente_id: str):
     """Prima nota salari di un dipendente: tutti i mesi con busta, erogato (bonifici+acconti)
@@ -2388,6 +2412,19 @@ async def get_dashboard_stats():
     alert_aperti = await get_db().alerts.count_documents(
         {"stato": "aperto", "modulo": {"$in": MODULI_HR}})
 
+    # Buste in attesa di pagamento (motore unico): busta presente ma non ancora pagata
+    buste_attesa = 0
+    importo_attesa = 0.0
+    async for p in get_db().paghe_mensili.find(
+            {"stato_pagamento": {"$in": ["in_attesa_pagamento", "parziale"]}},
+            {"_id": 0, "saldo": 1, "importo_busta": 1, "bonifico_importo": 1}):
+        saldo = p.get("saldo")
+        if saldo is None:
+            saldo = float(p.get("importo_busta") or 0) - float(p.get("bonifico_importo") or 0)
+        if saldo and saldo > 0.5:
+            buste_attesa += 1
+            importo_attesa += saldo
+
     return {
         "totale_dipendenti": len(dipendenti),
         "dipendenti_attivi": len(attivi),
@@ -2395,6 +2432,8 @@ async def get_dashboard_stats():
         "missioni_in_attesa": missioni_pending,
         "presenze_oggi": presenze_oggi,
         "alert_aperti": alert_aperti,
+        "buste_in_attesa": buste_attesa,
+        "importo_in_attesa": round(importo_attesa, 2),
     }
 
 
