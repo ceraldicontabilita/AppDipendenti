@@ -1853,6 +1853,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
   const inp = { border: "1px solid #d1d5db", borderRadius: 8, padding: "7px 9px", fontSize: 14, width: "100%", boxSizing: "border-box" };
 
   const [showImport, setShowImport] = useState(false);
+  const [showCerca, setShowCerca] = useState(false);
   return (
     <div className="dc-page">
       <div className="dc-page-header">
@@ -1956,9 +1957,13 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
         </div>
       )}
 
-      {/* Motore di ricerca voci cedolino + riscansione storico */}
+      {/* Motore di ricerca voci cedolino + riscansione storico (a scomparsa) */}
       <div className="dc-card" style={{ marginBottom: 16 }}>
-        <h3 style={{ marginTop: 0 }}>🔎 Cerca nelle buste (qualsiasi voce)</h3>
+        <h3 style={{ marginTop: 0, marginBottom: showCerca ? undefined : 0, cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }} onClick={() => setShowCerca(s => !s)}>
+          <span>🔎 Cerca nelle buste (qualsiasi voce)</span>
+          <span className="dc-muted" style={{ fontSize: 14 }}>{showCerca ? "▲" : "▼"}</span>
+        </h3>
+        {showCerca && (<>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <input className="dc-input" style={{ flex: "1 1 240px" }} placeholder="Codice (es. F09081) o testo (es. 730, 13ma, L.207)"
             value={cercaQ} onChange={e => setCercaQ(e.target.value)} onKeyDown={e => e.key === "Enter" && cercaVoce()} />
@@ -1981,6 +1986,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
             {cercaRes.totale > 0 && <p className="dc-muted" style={{ fontSize: 12, marginTop: 6 }}>{cercaRes.totale} risultati.</p>}
           </div>
         )}
+        </>)}
       </div>
 
       {/* Riepilogo busta vs bonifico — mensile o annuale */}
@@ -2182,6 +2188,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
         <div className="dc-buste-stat"><span className="dc-buste-stat-label">DIPENDENTI</span><span className="dc-buste-stat-value">{dipendenti.length}</span></div>
       </div>
 
+      <h3 style={{ margin: "4px 0 10px" }}>✏️ Inserimento / modifica per dipendente <span className="dc-muted" style={{ fontWeight: 400, fontSize: 14 }}>· {mesi[mese - 1]} {anno}</span></h3>
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         {dipendenti.map(dip => {
           const d = get(dip.id);
