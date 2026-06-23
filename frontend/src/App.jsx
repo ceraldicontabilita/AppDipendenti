@@ -2046,7 +2046,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
         {vistaAnno && (
           <div style={{ overflowX: "auto", marginTop: 10 }}>
             {!annoMatrix ? <div className="dc-muted">Carico l'anno…</div> : (
-              <table className="dc-table" style={{ minWidth: 920, whiteSpace: "nowrap", fontSize: 13 }}>
+              <table className="dc-table" style={{ minWidth: 1040, whiteSpace: "nowrap", fontSize: 13 }}>
                 <thead><tr><th>Dipendente</th>{mesi.map((m, i) => <th key={i} title={m} style={{ textAlign: "center" }}>{m.slice(0, 3)}</th>)}<th style={{ textAlign: "right" }}>Tot Busta</th><th style={{ textAlign: "right" }}>Tot Bonifici</th><th style={{ textAlign: "right" }}>Differenza</th></tr></thead>
                 <tbody>
                   {dipendenti.map(d => {
@@ -2062,9 +2062,17 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                       <tr key={d.id}>
                         <td><button onClick={() => apriPrimaNota(d.id, d.cognome ? `${d.cognome} ${d.nome || ''}`.trim() : d.nome)} title="Apri prima nota / saldo progressivo" style={{ background: "none", border: "none", color: "#5b7a6b", cursor: "pointer", textDecoration: "underline", padding: 0, font: "inherit" }}>{d.cognome ? `${d.cognome} ${d.nome?.[0] || ''}.` : d.nome}</button></td>
                         {celle.map((c, i) => {
-                          const sym = c === "ok" ? "✓" : c === "manca" ? "⚠" : c === "parziale" ? "~" : c === "bonifico" ? "€" : "·";
-                          const col = c === "ok" ? "#3d8168" : c === "manca" ? "#d35f4e" : c === "parziale" ? "#b9770e" : c === "bonifico" ? "#5b7a6b" : "#cbd2c9";
-                          return <td key={i} style={{ textAlign: "center", color: col, fontWeight: 700 }} title={`${mesi[i]}: ${c || "nessun dato"}`}>{sym}</td>;
+                          const p = paghe[i];
+                          const bm = parseFloat(p?.importo_busta) || 0;
+                          const em = (parseFloat(p?.bonifico_importo) || 0) + ((p?.acconti || []).reduce((a, x) => a + (parseFloat(x.importo) || 0), 0));
+                          const manca = bm - em;
+                          let txt, col, title;
+                          if (!c) { txt = "·"; col = "#cbd2c9"; title = `${mesi[i]}: nessun dato`; }
+                          else if (c === "ok") { txt = "✓"; col = "#3d8168"; title = `${mesi[i]}: pagato (busta € ${eur(bm)})`; }
+                          else if (c === "bonifico") { txt = "+" + Math.round(em).toLocaleString('it-IT'); col = "#7d5526"; title = `${mesi[i]}: bonifico € ${eur(em)} senza busta`; }
+                          else if (manca > 0.5) { txt = Math.round(manca).toLocaleString('it-IT'); col = "#d35f4e"; title = `${mesi[i]}: manca € ${eur(manca)} (busta € ${eur(bm)}, erogato € ${eur(em)})`; }
+                          else { txt = "+" + Math.round(-manca).toLocaleString('it-IT'); col = "#7d5526"; title = `${mesi[i]}: eccedenza € ${eur(-manca)}`; }
+                          return <td key={i} style={{ textAlign: "right", color: col, fontWeight: 700, fontSize: 12 }} title={title}>{txt}</td>;
                         })}
                         <td style={{ textAlign: "right" }}>{tb ? eur(tb) : "—"}</td>
                         <td style={{ textAlign: "right" }}>{tbon ? eur(tbon) : "—"}</td>
@@ -2077,7 +2085,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                 </tbody>
               </table>
             )}
-            <p className="dc-muted" style={{ fontSize: 12, marginTop: 8 }}>✓ pagato · ⚠ da pagare · ~ parziale · € bonifico senza busta · · nessun dato. Passa il mouse su una cella per il dettaglio.</p>
+            <p className="dc-muted" style={{ fontSize: 12, marginTop: 8 }}>In ogni mese: <b style={{ color: "#d35f4e" }}>numero rosso</b> = importo che manca · <b style={{ color: "#7d5526" }}>+numero</b> = eccedenza · <b style={{ color: "#3d8168" }}>✓</b> = pagato · · = nessun dato. Importi arrotondati; passa il mouse per il dettaglio al centesimo.</p>
           </div>
         )}
       </div>
