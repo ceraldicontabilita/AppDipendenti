@@ -443,14 +443,28 @@ function AnagraficaPage({ dipendenti, reload }) {
   const apriRid = () => {
     setRidRows(dipendenti.map(d => { const r = d.riduzione_orario || {}; return {
       dipendente_id: d.id, nome: `${d.cognome || ''} ${d.nome || ''}`.trim() || d.nome,
-      attiva: !!r.attiva, ore_giorno: r.ore_giorno ?? "", paga_oraria: r.paga_oraria ?? "",
+      attiva: !!r.attiva, era_attiva: !!r.attiva, ore_giorno: r.ore_giorno ?? "", paga_oraria: r.paga_oraria ?? "",
       data_inizio: r.data_inizio || "", data_fine: r.data_fine || "" }; }));
     setShowRid(true);
   };
   const setRidRow = (i, k, v) => setRidRows(rs => rs.map((r, j) => j === i ? { ...r, [k]: v } : r));
   const salvaRid = async () => {
     await axios.post(`${API}/riduzioni-orario`, { voci: ridRows.map(r => ({ dipendente_id: r.dipendente_id, attiva: r.attiva, ore_giorno: r.ore_giorno, paga_oraria: r.paga_oraria, data_inizio: r.data_inizio || null, data_fine: r.data_fine || null })) });
+    // Per chi viene ATTIVATO ora: genera il contratto di solidarietà → entra nell'iter firma
+    const daGenerare = ridRows.filter(r => r.attiva && !r.era_attiva);
+    let generati = 0; const falliti = [];
+    for (const r of daGenerare) {
+      try {
+        await axios.post(`/api/contracts/generate/${r.dipendente_id}`, { contract_type: "riduzione_orario",
+          additional_data: { ore_giorno: r.ore_giorno, stipendio_orario: r.paga_oraria, ore_settimanali: r.ore_giorno ? String(Number(r.ore_giorno) * 6) : "", data_inizio: r.data_inizio, data_fine: r.data_fine } });
+        generati++;
+      } catch (e) { falliti.push(r.nome + (e?.response?.status === 400 ? " (manca il modello)" : "")); }
+    }
     setShowRid(false); reload && reload();
+    if (daGenerare.length) {
+      alert(`Riduzione salvata.\nContratti di solidarietà generati: ${generati}` +
+        (falliti.length ? `\nNon generati: ${falliti.join(", ")}\n→ carica il modello "Accordo Riduzione Orario" in Assunzione → Modelli.` : `\nLi trovi in Assunzione & Contratti per firma/invio e archiviazione nel fascicolo.`));
+    }
   };
   const oggiISO = new Date().toISOString().slice(0, 10);
 
@@ -637,7 +651,7 @@ function AnagraficaPage({ dipendenti, reload }) {
         <div onClick={() => setShowRid(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
           <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 880, width: "100%", marginTop: 20 }}>
             <h3 style={{ marginTop: 0 }}>⏱️ Riduzione oraria collettiva</h3>
-            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Per ogni dipendente: spunta <b>Attiva</b>, imposta le <b>ore/giorno</b> ridotte, l'eventuale <b>paga oraria</b> e le date <b>dal/al</b>. Il sistema sorveglia la <b>scadenza</b> (data fine): in rosso se scaduta, in arancione se entro 30 giorni. Serve per ridurre le ore ed evitare licenziamenti.</p>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Per ogni dipendente: spunta <b>Attiva</b>, imposta le <b>ore/giorno</b> ridotte, l'eventuale <b>paga oraria</b> e le date <b>dal/al</b>. <b>All'attivazione il sistema genera il contratto di solidarietà</b> che entra nell'iter firma (lo trovi in Assunzione &amp; Contratti → firma/invio → archiviazione nel fascicolo e nei documenti del dipendente). Il sistema sorveglia la <b>scadenza</b>: rossa se scaduta, arancione entro 30 giorni.</p>
             <div style={{ maxHeight: "62vh", overflow: "auto" }}>
               <table className="dc-table" style={{ minWidth: 800, whiteSpace: "nowrap" }}>
                 <thead><tr><th>Dipendente</th><th>Attiva</th><th>Ore/giorno</th><th>Paga oraria €</th><th>Dal</th><th>Al (scadenza)</th><th>Stato</th></tr></thead>

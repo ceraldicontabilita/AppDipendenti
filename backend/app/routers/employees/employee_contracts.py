@@ -42,6 +42,7 @@ CONTRACT_TYPES = [
     {"id": "informativa_privacy", "name": "Informativa Privacy", "filename": "Informativa-Privacy.docx"},
     {"id": "regolamento", "name": "Regolamento Interno Aziendale", "filename": "REGOLAMENTO INTERNO AZIENDALE.docx"},
     {"id": "richiesta_ferie", "name": "Richiesta Ferie", "filename": "RICHIESTA FERIE.docx"},
+    {"id": "riduzione_orario", "name": "Accordo Riduzione Orario / Solidarietà", "filename": "Accordo riduzione orario.docx"},
 ]
 
 
