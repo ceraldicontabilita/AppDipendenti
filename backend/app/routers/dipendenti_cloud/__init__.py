@@ -234,7 +234,42 @@ async def upsert_pagha(data: dict):
     await get_db().paghe_mensili.update_one(
         {"dipendente_id": dip, "anno": int(anno), "mese": int(mese)},
         {"$set": doc}, upsert=True)
+    await _ricalcola_stato_paga(get_db(), dip, int(anno), int(mese))
     return {"ok": True, "pagha": doc}
+
+
+async def _ricalcola_stato_paga(db, dip, anno, mese):
+    """MOTORE UNICO buste↔bonifici. Aggancia i pagamenti bancari già arrivati
+    (pagamenti_esiti) come bonifico del mese e ricalcola lo stato:
+    in_attesa_pagamento (busta senza pagamento) / parziale / pagato / vuoto.
+    Chiamato da OGNI ingresso (busta da LUL/email, prima nota, CSV, modifica manuale),
+    così il popolamento di un dato aggiorna automaticamente gli altri."""
+    anno, mese = int(anno), int(mese)
+    p = await db.paghe_mensili.find_one({"dipendente_id": dip, "anno": anno, "mese": mese})
+    if not p:
+        return None
+    tot_esiti, n_esiti = 0.0, 0
+    async for e in db.pagamenti_esiti.find({"dipendente_id": dip, "mese": mese, "anno": anno}, {"_id": 0, "importo": 1}):
+        tot_esiti += e.get("importo") or 0
+        n_esiti += 1
+    bonifico = round(tot_esiti, 2) if n_esiti else float(p.get("bonifico_importo") or 0)
+    busta = float(p.get("importo_busta") or 0)
+    acc = sum(float(a.get("importo") or 0) for a in (p.get("acconti") or []))
+    erogato = bonifico + acc
+    if busta <= 0 and erogato <= 0:
+        stato = "vuoto"
+    elif erogato <= 0:
+        stato = "in_attesa_pagamento"
+    elif erogato + 0.5 >= busta:
+        stato = "pagato"
+    else:
+        stato = "parziale"
+    upd = {"stato_pagamento": stato, "saldo": round(busta - erogato, 2), "updated_at": now_iso()}
+    if n_esiti:
+        upd["bonifico_importo"] = bonifico
+        upd["bonifico_ricevuto"] = bonifico > 0
+    await db.paghe_mensili.update_one({"dipendente_id": dip, "anno": anno, "mese": mese}, {"$set": upd})
+    return stato
 
 @router.delete("/paghe")
 async def delete_pagha(dipendente_id: str, anno: int, mese: int):
@@ -774,6 +809,8 @@ async def _importa_documenti(pdf_items, errori_iniziali=None, forza=False):
                 await get_db().paghe_mensili.update_one(
                     {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
                     {"$set": set_doc}, upsert=True)
+                # Motore unico: busta arrivata → aggancia il pagamento o la mette in attesa
+                await _ricalcola_stato_paga(get_db(), dip["id"], anno, mese)
                 # Cedolino (fonte del portale): salvo il PDF REALE ritagliato dal Libro
                 # Unico + il netto, così il dipendente scarica la sua busta vera.
                 ced_set = {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
@@ -1733,6 +1770,7 @@ async def importa_prima_nota(file: UploadFile = File(...)):
                                 "busta_app": round(float(busta_app), 2), "busta_excel": netto})
         await db.paghe_mensili.update_one(
             {"dipendente_id": d["id"], "anno": anno, "mese": mese}, {"$set": set_doc}, upsert=True)
+        await _ricalcola_stato_paga(db, d["id"], anno, mese)
         aggiornati.append({"dipendente": a["nome"], "mese": mese, "anno": anno, "bonifico": erog})
 
     nomi_non_trovati = sorted({x["nome"] for x in non_trovati})
@@ -1945,6 +1983,7 @@ async def importa_pagamenti(file: UploadFile = File(...)):
             {"$set": {"dipendente_id": dip_id, "anno": anno, "mese": mese,
                       "bonifico_importo": round(tot, 2), "bonifico_ricevuto": tot > 0,
                       "bonifico_da_esiti": True, "updated_at": now_iso()}}, upsert=True)
+        await _ricalcola_stato_paga(db, dip_id, anno, mese)
     return {"importati": importati, "mesi_aggiornati": len(affected),
             "non_trovati": sorted(set(non_trovati))}
 
