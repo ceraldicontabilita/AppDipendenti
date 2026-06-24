@@ -152,7 +152,11 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     { id: "da-pagare", label: "Da Pagare", icon: AlertTriangle, section: "CONTABILITÀ" },
     { id: "fatture", label: "Fatture", icon: Receipt, section: "CONTABILITÀ" },
     { id: "fornitori", label: "Fornitori", icon: Building2, section: "CONTABILITÀ" },
+    { id: "bonifici-banca", label: "Bonifici", icon: Euro, section: "CONTABILITÀ" },
+    { id: "riconciliazione", label: "Da Verificare", icon: RefreshCw, section: "CONTABILITÀ" },
+    { id: "calendario-pagamenti", label: "Calendario", icon: Calendar, section: "CONTABILITÀ" },
     { id: "documenti-fiscali", label: "Documenti fiscali", icon: Inbox, section: "CONTABILITÀ" },
+    { id: "paypal", label: "PayPal", icon: Wallet, section: "CONTABILITÀ" },
   ];
 
   const pageLabels = {
@@ -170,7 +174,11 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     "da-pagare": "Da Pagare",
     fatture: "Fatture",
     fornitori: "Fornitori",
+    "bonifici-banca": "Bonifici",
+    riconciliazione: "Da Verificare",
+    "calendario-pagamenti": "Calendario",
     "documenti-fiscali": "Documenti fiscali",
+    paypal: "PayPal",
   };
 
   if (loading) {
@@ -212,8 +220,16 @@ export default function DipendentiCloudApp({ page: pageProp }) {
         return <FatturePage />;
       case "fornitori":
         return <FornitoriPage />;
+      case "bonifici-banca":
+        return <BonificiContabPage />;
+      case "riconciliazione":
+        return <RiconciliazionePage />;
+      case "calendario-pagamenti":
+        return <CalendarioPagamentiPage />;
       case "documenti-fiscali":
         return <DocumentiFiscaliPage />;
+      case "paypal":
+        return <PayPalPage />;
       default:
         return <DashboardPage stats={stats} dipendenti={dipendenti} ferie={ferie} missioni={missioni} getDipendente={getDipendente} />;
     }
@@ -3293,6 +3309,8 @@ function FatturePage() {
   const [stato, setStato] = useState("");
   const [anno, setAnno] = useState("");
   const [search, setSearch] = useState("");
+  const [msg, setMsg] = useState("");
+  const fileRef = useRef(null);
 
   const load = useCallback(async () => {
     try {
@@ -3307,12 +3325,42 @@ function FatturePage() {
   }, [stato, anno, search]);
   useEffect(() => { const t = setTimeout(load, 300); return () => clearTimeout(t); }, [load]);
 
+  const importaXml = async (e) => {
+    const files = e.target.files;
+    if (!files || !files.length) return;
+    const fd = new FormData();
+    Array.from(files).forEach((f) => fd.append("files", f));
+    try {
+      setMsg("Import in corso…");
+      const r = await axios.post(`${CONTAB}/fatture/importa-xml`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setMsg(`✓ ${r.data.nuove} nuove, ${r.data.duplicate} già presenti, ${r.data.errori} errori.`);
+      await load();
+    } catch (err) {
+      setMsg(err?.response?.data?.detail || "Errore import XML");
+    } finally { if (fileRef.current) fileRef.current.value = ""; }
+  };
+
+  const paga = async (f) => {
+    try {
+      if (f.stato_pagamento === "pagato") await axios.post(`${CONTAB}/fatture/${encodeURIComponent(f.id)}/riapri`);
+      else await axios.post(`${CONTAB}/fatture/${encodeURIComponent(f.id)}/paga`);
+      await load();
+    } catch (e) { console.error(e); }
+  };
+
   return (
     <div className="dc-page">
       <div className="dc-page-header">
         <h1>Fatture</h1>
         <p>Fatture passive dei fornitori. {data.totale} risultati.</p>
+        <div className="dc-page-actions">
+          <input ref={fileRef} type="file" accept=".xml,.p7m,.zip" multiple onChange={importaXml} style={{ display: "none" }} />
+          <button className="dc-btn dc-btn-primary" onClick={() => fileRef.current?.click()}>
+            <Download size={16} /> Importa XML
+          </button>
+        </div>
       </div>
+      {msg && <div className="dc-card" style={{ marginBottom: 12 }}>{msg}</div>}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "0 0 16px" }}>
         <select className="dc-select" value={stato} onChange={(e) => setStato(e.target.value)}>
           <option value="">Tutti gli stati</option>
@@ -3330,7 +3378,7 @@ function FatturePage() {
         data.items.length === 0 ? <div className="dc-empty">Nessuna fattura.</div> : (
           <div className="dc-card">
             <table className="dc-table dc-table--cards">
-              <thead><tr><th>Data</th><th>Numero</th><th>Fornitore</th><th>Imponibile</th><th>IVA</th><th>Totale</th><th>Stato</th></tr></thead>
+              <thead><tr><th>Data</th><th>Numero</th><th>Fornitore</th><th>Imponibile</th><th>IVA</th><th>Totale</th><th>Stato</th><th>Azioni</th></tr></thead>
               <tbody>
                 {data.items.map((f) => (
                   <tr key={f.id}>
@@ -3344,6 +3392,11 @@ function FatturePage() {
                       {f.stato_pagamento === "pagato"
                         ? <Badge variant="success">pagata</Badge>
                         : <Badge variant="warning">da pagare</Badge>}
+                    </td>
+                    <td data-label="Azioni">
+                      <button className="dc-btn" onClick={() => paga(f)}>
+                        {f.stato_pagamento === "pagato" ? "Riapri" : "Segna pagata"}
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -3359,6 +3412,8 @@ function FornitoriPage() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [editing, setEditing] = useState(null); // _id in modifica
+  const [form, setForm] = useState({ iban: "", metodo_pagamento: "" });
 
   const load = useCallback(async () => {
     try {
@@ -3368,6 +3423,15 @@ function FornitoriPage() {
     } catch (e) { console.error(e); } finally { setLoading(false); }
   }, [search]);
   useEffect(() => { const t = setTimeout(load, 300); return () => clearTimeout(t); }, [load]);
+
+  const apriEdit = (f) => { setEditing(f._id); setForm({ iban: f.iban || "", metodo_pagamento: f.metodo_pagamento || "" }); };
+  const salva = async (f) => {
+    try {
+      await axios.put(`${CONTAB}/fornitori/${encodeURIComponent(f._id)}`, form);
+      setEditing(null);
+      await load();
+    } catch (e) { console.error(e); }
+  };
 
   return (
     <div className="dc-page">
@@ -3383,15 +3447,37 @@ function FornitoriPage() {
         items.length === 0 ? <div className="dc-empty">Nessun fornitore.</div> : (
           <div className="dc-card">
             <table className="dc-table dc-table--cards">
-              <thead><tr><th>Fornitore</th><th>P.IVA</th><th>IBAN</th><th>Fatture</th><th>Tot. bonifici</th></tr></thead>
+              <thead><tr><th>Fornitore</th><th>P.IVA</th><th>IBAN</th><th>Metodo</th><th>Fatture</th><th>Azioni</th></tr></thead>
               <tbody>
                 {items.map((f) => (
                   <tr key={f._id}>
                     <td data-label="Fornitore">{f.nome}</td>
                     <td data-label="P.IVA" className="dc-muted">{f.piva || "—"}</td>
-                    <td data-label="IBAN" className="dc-muted">{f.iban || "—"}</td>
+                    <td data-label="IBAN" className="dc-muted">
+                      {editing === f._id
+                        ? <input className="dc-select" style={{ minWidth: 220 }} value={form.iban}
+                            onChange={(e) => setForm({ ...form, iban: e.target.value })} placeholder="IBAN" />
+                        : (f.iban || "—")}
+                    </td>
+                    <td data-label="Metodo">
+                      {editing === f._id
+                        ? <select className="dc-select" value={form.metodo_pagamento}
+                            onChange={(e) => setForm({ ...form, metodo_pagamento: e.target.value })}>
+                            <option value="">—</option>
+                            <option value="bonifico">Bonifico</option>
+                            <option value="rid">RID/SDD</option>
+                            <option value="contanti">Contanti</option>
+                            <option value="paypal">PayPal</option>
+                          </select>
+                        : (f.metodo_pagamento || "—")}
+                    </td>
                     <td data-label="Fatture">{f.tot_fatture ?? (f.fatture?.length || 0)}</td>
-                    <td data-label="Tot. bonifici">{f.tot_bonifici ? `€ ${eurFmt(f.tot_bonifici)}` : "—"}</td>
+                    <td data-label="Azioni">
+                      {editing === f._id
+                        ? <><button className="dc-btn dc-btn-success" onClick={() => salva(f)}>Salva</button>{" "}
+                            <button className="dc-btn" onClick={() => setEditing(null)}>Annulla</button></>
+                        : <button className="dc-btn" onClick={() => apriEdit(f)}>Modifica</button>}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -3462,6 +3548,243 @@ function DocumentiFiscaliPage() {
             </table>
           </div>
         )}
+    </div>
+  );
+}
+
+function BonificiContabPage() {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [categoria, setCategoria] = useState("");
+  const [search, setSearch] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      setLoading(true);
+      const params = {};
+      if (categoria) params.categoria = categoria;
+      if (search) params.search = search;
+      const r = await axios.get(`${CONTAB}/bonifici`, { params });
+      setItems(r.data?.items || []);
+    } catch (e) { console.error(e); } finally { setLoading(false); }
+  }, [categoria, search]);
+  useEffect(() => { const t = setTimeout(load, 300); return () => clearTimeout(t); }, [load]);
+
+  const catBadge = (c) => ({ DIPENDENTE: "info", FORNITORE: "warning", SOCIO: "default", ENTE_PUBBLICO: "danger" }[c] || "default");
+
+  return (
+    <div className="dc-page">
+      <div className="dc-page-header">
+        <h1>Bonifici</h1>
+        <p>Movimenti bancari in uscita. {items.length} risultati.</p>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "0 0 16px" }}>
+        <select className="dc-select" value={categoria} onChange={(e) => setCategoria(e.target.value)}>
+          <option value="">Tutte le categorie</option>
+          {["DIPENDENTE", "FORNITORE", "SOCIO", "ENTE_PUBBLICO"].map((c) => <option key={c} value={c}>{c.replace(/_/g, " ")}</option>)}
+        </select>
+        <input className="dc-select" style={{ flex: 1, minWidth: 200 }} placeholder="Cerca beneficiario o causale…"
+          value={search} onChange={(e) => setSearch(e.target.value)} />
+      </div>
+      {loading ? <div className="dc-empty">Caricamento…</div> :
+        items.length === 0 ? <div className="dc-empty">Nessun bonifico.</div> : (
+          <div className="dc-card">
+            <table className="dc-table dc-table--cards">
+              <thead><tr><th>Data</th><th>Beneficiario</th><th>Causale</th><th>Categoria</th><th>Importo</th><th>Stato</th></tr></thead>
+              <tbody>
+                {items.map((b) => (
+                  <tr key={b._id}>
+                    <td data-label="Data">{formatDate(b.data)}</td>
+                    <td data-label="Beneficiario">{b.beneficiario}</td>
+                    <td data-label="Causale" className="dc-muted">{b.causale}</td>
+                    <td data-label="Categoria"><Badge variant={catBadge(b.categoria)}>{(b.categoria || "").replace(/_/g, " ").toLowerCase()}</Badge></td>
+                    <td data-label="Importo"><b>€ {eurFmt(b.importo)}</b></td>
+                    <td data-label="Stato">{b.fattura_id ? <Badge variant="success">riconciliato</Badge> : <Badge variant="default">—</Badge>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+    </div>
+  );
+}
+
+function RiconciliazionePage() {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    try {
+      setLoading(true);
+      const r = await axios.get(`${CONTAB}/riconciliazione`);
+      setItems(r.data?.items || []);
+    } catch (e) { console.error(e); } finally { setLoading(false); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const assegna = async (bonifico_id, fattura_id) => {
+    try {
+      await axios.post(`${CONTAB}/bonifici/${encodeURIComponent(bonifico_id)}/assegna`, { fattura_id });
+      await load();
+    } catch (e) { console.error(e); }
+  };
+
+  return (
+    <div className="dc-page">
+      <div className="dc-page-header">
+        <h1>Da Verificare</h1>
+        <p>Bonifici a fornitori senza fattura collegata. Conferma l'abbinamento suggerito.</p>
+      </div>
+      {loading ? <div className="dc-empty">Caricamento…</div> :
+        items.length === 0 ? <div className="dc-empty">Nessun bonifico da verificare.</div> :
+          items.map(({ bonifico, suggerimenti }) => (
+            <div key={bonifico._id} className="dc-card" style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+                <div>
+                  <b>{bonifico.beneficiario}</b> · {formatDate(bonifico.data)} · <b>€ {eurFmt(bonifico.importo)}</b>
+                  <div className="dc-muted" style={{ fontSize: 12 }}>{bonifico.causale}</div>
+                </div>
+              </div>
+              {suggerimenti.length === 0
+                ? <p className="dc-muted" style={{ fontSize: 13, marginBottom: 0 }}>Nessun suggerimento automatico.</p>
+                : (
+                  <table className="dc-table" style={{ marginTop: 10 }}>
+                    <thead><tr><th>Fattura</th><th>Fornitore</th><th>Totale</th><th>Match</th><th></th></tr></thead>
+                    <tbody>
+                      {suggerimenti.map((s) => (
+                        <tr key={s.fattura_id}>
+                          <td>{s.numero}</td>
+                          <td>{s.fornitore}</td>
+                          <td>€ {eurFmt(s.totale)}</td>
+                          <td><Badge variant={s.motivo === "importo" ? "success" : "info"}>{s.motivo}</Badge></td>
+                          <td><button className="dc-btn dc-btn-success" onClick={() => assegna(bonifico._id, s.fattura_id)}>Abbina</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+            </div>
+          ))}
+    </div>
+  );
+}
+
+function CalendarioPagamentiPage() {
+  const oggi = new Date();
+  const [mese, setMese] = useState(`${oggi.getFullYear()}-${String(oggi.getMonth() + 1).padStart(2, "0")}`);
+  const [eventi, setEventi] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    try {
+      setLoading(true);
+      const r = await axios.get(`${CONTAB}/calendario`, { params: { mese } });
+      setEventi(r.data?.eventi || []);
+    } catch (e) { console.error(e); } finally { setLoading(false); }
+  }, [mese]);
+  useEffect(() => { load(); }, [load]);
+
+  const giorni = {};
+  eventi.forEach((e) => { (giorni[e.data] = giorni[e.data] || []).push(e); });
+  const totale = eventi.reduce((s, e) => s + (Number(e.importo) || 0), 0);
+
+  return (
+    <div className="dc-page">
+      <div className="dc-page-header">
+        <h1>Calendario pagamenti</h1>
+        <p>Scadenze di fatture e documenti da pagare.</p>
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "0 0 16px" }}>
+        <input type="month" className="dc-select" value={mese} onChange={(e) => setMese(e.target.value)} />
+        <span className="dc-muted">{eventi.length} scadenze · totale € {eurFmt(totale)}</span>
+      </div>
+      {loading ? <div className="dc-empty">Caricamento…</div> :
+        Object.keys(giorni).length === 0 ? <div className="dc-empty">Nessuna scadenza nel mese.</div> :
+          Object.entries(giorni).sort().map(([g, evs]) => (
+            <div key={g} className="dc-card" style={{ marginBottom: 12 }}>
+              <h3 style={{ marginTop: 0 }}>{formatDate(g)}</h3>
+              <table className="dc-table dc-table--cards">
+                <thead><tr><th>Tipo</th><th>Descrizione</th><th>Importo</th></tr></thead>
+                <tbody>
+                  {evs.map((e, i) => (
+                    <tr key={i}>
+                      <td data-label="Tipo"><Badge variant={e.tipo === "fattura" ? "warning" : "danger"}>{e.tipo}</Badge></td>
+                      <td data-label="Descrizione">{e.titolo}</td>
+                      <td data-label="Importo">{e.importo ? `€ ${eurFmt(e.importo)}` : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+    </div>
+  );
+}
+
+function PayPalPage() {
+  const oggi = new Date();
+  const primo = new Date(oggi.getFullYear(), oggi.getMonth(), 1);
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const [start, setStart] = useState(iso(primo));
+  const [end, setEnd] = useState(iso(oggi));
+  const [tx, setTx] = useState([]);
+  const [stato, setStato] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    axios.get(`${CONTAB}/paypal/status`).then((r) => setStato(r.data)).catch(() => setStato({ configurato: false }));
+  }, []);
+
+  const carica = async () => {
+    try {
+      setLoading(true); setMsg("");
+      const r = await axios.get(`${CONTAB}/paypal/transactions`, { params: { start_date: start, end_date: end } });
+      setTx(r.data?.transazioni || []);
+    } catch (e) {
+      setMsg(e?.response?.data?.detail || "Errore PayPal");
+      setTx([]);
+    } finally { setLoading(false); }
+  };
+
+  return (
+    <div className="dc-page">
+      <div className="dc-page-header">
+        <h1>PayPal</h1>
+        <p>Transazioni del conto PayPal aziendale.</p>
+      </div>
+      {stato && !stato.configurato && (
+        <div className="dc-card" style={{ marginBottom: 16 }}>
+          PayPal non è configurato. Imposta <code>PAYPAL_CLIENT_ID</code> e <code>PAYPAL_CLIENT_SECRET</code> nelle env di Render.
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: "0 0 16px" }}>
+        <input type="date" className="dc-select" value={start} onChange={(e) => setStart(e.target.value)} />
+        <input type="date" className="dc-select" value={end} onChange={(e) => setEnd(e.target.value)} />
+        <button className="dc-btn dc-btn-primary" onClick={carica} disabled={loading || (stato && !stato.configurato)}>
+          {loading ? "Carico…" : "Carica transazioni"}
+        </button>
+      </div>
+      {msg && <div className="dc-card" style={{ marginBottom: 12 }}>{msg}</div>}
+      {tx.length > 0 && (
+        <div className="dc-card">
+          <table className="dc-table dc-table--cards">
+            <thead><tr><th>Data</th><th>Controparte</th><th>Nota</th><th>Importo</th><th>Stato</th></tr></thead>
+            <tbody>
+              {tx.map((t) => (
+                <tr key={t.id}>
+                  <td data-label="Data">{formatDate(t.data)}</td>
+                  <td data-label="Controparte">{t.controparte || "—"}</td>
+                  <td data-label="Nota" className="dc-muted">{t.nota || "—"}</td>
+                  <td data-label="Importo"><b>{t.importo} {t.valuta}</b></td>
+                  <td data-label="Stato">{t.stato}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
