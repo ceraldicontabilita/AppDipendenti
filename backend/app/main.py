@@ -92,6 +92,10 @@ def register_routers():
     app.include_router(bonifici_stipendi.router, tags=["Bonifici Stipendi"], dependencies=ADMIN)
     app.include_router(salari_unificati_v2.router, prefix="/api/salari-v2", tags=["Salari V2"], dependencies=ADMIN)
 
+    # Contabilità / Gestione Pagamenti (fatture passive, fornitori, documenti fiscali PEC)
+    from .routers import contabilita
+    app.include_router(contabilita.router, prefix="/api/contabilita", tags=["Contabilità"], dependencies=ADMIN)
+
     logger.info("✅ Router AppDipendenti registrati")
 
 

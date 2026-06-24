@@ -10,7 +10,8 @@ import {
   Users, Calendar, Clock, FileText, Briefcase, Home, 
   ChevronRight, Plus, Check, X, Edit2, Trash2, 
   MapPin, Euro, Download, RefreshCw, ChevronLeft, Grid3X3,
-  User, FolderOpen, Settings, LogOut, ArrowLeft, AlertTriangle
+  User, FolderOpen, Settings, LogOut, ArrowLeft, AlertTriangle,
+  Wallet, Receipt, Building2, Inbox
 } from "lucide-react";
 import "./App.css";
 
@@ -147,6 +148,11 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     { id: "buste-paga", label: "Buste Paga", icon: Euro, section: "DIPENDENTI" },
     { id: "documenti", label: "Documenti", icon: FolderOpen, section: "DIPENDENTI" },
     { id: "assunzione", label: "Assunzione & Contratti", icon: Briefcase, section: "DIPENDENTI" },
+    { id: "contabilita", label: "Pagamenti", icon: Wallet, section: "CONTABILITÀ" },
+    { id: "da-pagare", label: "Da Pagare", icon: AlertTriangle, section: "CONTABILITÀ" },
+    { id: "fatture", label: "Fatture", icon: Receipt, section: "CONTABILITÀ" },
+    { id: "fornitori", label: "Fornitori", icon: Building2, section: "CONTABILITÀ" },
+    { id: "documenti-fiscali", label: "Documenti fiscali", icon: Inbox, section: "CONTABILITÀ" },
   ];
 
   const pageLabels = {
@@ -160,6 +166,11 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     missioni: "Missioni",
     documenti: "Documenti",
     assunzione: "Assunzione & Contratti",
+    contabilita: "Pagamenti",
+    "da-pagare": "Da Pagare",
+    fatture: "Fatture",
+    fornitori: "Fornitori",
+    "documenti-fiscali": "Documenti fiscali",
   };
 
   if (loading) {
@@ -193,6 +204,16 @@ export default function DipendentiCloudApp({ page: pageProp }) {
         return <DocumentiPage dipendenti={dipendenti} documenti={documenti} reload={loadData} getDipendente={getDipendente} />;
       case "assunzione":
         return <AssunzionePage dipendenti={dipendenti} reload={loadData} />;
+      case "contabilita":
+        return <ContabilitaDashboardPage navigate={navigate} />;
+      case "da-pagare":
+        return <DaPagarePage />;
+      case "fatture":
+        return <FatturePage />;
+      case "fornitori":
+        return <FornitoriPage />;
+      case "documenti-fiscali":
+        return <DocumentiFiscaliPage />;
       default:
         return <DashboardPage stats={stats} dipendenti={dipendenti} ferie={ferie} missioni={missioni} getDipendente={getDipendente} />;
     }
@@ -3089,6 +3110,358 @@ function TimbraturePage({ dipendenti, getDipendente }) {
         )}
         <p className="dc-muted" style={{ fontSize: 12, marginTop: 10 }}>Ore calcolate dalle timbrature (entrata→uscita). Utile per il controllo delle buste paga.</p>
       </div>
+    </div>
+  );
+}
+
+// ==================== CONTABILITÀ / GESTIONE PAGAMENTI ====================
+// Fase 1: viste in sola lettura su fatture passive, fornitori e documenti
+// fiscali (PEC). Dati recuperati dall'app esterna Gestione Pagamenti e
+// importati nelle collezioni invoices / fornitori / documents_inbox.
+const CONTAB = "/api/contabilita";
+const eurFmt = (n) => (Number(n) || 0).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const TIPI_DOC = ["PAGHE_F24", "COMMERCIALISTA", "AGENZIA_RISCOSSIONE", "INPS", "INAIL", "TARI", "PAGOPA_NAPOLI", "RICEVUTA_PAGOPA"];
+
+function ContabilitaDashboardPage({ navigate }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [importing, setImporting] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      setLoading(true);
+      const r = await axios.get(`${CONTAB}/dashboard`);
+      setData(r.data);
+    } catch (e) { console.error(e); } finally { setLoading(false); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const importa = async () => {
+    if (!confirm("Importare lo snapshot della Gestione Pagamenti (fatture, fornitori, documenti)?")) return;
+    try {
+      setImporting(true); setMsg("");
+      const r = await axios.post(`${CONTAB}/importa-snapshot`);
+      const c = r.data?.risultati || {};
+      setMsg(`✓ Import: ${c.invoices?.totale || 0} fatture, ${c.fornitori?.totale || 0} fornitori, ${c.documents_inbox?.totale || 0} documenti.`);
+      await load();
+    } catch (e) {
+      setMsg(e?.response?.data?.detail || "Errore durante l'import");
+    } finally { setImporting(false); }
+  };
+
+  if (loading) return <div className="dc-page"><div className="dc-empty">Caricamento…</div></div>;
+  const f = data?.fatture || {}, doc = data?.documenti || {}, forn = data?.fornitori || {};
+  const vuoto = (f.totale || 0) + (doc.totale || 0) + (forn.totale || 0) === 0;
+
+  return (
+    <div className="dc-page">
+      <div className="dc-page-header">
+        <h1>Pagamenti & Contabilità</h1>
+        <p>Fatture passive, fornitori e documenti fiscali (PEC). Recuperati dalla Gestione Pagamenti.</p>
+      </div>
+
+      {vuoto && (
+        <div className="dc-card" style={{ marginBottom: 16 }}>
+          <h3 style={{ marginTop: 0 }}>Nessun dato presente</h3>
+          <p className="dc-muted">Importa lo snapshot recuperato dalla Gestione Pagamenti per popolare fatture, fornitori e documenti.</p>
+          <button className="dc-btn dc-btn-primary" onClick={importa} disabled={importing}>
+            {importing ? "Import in corso…" : "Importa snapshot"}
+          </button>
+        </div>
+      )}
+      {msg && <div className="dc-card" style={{ marginBottom: 16 }}>{msg}</div>}
+
+      <div className="dc-stats-grid">
+        <div className="dc-stat-card dc-stat-yellow" onClick={() => navigate("/dipendenti/fatture")} style={{ cursor: "pointer" }}>
+          <div className="dc-stat-icon"><Receipt size={24} /></div>
+          <div className="dc-stat-content">
+            <span className="dc-stat-label">FATTURE DA PAGARE</span>
+            <span className="dc-stat-value">{f.da_pagare || 0}</span>
+            <span className="dc-stat-sub">su {f.totale || 0} totali</span>
+          </div>
+        </div>
+        <div className="dc-stat-card dc-stat-yellow">
+          <div className="dc-stat-icon"><Euro size={24} /></div>
+          <div className="dc-stat-content">
+            <span className="dc-stat-label">IMPORTO DA PAGARE</span>
+            <span className="dc-stat-value">€ {eurFmt(f.importo_da_pagare)}</span>
+          </div>
+        </div>
+        <div className="dc-stat-card dc-stat-yellow" onClick={() => navigate("/dipendenti/da-pagare")} style={{ cursor: "pointer" }}>
+          <div className="dc-stat-icon"><AlertTriangle size={24} /></div>
+          <div className="dc-stat-content">
+            <span className="dc-stat-label">DOCUMENTI URGENTI</span>
+            <span className="dc-stat-value">{doc.da_pagare || 0}</span>
+            <span className="dc-stat-sub">su {doc.totale || 0} documenti</span>
+          </div>
+        </div>
+        <div className="dc-stat-card dc-stat-green" onClick={() => navigate("/dipendenti/fornitori")} style={{ cursor: "pointer" }}>
+          <div className="dc-stat-icon"><Building2 size={24} /></div>
+          <div className="dc-stat-content">
+            <span className="dc-stat-label">FORNITORI</span>
+            <span className="dc-stat-value">{forn.totale || 0}</span>
+          </div>
+        </div>
+      </div>
+
+      {doc.per_tipo && Object.keys(doc.per_tipo).length > 0 && (
+        <div className="dc-card" style={{ marginTop: 16 }}>
+          <h3 style={{ marginTop: 0 }}>Documenti urgenti per tipo</h3>
+          <table className="dc-table">
+            <thead><tr><th>Tipo</th><th>Documenti</th></tr></thead>
+            <tbody>
+              {Object.entries(doc.per_tipo).sort((a, b) => b[1] - a[1]).map(([t, n]) => (
+                <tr key={t}><td>{t.replace(/_/g, " ")}</td><td><b>{n}</b></td></tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DaPagarePage() {
+  const [data, setData] = useState(null);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async (q) => {
+    try {
+      setLoading(true);
+      const r = await axios.get(`${CONTAB}/da-pagare`, { params: q ? { search: q } : {} });
+      setData(r.data);
+    } catch (e) { console.error(e); } finally { setLoading(false); }
+  }, []);
+  useEffect(() => { const t = setTimeout(() => load(search), 300); return () => clearTimeout(t); }, [search, load]);
+
+  const gruppi = data?.gruppi || {};
+  return (
+    <div className="dc-page">
+      <div className="dc-page-header">
+        <h1>Da Pagare</h1>
+        <p>Documenti fiscali ad alta priorità da pagare o regolarizzare.</p>
+      </div>
+      <div className="dc-stats-grid">
+        <div className="dc-stat-card dc-stat-yellow">
+          <div className="dc-stat-icon"><AlertTriangle size={24} /></div>
+          <div className="dc-stat-content">
+            <span className="dc-stat-label">DOCUMENTI URGENTI</span>
+            <span className="dc-stat-value">{data?.totale_documenti || 0}</span>
+          </div>
+        </div>
+        <div className="dc-stat-card dc-stat-yellow">
+          <div className="dc-stat-icon"><Receipt size={24} /></div>
+          <div className="dc-stat-content">
+            <span className="dc-stat-label">FATTURE DA PAGARE</span>
+            <span className="dc-stat-value">{data?.fatture_da_pagare || 0}</span>
+          </div>
+        </div>
+      </div>
+      <div style={{ margin: "16px 0", position: "relative", maxWidth: 360 }}>
+        <input className="dc-select" style={{ width: "100%" }} placeholder="Cerca per oggetto o mittente…"
+          value={search} onChange={(e) => setSearch(e.target.value)} />
+      </div>
+      {loading ? <div className="dc-empty">Caricamento…</div> :
+        Object.keys(gruppi).length === 0 ? <div className="dc-empty">Nessun documento da pagare.</div> :
+          Object.entries(gruppi).sort((a, b) => b[1].length - a[1].length).map(([tipo, items]) => (
+            <div key={tipo} className="dc-card" style={{ marginBottom: 16 }}>
+              <h3 style={{ marginTop: 0 }}>{tipo.replace(/_/g, " ")} ({items.length})</h3>
+              <table className="dc-table dc-table--cards">
+                <thead><tr><th>Data</th><th>Oggetto</th><th>Mittente</th><th>Importo</th></tr></thead>
+                <tbody>
+                  {items.map((d) => (
+                    <tr key={d.id}>
+                      <td data-label="Data">{formatDate(d.data)}</td>
+                      <td data-label="Oggetto">{d.oggetto}</td>
+                      <td data-label="Mittente" className="dc-muted">{d.mittente}</td>
+                      <td data-label="Importo">{d.importo ? `€ ${eurFmt(d.importo)}` : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+    </div>
+  );
+}
+
+function FatturePage() {
+  const [data, setData] = useState({ items: [], totale: 0 });
+  const [loading, setLoading] = useState(true);
+  const [stato, setStato] = useState("");
+  const [anno, setAnno] = useState("");
+  const [search, setSearch] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      setLoading(true);
+      const params = {};
+      if (stato) params.stato = stato;
+      if (anno) params.anno = anno;
+      if (search) params.search = search;
+      const r = await axios.get(`${CONTAB}/fatture`, { params });
+      setData(r.data);
+    } catch (e) { console.error(e); } finally { setLoading(false); }
+  }, [stato, anno, search]);
+  useEffect(() => { const t = setTimeout(load, 300); return () => clearTimeout(t); }, [load]);
+
+  return (
+    <div className="dc-page">
+      <div className="dc-page-header">
+        <h1>Fatture</h1>
+        <p>Fatture passive dei fornitori. {data.totale} risultati.</p>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "0 0 16px" }}>
+        <select className="dc-select" value={stato} onChange={(e) => setStato(e.target.value)}>
+          <option value="">Tutti gli stati</option>
+          <option value="da_pagare">Da pagare</option>
+          <option value="pagato">Pagate</option>
+        </select>
+        <select className="dc-select" value={anno} onChange={(e) => setAnno(e.target.value)}>
+          <option value="">Tutti gli anni</option>
+          {[2026, 2025, 2024].map((a) => <option key={a} value={a}>{a}</option>)}
+        </select>
+        <input className="dc-select" style={{ flex: 1, minWidth: 200 }} placeholder="Cerca fornitore, numero, P.IVA…"
+          value={search} onChange={(e) => setSearch(e.target.value)} />
+      </div>
+      {loading ? <div className="dc-empty">Caricamento…</div> :
+        data.items.length === 0 ? <div className="dc-empty">Nessuna fattura.</div> : (
+          <div className="dc-card">
+            <table className="dc-table dc-table--cards">
+              <thead><tr><th>Data</th><th>Numero</th><th>Fornitore</th><th>Imponibile</th><th>IVA</th><th>Totale</th><th>Stato</th></tr></thead>
+              <tbody>
+                {data.items.map((f) => (
+                  <tr key={f.id}>
+                    <td data-label="Data">{formatDate(f.data)}</td>
+                    <td data-label="Numero">{f.numero}</td>
+                    <td data-label="Fornitore">{f.fornitore}</td>
+                    <td data-label="Imponibile">€ {eurFmt(f.imponibile)}</td>
+                    <td data-label="IVA">€ {eurFmt(f.iva)}</td>
+                    <td data-label="Totale"><b>€ {eurFmt(f.totale)}</b></td>
+                    <td data-label="Stato">
+                      {f.stato_pagamento === "pagato"
+                        ? <Badge variant="success">pagata</Badge>
+                        : <Badge variant="warning">da pagare</Badge>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+    </div>
+  );
+}
+
+function FornitoriPage() {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      setLoading(true);
+      const r = await axios.get(`${CONTAB}/fornitori`, { params: search ? { search } : {} });
+      setItems(r.data?.items || []);
+    } catch (e) { console.error(e); } finally { setLoading(false); }
+  }, [search]);
+  useEffect(() => { const t = setTimeout(load, 300); return () => clearTimeout(t); }, [load]);
+
+  return (
+    <div className="dc-page">
+      <div className="dc-page-header">
+        <h1>Fornitori</h1>
+        <p>{items.length} fornitori.</p>
+      </div>
+      <div style={{ margin: "0 0 16px", maxWidth: 360 }}>
+        <input className="dc-select" style={{ width: "100%" }} placeholder="Cerca fornitore…"
+          value={search} onChange={(e) => setSearch(e.target.value)} />
+      </div>
+      {loading ? <div className="dc-empty">Caricamento…</div> :
+        items.length === 0 ? <div className="dc-empty">Nessun fornitore.</div> : (
+          <div className="dc-card">
+            <table className="dc-table dc-table--cards">
+              <thead><tr><th>Fornitore</th><th>P.IVA</th><th>IBAN</th><th>Fatture</th><th>Tot. bonifici</th></tr></thead>
+              <tbody>
+                {items.map((f) => (
+                  <tr key={f._id}>
+                    <td data-label="Fornitore">{f.nome}</td>
+                    <td data-label="P.IVA" className="dc-muted">{f.piva || "—"}</td>
+                    <td data-label="IBAN" className="dc-muted">{f.iban || "—"}</td>
+                    <td data-label="Fatture">{f.tot_fatture ?? (f.fatture?.length || 0)}</td>
+                    <td data-label="Tot. bonifici">{f.tot_bonifici ? `€ ${eurFmt(f.tot_bonifici)}` : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+    </div>
+  );
+}
+
+function DocumentiFiscaliPage() {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [tipo, setTipo] = useState("");
+  const [priorita, setPriorita] = useState("");
+  const [search, setSearch] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      setLoading(true);
+      const params = {};
+      if (tipo) params.tipo = tipo;
+      if (priorita) params.priorita = priorita;
+      if (search) params.search = search;
+      const r = await axios.get(`${CONTAB}/documenti`, { params });
+      setItems(r.data?.items || []);
+    } catch (e) { console.error(e); } finally { setLoading(false); }
+  }, [tipo, priorita, search]);
+  useEffect(() => { const t = setTimeout(load, 300); return () => clearTimeout(t); }, [load]);
+
+  return (
+    <div className="dc-page">
+      <div className="dc-page-header">
+        <h1>Documenti fiscali</h1>
+        <p>Documenti ricevuti via PEC/email (Agenzia Riscossione, INPS, INAIL, TARI, PagoPA, commercialista). {items.length} risultati.</p>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "0 0 16px" }}>
+        <select className="dc-select" value={tipo} onChange={(e) => setTipo(e.target.value)}>
+          <option value="">Tutti i tipi</option>
+          {TIPI_DOC.map((t) => <option key={t} value={t}>{t.replace(/_/g, " ")}</option>)}
+        </select>
+        <select className="dc-select" value={priorita} onChange={(e) => setPriorita(e.target.value)}>
+          <option value="">Tutte le priorità</option>
+          <option value="HIGH">Alta</option>
+          <option value="NORMAL">Normale</option>
+        </select>
+        <input className="dc-select" style={{ flex: 1, minWidth: 200 }} placeholder="Cerca oggetto o mittente…"
+          value={search} onChange={(e) => setSearch(e.target.value)} />
+      </div>
+      {loading ? <div className="dc-empty">Caricamento…</div> :
+        items.length === 0 ? <div className="dc-empty">Nessun documento.</div> : (
+          <div className="dc-card">
+            <table className="dc-table dc-table--cards">
+              <thead><tr><th>Data</th><th>Tipo</th><th>Oggetto</th><th>Mittente</th><th>Priorità</th></tr></thead>
+              <tbody>
+                {items.map((d) => (
+                  <tr key={d.id}>
+                    <td data-label="Data">{formatDate(d.data)}</td>
+                    <td data-label="Tipo">{(d.tipo || "").replace(/_/g, " ")}</td>
+                    <td data-label="Oggetto">{d.oggetto}</td>
+                    <td data-label="Mittente" className="dc-muted">{d.mittente}</td>
+                    <td data-label="Priorità">
+                      {d.priorita === "HIGH" ? <Badge variant="danger">alta</Badge> : <Badge variant="default">{(d.priorita || "").toLowerCase()}</Badge>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
     </div>
   );
 }
