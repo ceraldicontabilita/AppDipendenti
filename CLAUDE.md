@@ -81,7 +81,9 @@ Fondo EST (sanitario), Fon.Te. (previdenza compl.).
   e invia definitivo → archiviazione nel fascicolo (`contratti_dipendenti`).
   Firma digitale OpenAPI.com (OAuth V2 + marca temporale + eSignature + PEC) in
   `services/openapi_signature.py` (env `OPENAPI_CLIENT_ID/SECRET`, `OPENAPI_ENV`).
-  docx→PDF richiede **LibreOffice** su Render (l'iter manuale via upload PDF no).
+  docx→PDF: servizio unico `services/docx_converter.py` → **ConvertAPI** in produzione
+  (env `CONVERTAPI_TOKEN`; OpenAPI.com non offre docx→PDF), **LibreOffice** come
+  fallback solo in locale. L'iter manuale via upload PDF non richiede conversione.
 - **Timbrature** (`routers/timbrature.py` + portale tab "Timbra" + gestione "Timbrature"):
   entrata/uscita geolocalizzata, **solo in sede** (geofencing, sede in `impostazioni`/
   `sede_lavoro`: Ceraldi Caffè, Piazza Carità 14 ≈ 40.842949, 14.2489, raggio 200m).
@@ -121,4 +123,6 @@ dipendente), `onomastici`.
 - Buste paga "foglio bianco": `portale_buste.py::scarica_pdf` genera un riepilogo se
   il cedolino non ha `pdf_data` (buste da Libro Unico senza PDF).
 - OpenAPI: il token esposto in chat va rigenerato; testare in sandbox prima della prod.
-- LibreOffice non presente su Render (serve per docx→PDF firma automatica).
+  I payload eSignature/marca temporale/PEC vanno validati contro console.openapi.com.
+- docx→PDF firma automatica: serve `CONVERTAPI_TOKEN` nelle env di Render (ConvertAPI);
+  senza token l'endpoint risponde 503. LibreOffice resta solo come fallback locale.

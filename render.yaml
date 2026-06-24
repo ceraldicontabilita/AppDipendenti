@@ -32,3 +32,5 @@ services:
         sync: false
       - key: OPENAPI_ENV            # "sandbox" (test) | "production"
         value: sandbox
+      - key: CONVERTAPI_TOKEN       # ConvertAPI: conversione docx→PDF per la firma (token/Secret) — SOLO qui
+        sync: false

@@ -22,6 +22,7 @@ from backend.app.utils.error_handler import handle_errors
 from backend.app.services.openapi_signature import (
     get_client, OpenAPIConfigError, OpenAPIError,
 )
+from backend.app.services.docx_converter import docx_to_pdf, DocxConversionError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -974,37 +975,14 @@ async def download_pdf_versione(contract_id: str, versione: str):
 # Firma digitale via OpenAPI: marca temporale -> eSignature (FES+OTP) -> PEC
 # Stato nel fascicolo: inviato -> firmato -> accettato.
 # ---------------------------------------------------------------------------
-def _docx_bytes_to_pdf(docx_bytes: bytes) -> bytes:
-    """Converte un .docx in PDF tramite LibreOffice headless.
-
-    Render non include LibreOffice di default: se `soffice`/`libreoffice` non è
-    disponibile viene sollevato un errore chiaro e azionabile.
-    """
-    import subprocess
-    soffice = shutil.which("soffice") or shutil.which("libreoffice")
-    if not soffice:
-        raise HTTPException(
-            501,
-            "Conversione PDF non disponibile: LibreOffice (soffice) non è "
-            "installato sull'ambiente. Aggiungilo al deploy oppure usa un "
-            "servizio di conversione esterno.")
-    workdir = tempfile.mkdtemp(prefix="docx2pdf_")
-    src = os.path.join(workdir, "contratto.docx")
-    with open(src, "wb") as f:
-        f.write(docx_bytes)
+def _docx_bytes_to_pdf(docx_bytes: bytes, filename: str = "contratto.docx") -> bytes:
+    """Converte un .docx in PDF tramite il servizio unico (ConvertAPI in
+    produzione, LibreOffice in locale). Vedi services/docx_converter.py."""
     try:
-        subprocess.run(
-            [soffice, "--headless", "--convert-to", "pdf", "--outdir", workdir, src],
-            check=True, capture_output=True, timeout=120)
-        pdf_path = os.path.join(workdir, "contratto.pdf")
-        if not os.path.exists(pdf_path):
-            raise HTTPException(500, "Conversione PDF fallita (output assente).")
-        with open(pdf_path, "rb") as f:
-            return f.read()
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(500, f"Conversione PDF fallita: {e.stderr.decode('utf-8', 'ignore')[:300]}")
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        return docx_to_pdf(docx_bytes, filename)
+    except DocxConversionError as e:
+        # 503: configurazione/servizio mancante (azionabile dal titolare).
+        raise HTTPException(503, str(e))
 
 
 async def _get_contract_pdf(contract: Dict[str, Any]) -> bytes:
@@ -1023,7 +1001,7 @@ def _bundle_to_pdf(documenti: List[Dict[str, Any]]) -> bytes:
     from PyPDF2 import PdfMerger
     merger = PdfMerger()
     for d in documenti:
-        merger.append(io.BytesIO(_docx_bytes_to_pdf(d["data"])))
+        merger.append(io.BytesIO(_docx_bytes_to_pdf(d["data"], d.get("filename", "documento.docx"))))
     out = io.BytesIO()
     merger.write(out)
     merger.close()
