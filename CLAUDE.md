@@ -19,6 +19,8 @@ App HR di **Ceraldi Group** (Napoli, titolare Enzo/Vincenzo Ceraldi). Attività:
   (es. Claude Code web), al termine **fai sempre il merge su `main` e pusha `main`** — il
   lavoro non è "consegnato" finché non è su `main` (Render fa deploy solo da `main`).
   Vale per ogni sessione e ogni agente, sempre.
+- **🔒 REGOLA FISSA: a fine di OGNI sessione, manda sempre il link Render**
+  → **https://appdipendenti.onrender.com** (così il titolare verifica subito in produzione).
 
 ## Regole canoniche del titolare (sempre valide)
 - Niente doppioni / codice morto / sistemi paralleli: **un solo sistema per funzione**.
