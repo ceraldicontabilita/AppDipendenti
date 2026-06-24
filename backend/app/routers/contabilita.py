@@ -290,15 +290,15 @@ async def importa_fatture_xml(files: List[UploadFile] = File(...)):
     from backend.app.services.event_bus import EventTypes
 
     db = Database.get_db()
-    nuove = duplicate = errori = 0
+    nuove = duplicate = errori = ignorati = 0
     dettagli = []
     for up in files:
         try:
             raw = await up.read()
             fatture = parse_upload(raw, up.filename or "")
             if not fatture:
-                errori += 1
-                dettagli.append({"file": up.filename, "errore": "nessuna fattura trovata"})
+                # metadati SDI / daticert / file non-fattura: si ignorano
+                ignorati += 1
                 continue
             for f in fatture:
                 if await db["invoices"].find_one({"_id": f["_id"]}):
@@ -322,7 +322,8 @@ async def importa_fatture_xml(files: List[UploadFile] = File(...)):
             dettagli.append({"file": up.filename, "errore": str(e)})
             logger.warning("Import XML fallito (%s): %s", up.filename, e)
 
-    return {"ok": True, "nuove": nuove, "duplicate": duplicate, "errori": errori, "dettagli": dettagli}
+    return {"ok": True, "nuove": nuove, "duplicate": duplicate,
+            "errori": errori, "ignorati": ignorati, "dettagli": dettagli}
 
 
 # ============================================================

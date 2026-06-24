@@ -3333,7 +3333,7 @@ function FatturePage() {
     try {
       setMsg("Import in corso…");
       const r = await axios.post(`${CONTAB}/fatture/importa-xml`, fd, { headers: { "Content-Type": "multipart/form-data" } });
-      setMsg(`✓ ${r.data.nuove} nuove, ${r.data.duplicate} già presenti, ${r.data.errori} errori.`);
+      setMsg(`✓ ${r.data.nuove} nuove, ${r.data.duplicate} già presenti, ${r.data.ignorati || 0} metadati ignorati, ${r.data.errori} errori.`);
       await load();
     } catch (err) {
       setMsg(err?.response?.data?.detail || "Errore import XML");

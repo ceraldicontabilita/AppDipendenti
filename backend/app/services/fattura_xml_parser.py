@@ -64,7 +64,12 @@ def _extract_xml_from_p7m(raw: bytes) -> Optional[bytes]:
 
 
 def parse_xml_bytes(raw: bytes, filename: str = "") -> List[Dict[str, Any]]:
-    """Parsa un singolo XML/p7m e ritorna 0..n fatture."""
+    """Parsa un singolo XML/p7m e ritorna 0..n fatture.
+
+    Ritorna lista vuota (senza eccezione) se il file NON è una fattura
+    (metadati SDI ``*_MT_*.xml`` con root ``FileMetadati``, ``daticert.xml``
+    con root ``postacert``, ecc.): vanno ignorati, non contati come errore.
+    """
     fn = (filename or "").lower()
     data = raw
     if fn.endswith(".p7m"):
@@ -77,6 +82,11 @@ def parse_xml_bytes(raw: bytes, filename: str = "") -> List[Dict[str, Any]]:
         if not rec:
             raise
         root = _strip_ns(ET.fromstring(rec))
+
+    # Solo le fatture vere (root "FatturaElettronica"). Tutto il resto
+    # (FileMetadati, postacert/daticert) viene ignorato silenziosamente.
+    if root.tag != "FatturaElettronica":
+        return []
 
     header = root.find("FatturaElettronicaHeader")
     cedente = header.find("CedentePrestatore/DatiAnagrafici") if header is not None else None
@@ -133,11 +143,14 @@ def parse_upload(raw: bytes, filename: str = "") -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         with zipfile.ZipFile(io.BytesIO(raw)) as z:
             for name in z.namelist():
-                nl = name.lower()
-                if nl.endswith((".xml", ".p7m")):
-                    try:
-                        out.extend(parse_xml_bytes(z.read(name), name))
-                    except Exception as e:
-                        logger.warning("Fattura XML non parsata (%s): %s", name, e)
+                nl = name.lower().rsplit("/", 1)[-1]
+                if name.endswith("/") or not nl.endswith((".xml", ".p7m")):
+                    continue
+                if "_mt_" in nl or nl.startswith("daticert") or "metadat" in nl:
+                    continue  # metadati SDI / certificazione PEC: non sono fatture
+                try:
+                    out.extend(parse_xml_bytes(z.read(name), name))
+                except Exception as e:
+                    logger.warning("Fattura XML non parsata (%s): %s", name, e)
         return out
     return parse_xml_bytes(raw, filename)
