@@ -14,8 +14,11 @@ App HR di **Ceraldi Group** (Napoli, titolare Enzo/Vincenzo Ceraldi). Attività:
 - ⚠️ **Render NON builda il frontend**: serve `frontend/dist/` **committata in git**.
   Quindi ad ogni modifica frontend: `cd frontend && npm run build`, poi committa
   `dist/` + `src/`. Senza ricommittare `dist`, in produzione non cambia nulla.
-- **Workflow git (deciso dal titolare): si sviluppa e si pusha DIRETTAMENTE su `main`,
-  niente branch.**
+- **🔒 REGOLA FISSA (decisa dal titolare): TUTTO va portato su `main`.** Si sviluppa e si
+  pusha **DIRETTAMENTE su `main`**, niente branch. Se una sessione/agent lavora su un branch
+  (es. Claude Code web), al termine **fai sempre il merge su `main` e pusha `main`** — il
+  lavoro non è "consegnato" finché non è su `main` (Render fa deploy solo da `main`).
+  Vale per ogni sessione e ogni agente, sempre.
 
 ## Regole canoniche del titolare (sempre valide)
 - Niente doppioni / codice morto / sistemi paralleli: **un solo sistema per funzione**.
