@@ -11,7 +11,7 @@ import {
   ChevronRight, Plus, Check, X, Edit2, Trash2, 
   MapPin, Euro, Download, RefreshCw, ChevronLeft, Grid3X3,
   User, FolderOpen, Settings, LogOut, ArrowLeft, AlertTriangle,
-  Wallet, Receipt, Building2, Inbox
+  Wallet, Receipt, Building2, Inbox, CheckCircle2, Link2
 } from "lucide-react";
 import "./App.css";
 
@@ -146,6 +146,7 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     { id: "turni", label: "Turni", icon: Grid3X3, section: "DIPENDENTI" },
     { id: "timbrature", label: "Timbrature", icon: Clock, section: "DIPENDENTI" },
     { id: "buste-paga", label: "Buste Paga", icon: Euro, section: "DIPENDENTI" },
+    { id: "paghe-bonifici", label: "Cedolini & Bonifici", icon: Link2, section: "DIPENDENTI" },
     { id: "documenti", label: "Documenti", icon: FolderOpen, section: "DIPENDENTI" },
     { id: "assunzione", label: "Assunzione & Contratti", icon: Briefcase, section: "DIPENDENTI" },
     { id: "contabilita", label: "Pagamenti", icon: Wallet, section: "CONTABILITÀ" },
@@ -167,6 +168,7 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     turni: "Turni",
     timbrature: "Timbrature",
     "buste-paga": "Buste Paga",
+    "paghe-bonifici": "Cedolini & Bonifici",
     missioni: "Missioni",
     documenti: "Documenti",
     assunzione: "Assunzione & Contratti",
@@ -206,6 +208,8 @@ export default function DipendentiCloudApp({ page: pageProp }) {
         return <TimbraturePage dipendenti={dipendenti} getDipendente={getDipendente} />;
       case "buste-paga":
         return <BustePagaPage dipendenti={activeDipendenti} reload={loadData} getDipendente={getDipendente} />;
+      case "paghe-bonifici":
+        return <PagheBonificiPage />;
       case "missioni":
         return <MissioniPage dipendenti={activeDipendenti} missioni={missioni} reload={loadData} getDipendente={getDipendente} />;
       case "documenti":
@@ -2304,6 +2308,220 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// Cedolini & Bonifici — vista unica associazione busta ↔ bonifico pagato
+function PagheBonificiPage() {
+  const mesi = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
+  const annoCorr = new Date().getFullYear();
+  const [anno, setAnno] = useState(annoCorr);
+  const [mese, setMese] = useState(0); // 0 = tutto l'anno
+  const [filtroStato, setFiltroStato] = useState("");
+  const [data, setData] = useState({ righe: [], totali: {}, count: 0 });
+  const [loading, setLoading] = useState(false);
+  const [aperta, setAperta] = useState(null); // chiave riga espansa
+  const [busy, setBusy] = useState(null);
+
+  const eur = (n) => (Number(n) || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const keyOf = (r) => `${r.dipendente_id}_${r.anno}_${r.mese}`;
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (anno) params.set("anno", anno);
+      if (mese) params.set("mese", mese);
+      if (filtroStato) params.set("stato", filtroStato);
+      const r = await axios.get(`${API}/paghe/associazioni-bonifici?${params.toString()}`);
+      setData(r.data || { righe: [], totali: {}, count: 0 });
+    } catch (e) {
+      console.error(e);
+      setData({ righe: [], totali: {}, count: 0 });
+    } finally { setLoading(false); }
+  };
+  useEffect(() => { load(); }, [anno, mese, filtroStato]);
+
+  const conferma = async (r, val) => {
+    setBusy(keyOf(r));
+    try {
+      await axios.post(`${API}/paghe/conferma-associazione`, {
+        dipendente_id: r.dipendente_id, anno: r.anno, mese: r.mese, riconciliato: val,
+      });
+      await load();
+    } catch (e) { alert(e?.response?.data?.detail || "Errore conferma"); }
+    finally { setBusy(null); }
+  };
+
+  const t = data.totali || {};
+  const STATI = {
+    pagato: { label: "✓ Pagato", variant: "success" },
+    parziale: { label: "Parziale", variant: "warning" },
+    da_pagare: { label: "Da pagare", variant: "danger" },
+    bonifico_senza_busta: { label: "Bonifico senza busta", variant: "info" },
+  };
+  const QUALITA = {
+    esatto: { txt: "Match esatto", col: "#234d3d", bg: "#e2efe8", bd: "#c2ddd0" },
+    per_importo: { txt: "Match per importo", col: "#234d3d", bg: "#e2efe8", bd: "#c2ddd0" },
+    aggregato: { txt: "Più bonifici", col: "#56442d", bg: "#f3ead9", bd: "#e7d6b9" },
+    da_verificare: { txt: "Da verificare", col: "#7a3b32", bg: "#f6e4e1", bd: "#e8c5bf" },
+  };
+  const FONTI = { banca: "Estratto/CSV banca", prima_nota: "Prima nota", manuale: "Inserito a mano" };
+
+  const cardWrap = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 18 };
+  const card = { background: "#fffefb", border: "1px solid #e6e0d4", borderRadius: 12, padding: "12px 14px" };
+  const lbl = { fontSize: 11, color: "#7a8576", textTransform: "uppercase", letterSpacing: 0.4, fontWeight: 700 };
+  const val = { fontSize: 20, fontWeight: 800, color: "#2a3329", marginTop: 4 };
+  const sel = { border: "1px solid #e6e0d4", borderRadius: 8, padding: "7px 10px", fontSize: 14, background: "#fffefb", color: "#2a3329" };
+  const th = { textAlign: "left", padding: "10px 12px", fontSize: 11, color: "#7a8576", textTransform: "uppercase", letterSpacing: 0.4, fontWeight: 700, borderBottom: "2px solid #e6e0d4", whiteSpace: "nowrap" };
+  const td = { padding: "10px 12px", fontSize: 14, color: "#2a3329", borderBottom: "1px solid #efe9dd", verticalAlign: "top" };
+
+  return (
+    <div style={{ maxWidth: 1280 }}>
+      <div style={{ marginBottom: 16 }}>
+        <h2 style={{ margin: 0, color: "#2a3329" }}>Cedolini &amp; Bonifici</h2>
+        <p className="dc-muted" style={{ marginTop: 4 }}>
+          Per ogni busta vedi se il <b>bonifico è stato effettuato</b> e a quale cedolino è associato.
+          Dati dal sistema unico paghe (busta) + pagamenti reali della banca (bonifici).
+        </p>
+      </div>
+
+      {/* Filtri */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 16 }}>
+        <select style={sel} value={anno} onChange={e => setAnno(Number(e.target.value))}>
+          {Array.from({ length: 8 }, (_, i) => annoCorr - i).map(a => <option key={a} value={a}>{a}</option>)}
+        </select>
+        <select style={sel} value={mese} onChange={e => setMese(Number(e.target.value))}>
+          <option value={0}>Tutto l'anno</option>
+          {mesi.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
+        </select>
+        <select style={sel} value={filtroStato} onChange={e => setFiltroStato(e.target.value)}>
+          <option value="">Tutti gli stati</option>
+          <option value="pagato">Pagati</option>
+          <option value="parziale">Parziali</option>
+          <option value="da_pagare">Da pagare</option>
+          <option value="bonifico_senza_busta">Bonifico senza busta</option>
+        </select>
+        <button className="dc-btn" onClick={load} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <RefreshCw size={15} /> Aggiorna
+        </button>
+      </div>
+
+      {/* Riepilogo */}
+      <div style={cardWrap}>
+        <div style={card}><div style={lbl}>Totale buste</div><div style={val}>€ {eur(t.buste)}</div></div>
+        <div style={card}><div style={lbl}>Bonifici</div><div style={{ ...val, color: "#3d8168" }}>€ {eur(t.bonifici)}</div></div>
+        <div style={card}><div style={lbl}>Saldo da pagare</div><div style={{ ...val, color: (t.saldo > 0.5 ? "#b04a3a" : "#3d8168") }}>€ {eur(t.saldo)}</div></div>
+        <div style={card}><div style={lbl}>Pagati</div><div style={{ ...val, color: "#3d8168" }}>{t.pagati || 0}</div></div>
+        <div style={card}><div style={lbl}>Da pagare</div><div style={{ ...val, color: "#b04a3a" }}>{t.da_pagare || 0}</div></div>
+        <div style={card}><div style={lbl}>Da verificare</div><div style={{ ...val, color: "#7a3b32" }}>{t.da_verificare || 0}</div></div>
+      </div>
+
+      {/* Tabella */}
+      <div style={{ background: "#fffefb", border: "1px solid #e6e0d4", borderRadius: 12, overflow: "hidden" }}>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={th}>Dipendente</th>
+                <th style={th}>Periodo</th>
+                <th style={{ ...th, textAlign: "right" }}>Busta</th>
+                <th style={{ ...th, textAlign: "right" }}>Bonifico</th>
+                <th style={{ ...th, textAlign: "right" }}>Saldo</th>
+                <th style={th}>Stato</th>
+                <th style={th}>Associazione</th>
+                <th style={th}>Cedolino</th>
+                <th style={th}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading && <tr><td style={td} colSpan={9}>Caricamento…</td></tr>}
+              {!loading && data.righe.length === 0 && <tr><td style={td} colSpan={9}>Nessuna busta per il periodo selezionato.</td></tr>}
+              {!loading && data.righe.map(r => {
+                const k = keyOf(r);
+                const exp = aperta === k;
+                const stInfo = STATI[r.stato] || { label: r.stato, variant: "default" };
+                const qInfo = r.qualita ? QUALITA[r.qualita] : null;
+                const periodoLbl = (r.mese >= 1 && r.mese <= 12) ? `${mesi[r.mese - 1]} ${r.anno}` : `${r.mese}/${r.anno}`;
+                return (
+                  <Fragment key={k}>
+                    <tr style={{ background: exp ? "#f7f4ec" : "transparent" }}>
+                      <td style={{ ...td, fontWeight: 600 }}>{r.dipendente}</td>
+                      <td style={td}>{periodoLbl}</td>
+                      <td style={{ ...td, textAlign: "right" }}>{r.busta > 0 ? `€ ${eur(r.busta)}` : "—"}</td>
+                      <td style={{ ...td, textAlign: "right", color: r.bonifico > 0 ? "#3d8168" : "#9aa295", fontWeight: 600 }}>
+                        {r.bonifico > 0 ? `€ ${eur(r.bonifico)}` : "—"}
+                        {r.fonte && <div style={{ fontSize: 10, color: "#9aa295", fontWeight: 400 }}>{FONTI[r.fonte] || r.fonte}</div>}
+                      </td>
+                      <td style={{ ...td, textAlign: "right", color: r.saldo > 0.5 ? "#b04a3a" : "#3d8168" }}>
+                        {Math.abs(r.saldo) > 0.5 ? `€ ${eur(r.saldo)}` : "✓"}
+                      </td>
+                      <td style={td}><Badge variant={stInfo.variant}>{stInfo.label}</Badge></td>
+                      <td style={td}>
+                        {r.riconciliato
+                          ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "#234d3d", fontWeight: 700, fontSize: 12 }}><CheckCircle2 size={14} /> Confermata</span>
+                          : qInfo
+                            ? <span style={{ background: qInfo.bg, color: qInfo.col, border: `1px solid ${qInfo.bd}`, borderRadius: 6, padding: "2px 7px", fontSize: 11, fontWeight: 700 }}>{qInfo.txt}</span>
+                            : <span style={{ color: "#9aa295", fontSize: 12 }}>—</span>}
+                      </td>
+                      <td style={td}>
+                        {r.cedolino_pdf
+                          ? <span style={{ color: "#234d3d", fontSize: 12, fontWeight: 600 }}>PDF ✓</span>
+                          : <span style={{ color: "#9aa295", fontSize: 12 }}>no PDF</span>}
+                      </td>
+                      <td style={{ ...td, whiteSpace: "nowrap" }}>
+                        {(r.n_bonifici > 0) && (
+                          <button className="dc-btn" onClick={() => setAperta(exp ? null : k)} style={{ fontSize: 12, padding: "4px 8px" }}>
+                            {exp ? "Nascondi" : `Dettagli (${r.n_bonifici})`}
+                          </button>
+                        )}
+                        {(r.bonifico > 0 || r.stato === "bonifico_senza_busta") && (
+                          r.riconciliato
+                            ? <button className="dc-btn" disabled={busy === k} onClick={() => conferma(r, false)} style={{ fontSize: 12, padding: "4px 8px", marginLeft: 6 }}>Annulla</button>
+                            : <button className="dc-btn" disabled={busy === k} onClick={() => conferma(r, true)} style={{ fontSize: 12, padding: "4px 8px", marginLeft: 6 }}>Conferma</button>
+                        )}
+                      </td>
+                    </tr>
+                    {exp && r.bonifici.length > 0 && (
+                      <tr>
+                        <td style={{ ...td, background: "#f7f4ec" }} colSpan={9}>
+                          <div style={{ fontSize: 11, color: "#7a8576", fontWeight: 700, textTransform: "uppercase", marginBottom: 6 }}>Bonifici realmente pagati</div>
+                          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                            <thead>
+                              <tr>
+                                <th style={{ ...th, borderBottom: "1px solid #e6e0d4" }}>Data</th>
+                                <th style={{ ...th, borderBottom: "1px solid #e6e0d4", textAlign: "right" }}>Importo</th>
+                                <th style={{ ...th, borderBottom: "1px solid #e6e0d4" }}>Causale</th>
+                                <th style={{ ...th, borderBottom: "1px solid #e6e0d4" }}>Beneficiario</th>
+                                <th style={{ ...th, borderBottom: "1px solid #e6e0d4" }}>Riferimento</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {r.bonifici.map((b, i) => (
+                                <tr key={i}>
+                                  <td style={{ ...td, borderBottom: "none" }}>{b.data || "—"}</td>
+                                  <td style={{ ...td, borderBottom: "none", textAlign: "right", color: "#3d8168", fontWeight: 600 }}>€ {eur(b.importo)}</td>
+                                  <td style={{ ...td, borderBottom: "none", fontSize: 13 }}>{b.causale || "—"}</td>
+                                  <td style={{ ...td, borderBottom: "none", fontSize: 13 }}>{b.beneficiario || "—"}</td>
+                                  <td style={{ ...td, borderBottom: "none", fontSize: 12, color: "#7a8576" }}>{b.riferimento || "—"}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p className="dc-muted" style={{ fontSize: 12, marginTop: 10 }}>
+        <b>Match esatto/per importo</b> = il bonifico combacia con la busta. <b>Da verificare</b> = importo presente senza prova bancaria (inserito a mano o da prima nota): controlla e premi <b>Conferma</b> per associarlo definitivamente al cedolino.
+      </p>
     </div>
   );
 }

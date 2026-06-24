@@ -2013,7 +2013,7 @@ async def importa_pagamenti(file: UploadFile = File(...)):
         key = cro or hashlib.sha1(f"{d['id']}|{r[i_data]}|{importo}|{causale}".encode()).hexdigest()
         await db.pagamenti_esiti.update_one(
             {"key": key},
-            {"$set": {"key": key, "dipendente_id": d["id"], "data": data_dt.strftime("%Y-%m-%d"),
+            {"$set": {"key": key, "cro": cro, "dipendente_id": d["id"], "data": data_dt.strftime("%Y-%m-%d"),
                       "importo": importo, "causale": causale, "beneficiario": beneficiario,
                       "mese": mese, "anno": anno}}, upsert=True)
         affected.add((d["id"], mese, anno))
@@ -2077,6 +2077,177 @@ async def prima_nota(dipendente_id: str):
                     "bonifico": round(bon, 2), "acconti": round(acc, 2),
                     "erogato": round(erogato, 2), "saldo_progressivo": round(saldo, 2)})
     return {"righe": out, "saldo_finale": round(saldo, 2)}
+
+
+@router.get("/paghe/associazioni-bonifici")
+async def associazioni_bonifici(anno: Optional[int] = None, mese: Optional[int] = None,
+                                stato: Optional[str] = None):
+    """Vista UNICA cedolino↔bonifico. Per ogni busta del periodo mostra l'importo busta,
+    i bonifici REALMENTE pagati (collezione pagamenti_esiti: data, importo, causale, riferimento/CRO),
+    gli acconti, il saldo e lo stato di associazione:
+      - pagato            = erogato (bonifici+acconti) ≥ busta
+      - parziale          = erogato > 0 ma < busta
+      - da_pagare         = busta presente, nessun pagamento
+      - bonifico_senza_busta = pagamento presente ma nessuna busta
+    Inoltre indica la 'fonte' del bonifico (banca/prima_nota/manuale), la 'qualita' del match
+    (esatto/per_importo/aggregato/da_verificare) e se esiste il PDF del cedolino.
+    Sorgente dati = sistema vivo paghe_mensili + pagamenti_esiti (nessun sistema parallelo)."""
+    db = get_db()
+    q = {}
+    if anno:
+        q["anno"] = int(anno)
+    if mese:
+        q["mese"] = int(mese)
+
+    dip_map = {}
+    async for d in db.dipendenti.find({}, {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "codice_fiscale": 1}):
+        dip_map[d["id"]] = d
+
+    righe = []
+    tot = {"buste": 0.0, "bonifici": 0.0, "acconti": 0.0, "saldo": 0.0,
+           "pagati": 0, "parziali": 0, "da_pagare": 0, "senza_busta": 0,
+           "associati": 0, "da_verificare": 0}
+
+    async for p in db.paghe_mensili.find(q, {"_id": 0}):
+        busta = float(p.get("importo_busta") or 0)
+        bon = float(p.get("bonifico_importo") or 0)
+        acc_list = p.get("acconti") or []
+        acc = sum(float(a.get("importo") or 0) for a in acc_list)
+        if busta <= 0 and bon <= 0 and acc <= 0:
+            continue
+
+        dip_id = p.get("dipendente_id")
+        dip = dip_map.get(dip_id) or {}
+        nome = f"{dip.get('cognome', '')} {dip.get('nome', '')}".strip() or dip_id
+
+        # Bonifici reali pagati (esiti banca) per questo dipendente/mese/anno
+        esiti = []
+        async for e in db.pagamenti_esiti.find(
+                {"dipendente_id": dip_id, "mese": p.get("mese"), "anno": p.get("anno")},
+                {"_id": 0}).sort("data", 1):
+            esiti.append({
+                "data": e.get("data"),
+                "importo": round(float(e.get("importo") or 0), 2),
+                "causale": e.get("causale") or "",
+                "beneficiario": e.get("beneficiario") or "",
+                "riferimento": e.get("cro") or e.get("key") or "",
+            })
+
+        erogato = bon + acc
+        if busta <= 0 and erogato > 0:
+            st = "bonifico_senza_busta"
+            tot["senza_busta"] += 1
+        elif erogato <= 0:
+            st = "da_pagare"
+            tot["da_pagare"] += 1
+        elif erogato + 0.5 >= busta:
+            st = "pagato"
+            tot["pagati"] += 1
+        else:
+            st = "parziale"
+            tot["parziali"] += 1
+
+        # Fonte del bonifico
+        if esiti:
+            fonte = "banca"
+        elif p.get("bonifico_da_prima_nota"):
+            fonte = "prima_nota"
+        elif bon > 0:
+            fonte = "manuale"
+        else:
+            fonte = None
+
+        # Qualità dell'associazione (quanto è affidabile il legame busta↔bonifico)
+        if bon <= 0:
+            qualita = None
+        elif esiti:
+            if len(esiti) == 1 and busta > 0 and abs(esiti[0]["importo"] - busta) <= 0.5:
+                qualita = "esatto"          # un solo bonifico che combacia con la busta
+            elif busta > 0 and abs(bon - busta) <= 0.5:
+                qualita = "per_importo"     # somma bonifici = busta
+            elif len(esiti) > 1:
+                qualita = "aggregato"       # più bonifici nello stesso mese
+            else:
+                qualita = "per_importo"
+        else:
+            qualita = "da_verificare"       # importo inserito a mano / da prima nota, senza prova banca
+
+        associato = bool(p.get("bonifico_riconciliato")) or qualita in ("esatto", "per_importo")
+        if st in ("pagato", "parziale", "bonifico_senza_busta"):
+            if associato:
+                tot["associati"] += 1
+            else:
+                tot["da_verificare"] += 1
+
+        # Esiste il PDF del cedolino?
+        ced = await db.cedolini.find_one(
+            {"dipendente_id": dip_id, "mese": p.get("mese"), "anno": p.get("anno")},
+            {"_id": 0, "id": 1, "pdf_data": 1})
+        if not ced and dip.get("cognome"):
+            ced = await db.cedolini.find_one(
+                {"nome_dipendente": {"$regex": dip.get("cognome"), "$options": "i"},
+                 "mese": p.get("mese"), "anno": p.get("anno")},
+                {"_id": 0, "id": 1, "pdf_data": 1})
+        has_pdf = bool(ced and ced.get("pdf_data"))
+        cedolino_id = ced.get("id") if ced else None
+
+        if stato and st != stato:
+            continue
+
+        tot["buste"] += busta
+        tot["bonifici"] += bon
+        tot["acconti"] += acc
+        tot["saldo"] += (busta - erogato)
+
+        righe.append({
+            "dipendente_id": dip_id,
+            "dipendente": nome,
+            "anno": p.get("anno"),
+            "mese": p.get("mese"),
+            "busta": round(busta, 2),
+            "bonifico": round(bon, 2),
+            "acconti": round(acc, 2),
+            "erogato": round(erogato, 2),
+            "saldo": round(busta - erogato, 2),
+            "stato": st,
+            "fonte": fonte,
+            "qualita": qualita,
+            "associato": associato,
+            "riconciliato": bool(p.get("bonifico_riconciliato")),
+            "bonifico_data": p.get("bonifico_data"),
+            "bonifici": esiti,
+            "n_bonifici": len(esiti),
+            "cedolino_pdf": has_pdf,
+            "cedolino_id": cedolino_id,
+        })
+
+    righe.sort(key=lambda r: ((r["anno"] or 0), (r["mese"] or 0), r["dipendente"]), reverse=True)
+    for k in ("buste", "bonifici", "acconti", "saldo"):
+        tot[k] = round(tot[k], 2)
+    return {"righe": righe, "totali": tot, "count": len(righe)}
+
+
+@router.post("/paghe/conferma-associazione")
+async def conferma_associazione(data: dict):
+    """Conferma/annulla manualmente l'associazione bonifico↔cedolino di una busta.
+    Imposta bonifico_riconciliato e traccia data/nota. Non crea record nuovi:
+    agisce sul record paghe_mensili esistente (sistema unico)."""
+    dip = data.get("dipendente_id")
+    anno = data.get("anno")
+    mese = data.get("mese")
+    if not dip or not anno or not mese:
+        raise HTTPException(status_code=400, detail="dipendente_id, anno, mese obbligatori")
+    val = bool(data.get("riconciliato", True))
+    set_doc = {"bonifico_riconciliato": val, "updated_at": now_iso()}
+    if val:
+        set_doc["associazione_confermata_at"] = now_iso()
+    if data.get("nota") is not None:
+        set_doc["associazione_nota"] = str(data.get("nota"))
+    res = await get_db().paghe_mensili.update_one(
+        {"dipendente_id": dip, "anno": int(anno), "mese": int(mese)}, {"$set": set_doc})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Busta non trovata per quel dipendente/mese")
+    return {"ok": True, "riconciliato": val}
 
 
 # ============ BUSTE PAGA ============
