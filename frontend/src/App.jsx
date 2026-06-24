@@ -2,7 +2,7 @@
  * Dipendenti in Cloud - Modulo HR completo con sidebar dedicata
  * Layout originale con sidebar blu scuro e navigazione tramite URL
  */
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import axios from "axios";
 import Sortable from "sortablejs";
@@ -3424,6 +3424,10 @@ function FornitoriPage() {
   }, [search]);
   useEffect(() => { const t = setTimeout(load, 300); return () => clearTimeout(t); }, [load]);
 
+  const [open, setOpen] = useState(null);     // _id espanso
+  const [detail, setDetail] = useState(null); // { fatture, bonifici }
+  const [detLoading, setDetLoading] = useState(false);
+
   const apriEdit = (f) => { setEditing(f._id); setForm({ iban: f.iban || "", metodo_pagamento: f.metodo_pagamento || "" }); };
   const salva = async (f) => {
     try {
@@ -3431,6 +3435,19 @@ function FornitoriPage() {
       setEditing(null);
       await load();
     } catch (e) { console.error(e); }
+  };
+
+  const toggle = async (f) => {
+    if (open === f._id) { setOpen(null); setDetail(null); return; }
+    setOpen(f._id); setDetail(null); setDetLoading(true);
+    try {
+      const r = await axios.get(`${CONTAB}/fornitori/${encodeURIComponent(f._id)}`);
+      setDetail(r.data);
+    } catch (e) { console.error(e); } finally { setDetLoading(false); }
+  };
+  const pagaFattura = async (fid) => {
+    try { await axios.post(`${CONTAB}/fatture/${encodeURIComponent(fid)}/paga`); const f = { _id: open }; setOpen(null); await toggle(f); }
+    catch (e) { console.error(e); }
   };
 
   return (
@@ -3450,8 +3467,14 @@ function FornitoriPage() {
               <thead><tr><th>Fornitore</th><th>P.IVA</th><th>IBAN</th><th>Metodo</th><th>Fatture</th><th>Azioni</th></tr></thead>
               <tbody>
                 {items.map((f) => (
-                  <tr key={f._id}>
-                    <td data-label="Fornitore">{f.nome}</td>
+                  <Fragment key={f._id}>
+                  <tr>
+                    <td data-label="Fornitore">
+                      <button className="dc-link" style={{ background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", color: "inherit", textAlign: "left" }}
+                        onClick={() => toggle(f)}>
+                        {open === f._id ? "▾ " : "▸ "}{f.nome}
+                      </button>
+                    </td>
                     <td data-label="P.IVA" className="dc-muted">{f.piva || "—"}</td>
                     <td data-label="IBAN" className="dc-muted">
                       {editing === f._id
@@ -3479,6 +3502,58 @@ function FornitoriPage() {
                         : <button className="dc-btn" onClick={() => apriEdit(f)}>Modifica</button>}
                     </td>
                   </tr>
+                  {open === f._id && (
+                    <tr>
+                      <td colSpan={6} style={{ background: "#faf7f0" }}>
+                        {detLoading ? <div className="dc-muted">Caricamento…</div> : !detail ? null : (
+                          <div style={{ display: "grid", gap: 14 }}>
+                            <div>
+                              <b>Fatture ({detail.fatture?.length || 0})</b>
+                              {(!detail.fatture || detail.fatture.length === 0)
+                                ? <div className="dc-muted" style={{ fontSize: 13 }}>Nessuna fattura collegata.</div>
+                                : (
+                                  <table className="dc-table" style={{ marginTop: 6 }}>
+                                    <thead><tr><th>Data</th><th>Numero</th><th>Totale</th><th>Stato</th><th></th></tr></thead>
+                                    <tbody>
+                                      {detail.fatture.map((ft) => (
+                                        <tr key={ft.id}>
+                                          <td>{formatDate(ft.data)}</td>
+                                          <td>{ft.numero}</td>
+                                          <td>€ {eurFmt(ft.totale)}</td>
+                                          <td>{ft.stato_pagamento === "pagato" ? <Badge variant="success">pagata</Badge> : <Badge variant="warning">da pagare</Badge>}</td>
+                                          <td>{ft.stato_pagamento !== "pagato" && <button className="dc-btn dc-btn-success" onClick={() => pagaFattura(ft.id)}>Segna pagata</button>}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                )}
+                            </div>
+                            <div>
+                              <b>Bonifici ({detail.bonifici?.length || 0})</b>
+                              {(!detail.bonifici || detail.bonifici.length === 0)
+                                ? <div className="dc-muted" style={{ fontSize: 13 }}>Nessun bonifico collegato.</div>
+                                : (
+                                  <table className="dc-table" style={{ marginTop: 6 }}>
+                                    <thead><tr><th>Data</th><th>Causale</th><th>Importo</th><th>Fattura</th></tr></thead>
+                                    <tbody>
+                                      {detail.bonifici.map((b) => (
+                                        <tr key={b._id}>
+                                          <td>{formatDate(b.data)}</td>
+                                          <td>{b.causale}</td>
+                                          <td>€ {eurFmt(b.importo)}</td>
+                                          <td>{b.fattura_id ? <Badge variant="success">collegato</Badge> : <Badge variant="default">—</Badge>}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                )}
+                            </div>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
@@ -3590,11 +3665,12 @@ function BonificiContabPage() {
         items.length === 0 ? <div className="dc-empty">Nessun bonifico.</div> : (
           <div className="dc-card">
             <table className="dc-table dc-table--cards">
-              <thead><tr><th>Data</th><th>Beneficiario</th><th>Causale</th><th>Categoria</th><th>Importo</th><th>Stato</th></tr></thead>
+              <thead><tr><th>Data</th><th>Competenza</th><th>Beneficiario</th><th>Causale</th><th>Categoria</th><th>Importo</th><th>Stato</th></tr></thead>
               <tbody>
                 {items.map((b) => (
                   <tr key={b._id}>
                     <td data-label="Data">{formatDate(b.data)}</td>
+                    <td data-label="Competenza" className="dc-muted">{b.mese_competenza || "—"}</td>
                     <td data-label="Beneficiario">{b.beneficiario}</td>
                     <td data-label="Causale" className="dc-muted">{b.causale}</td>
                     <td data-label="Categoria"><Badge variant={catBadge(b.categoria)}>{(b.categoria || "").replace(/_/g, " ").toLowerCase()}</Badge></td>

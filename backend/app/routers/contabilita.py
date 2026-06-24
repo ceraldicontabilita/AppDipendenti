@@ -44,6 +44,32 @@ def _forn_id(nome: str) -> str:
     return "FORN_" + _norm(nome).replace(" ", "_")[:60]
 
 
+def _match_key(s: Optional[str]) -> str:
+    """Chiave robusta per collegare fatture e fornitori: solo alfanumerici
+    maiuscoli (ignora punti/spazi/accenti, es. 'S.p.A.' == 'S P A' == 'SPA')."""
+    s = (s or "")
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+    return _re.sub(r"[^A-Z0-9]", "", s.upper())
+
+
+def mese_competenza(data_iso: Optional[str], soglia_giorno: int = 5) -> Optional[str]:
+    """Mese di competenza di un bonifico: se emesso nei primi giorni del mese
+    (giorno <= soglia) si riferisce alla paga del mese PRECEDENTE.
+    Ritorna 'YYYY-MM' oppure None."""
+    if not data_iso or len(data_iso) < 10:
+        return None
+    try:
+        anno, mese, giorno = int(data_iso[:4]), int(data_iso[5:7]), int(data_iso[8:10])
+    except (ValueError, IndexError):
+        return None
+    if giorno <= soglia_giorno:
+        mese -= 1
+        if mese == 0:
+            mese = 12
+            anno -= 1
+    return f"{anno:04d}-{mese:02d}"
+
+
 async def _emit(event_type: str, payload: dict, db, source: str = "contabilita"):
     """Propaga un evento all'event-bus (handler partite/alert/audit già registrati)."""
     try:
@@ -61,7 +87,7 @@ async def _upsert_fornitore_da_fattura(f: dict, db):
     fid = _forn_id(nome)
     esiste = await db["fornitori"].find_one({"_id": fid})
     base = {
-        "_id": fid, "nome": nome, "forn_norm": _norm(nome),
+        "_id": fid, "nome": nome, "forn_norm": _norm(nome), "match_key": _match_key(nome),
         "piva": f.get("piva") or (esiste or {}).get("piva", ""),
     }
     if f.get("iban") and not (esiste or {}).get("iban"):
@@ -218,16 +244,26 @@ async def dettaglio_fornitore(forn_id: str):
     f = await db["fornitori"].find_one({"_id": forn_id})
     if not f:
         raise HTTPException(status_code=404, detail="Fornitore non trovato")
-    # Fatture collegate (per partita IVA o nome normalizzato)
-    q = {"$or": []}
+    # Fatture collegate: per P.IVA (esatta) o match_key (nome super-normalizzato).
+    mkey = f.get("match_key") or _match_key(f.get("nome"))
+    ors = []
     if f.get("piva"):
-        q["$or"].append({"piva": f["piva"]})
-    if f.get("forn_norm"):
-        q["$or"].append({"forn_norm": f["forn_norm"]})
+        ors.append({"piva": f["piva"]})
+    if mkey:
+        ors.append({"match_key": mkey})
+        ors.append({"forn_norm": f.get("forn_norm")})
     fatture = []
-    if q["$or"]:
-        fatture = await db["invoices"].find(q, {"fonte": 0}).sort("data", -1).to_list(length=2000)
-    return {"fornitore": f, "fatture": fatture}
+    if ors:
+        fatture = await db["invoices"].find({"$or": ors}, {"fonte": 0}).sort("data", -1).to_list(length=2000)
+    # Bonifici collegati (per match_key sul beneficiario o per fattura_id)
+    fids = [x["_id"] for x in fatture]
+    bon_ors = [{"fattura_id": {"$in": fids}}] if fids else []
+    if mkey:
+        bon_ors.append({"benef_norm": f.get("forn_norm")})
+    bonifici = []
+    if bon_ors:
+        bonifici = await db["bonifici"].find({"$or": bon_ors}).sort("data", -1).to_list(length=2000)
+    return {"fornitore": f, "fatture": fatture, "bonifici": bonifici}
 
 
 # ============================================================
@@ -306,6 +342,7 @@ async def importa_fatture_xml(files: List[UploadFile] = File(...)):
                     continue
                 fornitore_id = await _upsert_fornitore_da_fattura(f, db)
                 f["fornitore_id"] = fornitore_id
+                f["match_key"] = _match_key(f.get("fornitore"))
                 await db["invoices"].insert_one(f)
                 nuove += 1
                 await _emit(EventTypes.FATTURA_CREATED, {
@@ -415,6 +452,9 @@ async def lista_bonifici(
         q.setdefault("$and", []).append({"$or": [{"beneficiario": rx}, {"causale": rx}]})
     cursor = db["bonifici"].find(q).sort("data", -1).limit(limit)
     items = await cursor.to_list(length=limit)
+    # Mese di competenza: bonifico nei primi giorni del mese = paga mese precedente
+    for b in items:
+        b["mese_competenza"] = mese_competenza(b.get("data"))
     return {"totale": len(items), "items": items}
 
 
