@@ -766,7 +766,7 @@ function PresenzePage({ dipendenti, reload }) {
   const [presenze, setPresenze] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [formData, setFormData] = useState({
-    dipendente_id: "", tipo: "P", data_inizio: "", data_fine: "", nota: ""
+    dipendente_id: "", tipo: "P", data_inizio: "", data_fine: "", nota: "", protocollo: ""
   });
   const [penna, setPenna] = useState(null);
   const [tuttiMode, setTuttiMode] = useState(false);
@@ -880,13 +880,17 @@ function PresenzePage({ dipendenti, reload }) {
     const end = new Date(formData.data_fine);
     const batch = [];
     
+    // Per la malattia il numero di protocollo del certificato medico finisce nella nota.
+    const notaFinale = (formData.tipo === 'M' && formData.protocollo)
+      ? `Malattia · Protocollo INPS: ${formData.protocollo}${formData.nota ? ' · ' + formData.nota : ''}`
+      : formData.nota;
     for (let d = start; d <= end; d.setDate(d.getDate() + 1)) {
       batch.push({
         dipendente_id: formData.dipendente_id,
         data: isoD(d),  // data LOCALE (non UTC)
-        stato: formData.tipo === 'P' ? 'presente' : formData.tipo === 'UN' ? 'assente' : 'giustificato',
+        stato: formData.tipo === 'P' ? 'presente' : formData.tipo === 'AS' ? 'assente' : 'giustificato',
         giustificativo: formData.tipo,
-        note: formData.nota
+        note: notaFinale
       });
     }
     
@@ -911,6 +915,35 @@ function PresenzePage({ dipendenti, reload }) {
   // Calcola statistiche
   const totalePresenti = presenze.filter(p => p.stato === 'presente').length;
   const totaleAssenti = presenze.filter(p => p.stato === 'assente').length;
+
+  // Malattie del mese: raggruppa i giorni 'M' per dipendente in periodi, con protocollo.
+  const estraiProtocollo = (note) => {
+    if (!note) return "";
+    const m = String(note).match(/protocollo[^0-9A-Za-z]*([0-9A-Za-z.\/-]{5,})/i);
+    return m ? m[1] : "";
+  };
+  const malattieMese = (() => {
+    const pref = `${anno}-${String(mese).padStart(2, '0')}`;
+    const perDip = {};
+    presenze.forEach(p => {
+      if (p.giustificativo === 'M' && typeof p.data === 'string' && p.data.startsWith(pref))
+        (perDip[p.dipendente_id] = perDip[p.dipendente_id] || []).push({ day: Number(p.data.slice(8, 10)), note: p.note || p.nota || "" });
+    });
+    const out = [];
+    Object.entries(perDip).forEach(([dipId, arr]) => {
+      arr.sort((a, b) => a.day - b.day);
+      let start = null, prev = null, nota = "";
+      arr.forEach((x, i) => {
+        if (start === null) { start = x.day; nota = x.note; }
+        else if (x.day !== prev + 1) { out.push({ dipId, dal: start, al: prev, nota }); start = x.day; nota = x.note; }
+        if (x.note && !nota) nota = x.note;
+        prev = x.day;
+        if (i === arr.length - 1) out.push({ dipId, dal: start, al: prev, nota });
+      });
+    });
+    return out.sort((a, b) => a.dal - b.dal);
+  })();
+  const nomeDip = (id) => { const d = dipendenti.find(x => x.id === id); return d ? `${d.cognome || ''} ${d.nome || ''}`.trim() : id; };
 
   const prevMonth = () => {
     if (mese === 1) { setMese(12); setAnno(anno - 1); }
@@ -1048,6 +1081,45 @@ function PresenzePage({ dipendenti, reload }) {
         </table>
       </div>
 
+      {/* Malattie del mese */}
+      <div className="dc-card" style={{ marginTop: 12 }}>
+        <h3 style={{ margin: "0 0 10px" }}>🤒 Malattie del mese — {mesi[mese - 1]} {anno}</h3>
+        {malattieMese.length === 0 ? (
+          <p style={{ color: "#94a3b8", margin: 0, fontSize: 14 }}>Nessuna malattia registrata in questo mese.</p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+              <thead>
+                <tr style={{ textAlign: "left", color: "#6b7669", fontSize: 12, textTransform: "uppercase" }}>
+                  <th style={{ padding: "6px 8px", borderBottom: "2px solid #e6e0d4" }}>Dipendente</th>
+                  <th style={{ padding: "6px 8px", borderBottom: "2px solid #e6e0d4" }}>Periodo</th>
+                  <th style={{ padding: "6px 8px", borderBottom: "2px solid #e6e0d4" }}>Giorni</th>
+                  <th style={{ padding: "6px 8px", borderBottom: "2px solid #e6e0d4" }}>Protocollo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {malattieMese.map((m, i) => {
+                  const prot = estraiProtocollo(m.nota);
+                  const gg = m.al - m.dal + 1;
+                  const periodo = m.dal === m.al ? `${m.dal} ${mesi[mese - 1].slice(0, 3)}` : `${m.dal}–${m.al} ${mesi[mese - 1].slice(0, 3)}`;
+                  return (
+                    <tr key={i}>
+                      <td style={{ padding: "6px 8px", borderBottom: "1px solid #efe9dd", fontWeight: 600 }}>{nomeDip(m.dipId)}</td>
+                      <td style={{ padding: "6px 8px", borderBottom: "1px solid #efe9dd" }}>{periodo}</td>
+                      <td style={{ padding: "6px 8px", borderBottom: "1px solid #efe9dd" }}>{gg}</td>
+                      <td style={{ padding: "6px 8px", borderBottom: "1px solid #efe9dd" }}>
+                        {prot ? <span style={{ fontFamily: "monospace", background: "#fdf6ec", border: "1px solid #f0e0c4", borderRadius: 6, padding: "2px 8px" }}>{prot}</span>
+                          : <span style={{ color: "#d35f4e", fontSize: 12 }}>protocollo mancante</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
       {/* Modal Nuovo Giustificativo */}
       {showModal && (
         <div className="dc-modal-overlay" onClick={() => setShowModal(false)}>
@@ -1095,6 +1167,14 @@ function PresenzePage({ dipendenti, reload }) {
                   <input type="date" required value={formData.data_fine} onChange={e => setFormData({...formData, data_fine: e.target.value})} />
                 </div>
               </div>
+
+              {formData.tipo === 'M' && (
+                <div className="dc-form-group">
+                  <label>Numero di protocollo (certificato medico telematico)</label>
+                  <input type="text" value={formData.protocollo} onChange={e => setFormData({...formData, protocollo: e.target.value})} placeholder="es. 1234567890123 (PUC che dà il medico)" />
+                  <small style={{ color: "#94a3b8", fontSize: 12 }}>La malattia viene segnata come M nelle presenze, con questo protocollo in nota.</small>
+                </div>
+              )}
 
               <div className="dc-form-group">
                 <label>Nota (facoltativa)</label>
