@@ -902,6 +902,15 @@ function PresenzePage({ dipendenti, reload }) {
     loadPresenze();
   };
 
+  const consolidaDaTurni = async () => {
+    if (!window.confirm(`Consolidare le presenze di ${mesi[mese - 1]} ${anno} dai turni assegnati?\nVengono creati solo i giorni fino a oggi e non si tocca ciò che hai inserito a mano.`)) return;
+    try {
+      const r = await axios.post(`${API}/presenze/consolida-da-turni`, { anno, mese });
+      await loadPresenze();
+      toast(`Consolidate ${r.data.creati} presenze dai turni (${r.data.saltati} già presenti)`);
+    } catch (e) { toast(e?.response?.data?.detail || "Errore consolidamento", "err"); }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     // Create presenze for date range
@@ -1021,6 +1030,9 @@ function PresenzePage({ dipendenti, reload }) {
         {/* Action Buttons */}
         <button onClick={handleTuttiPresenti} className="dc-btn dc-btn-success">
           <Check size={16} /> Tutti Presenti
+        </button>
+        <button onClick={consolidaDaTurni} className="dc-btn" title="Crea le presenze dei giorni passati a partire dai turni assegnati (non sovrascrive il manuale)">
+          <RefreshCw size={16} /> Consolida da turni
         </button>
         <button onClick={() => setShowModal(true)} className="dc-btn dc-btn-primary">
           <Plus size={16} /> Giustificativo
@@ -1417,6 +1429,8 @@ function TurniPage({ dipendenti, turni, reload }) {
   const [evid, setEvid] = useState(null);
   const [showSost, setShowSost] = useState(false);
   const [sost, setSost] = useState({ assente: "", giorno: "", motivo: "malattia", sostituto: "", turnoSost: "", protocollo: "", dal: "", al: "" });
+  const [paint, setPaint] = useState(false);     // modalità pennello turni
+  const [penTurno, setPenTurno] = useState("");  // turno selezionato per il pennello ("" = vuoto)
   const tbodyRef = useRef(null);
   const giorni = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"];
   const lunOggi = (() => { const o = new Date(); const off = (o.getDay() + 6) % 7; const m = new Date(o); m.setDate(o.getDate() - off); m.setHours(0, 0, 0, 0); return m; })();
@@ -1778,11 +1792,32 @@ function TurniPage({ dipendenti, turni, reload }) {
           style={{ padding: "10px 16px", borderRadius: 10, fontWeight: 600 }} title="Sostituzione d'emergenza: malattia/assenza e chi copre">
           🚨 Sostituzione
         </button>
+        <button onClick={() => { setPaint(p => !p); if (!paint && !penTurno && turni[0]) setPenTurno(turni[0].id); }} className="dc-btn"
+          style={{ padding: "10px 16px", borderRadius: 10, fontWeight: 600, background: paint ? "#5b7a6b" : undefined, color: paint ? "#fff" : undefined }}
+          title="Pennello: scegli un turno e clicca le celle per compilarle veloce">
+          🖌 Pennello {paint ? "ON" : ""}
+        </button>
         <button onClick={generaProduzione} disabled={busy}
           style={{ background: "#5b7a6b", color: "#fff", border: "none", padding: "10px 18px", borderRadius: 10, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
           {busy ? "Attendi…" : "Genera settimana"}
         </button>
       </div>
+
+      {paint && (
+        <div className="dc-card" style={{ marginBottom: 12, padding: 12, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13, color: "#6b7669", fontWeight: 600 }}>Pennello — scegli il turno, poi clicca le celle:</span>
+          <button type="button" onClick={() => setPenTurno("")}
+            style={{ border: penTurno === "" ? "3px solid #5b7a6b" : "1px solid #e6e0d4", background: "#fff", color: "#374151", borderRadius: 8, padding: "5px 10px", fontWeight: 700, cursor: "pointer", fontSize: 13 }}>
+            – (vuoto)
+          </button>
+          {turni.map(t => (
+            <button key={t.id} type="button" onClick={() => setPenTurno(t.id)}
+              style={{ border: penTurno === t.id ? "3px solid #5b7a6b" : "1px solid #e6e0d4", background: penTurno === t.id ? t.colore : t.colore + "30", color: penTurno === t.id ? "#fff" : "#374151", borderRadius: 8, padding: "5px 10px", fontWeight: 700, cursor: "pointer", fontSize: 13 }}>
+              {t.nome}
+            </button>
+          ))}
+        </div>
+      )}
 
       {showCfg && (
         <div onClick={() => setShowCfg(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
@@ -1979,20 +2014,30 @@ function TurniPage({ dipendenti, turni, reload }) {
                   return (
                     <td key={g} style={{ position: "relative" }}>
                       {ass?.motivo === "onomastico" && <span title="Riposo per onomastico" style={{ position: "absolute", top: 0, right: 2, fontSize: 11, zIndex: 1 }}>🎂</span>}
-                      <select
-                        value={ass?.turno_id || ""}
-                        onChange={e => handleAssegna(dip, g, e.target.value)}
-                        className="dc-turno-select"
-                        style={{
-                          ...(turno ? { backgroundColor: turno.colore + '30', borderColor: turno.colore } : {}),
-                          ...(evid ? (ass?.turno_id === evid
-                            ? { outline: "3px solid " + ((getTurno(evid) || {}).colore || "#5b7a6b"), opacity: 1 }
-                            : { opacity: 0.2 }) : {})
-                        }}
-                      >
-                        <option value="">-</option>
-                        {turni.map(t => <option key={t.id} value={t.id}>{t.nome}</option>)}
-                      </select>
+                      {paint ? (
+                        <button type="button" onClick={() => handleAssegna(dip, g, penTurno)} title="Clicca per applicare il turno del pennello"
+                          className="dc-turno-select"
+                          style={{ cursor: "pointer", textAlign: "center", width: "100%",
+                            backgroundColor: turno ? turno.colore + '30' : "#fff",
+                            borderColor: turno ? turno.colore : "#e6e0d4" }}>
+                          {turno ? turno.nome : "-"}
+                        </button>
+                      ) : (
+                        <select
+                          value={ass?.turno_id || ""}
+                          onChange={e => handleAssegna(dip, g, e.target.value)}
+                          className="dc-turno-select"
+                          style={{
+                            ...(turno ? { backgroundColor: turno.colore + '30', borderColor: turno.colore } : {}),
+                            ...(evid ? (ass?.turno_id === evid
+                              ? { outline: "3px solid " + ((getTurno(evid) || {}).colore || "#5b7a6b"), opacity: 1 }
+                              : { opacity: 0.2 }) : {})
+                          }}
+                        >
+                          <option value="">-</option>
+                          {turni.map(t => <option key={t.id} value={t.id}>{t.nome}</option>)}
+                        </select>
+                      )}
                     </td>
                   );
                 })}
@@ -2989,6 +3034,20 @@ function DocumentiPage({ dipendenti, documenti, reload, getDipendente }) {
     }
   };
 
+  const importaGmail = async () => {
+    if (!window.confirm("Cercare i documenti negli allegati della posta (Gmail) e archiviarli nelle cartelle dei dipendenti?")) return;
+    setMassBusy(true); setMassMsg(null);
+    try {
+      const r = await axios.post(`${API}/paghe/importa-email`);
+      const doc = r.data.documenti || { caricati: 0, non_assegnati: 0, duplicati: 0 };
+      setMassMsg({ caricati: doc.caricati, duplicati: Array(doc.duplicati || 0).fill(0), non_assegnati: Array(doc.non_assegnati || 0).fill(0), dettaglio: [], _gmail: true });
+      reload();
+      toast(`Da Gmail: ${doc.caricati} documenti archiviati`);
+    } catch (err) {
+      setMassMsg({ errore: err?.response?.data?.detail || "Errore import Gmail (controlla IMAP_HOST/USER/PASSWORD su Render)" });
+    } finally { setMassBusy(false); }
+  };
+
   const apriDoc = async (doc) => {
     try {
       const r = await axios.get(`${API}/documenti/${doc.id}/file`, { responseType: "blob" });
@@ -3017,6 +3076,9 @@ function DocumentiPage({ dipendenti, documenti, reload, getDipendente }) {
           <input ref={massRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.zip,.docx" onChange={handleMassUpload} style={{ display: "none" }} />
           <button onClick={() => massRef.current?.click()} disabled={massBusy} className="dc-btn dc-btn-primary" title="Carica più documenti: l'app riconosce il tipo e li mette nella cartella del dipendente">
             {massBusy ? "Carico…" : "📂 Carica documenti (auto)"}
+          </button>
+          <button onClick={importaGmail} disabled={massBusy} className="dc-btn" title="Cerca i documenti negli allegati Gmail e li archivia nelle cartelle dei dipendenti">
+            {massBusy ? "Attendi…" : "📧 Importa da Gmail"}
           </button>
           <button onClick={() => setShowModal(true)} className="dc-btn">
             <Plus size={18} /> Nuovo Documento

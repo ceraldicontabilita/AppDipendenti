@@ -1160,9 +1160,27 @@ async def importa_da_email(cartella: Optional[str] = None, solo_non_letti: bool 
         return {"associati": [], "da_controllare": [], "totale_associati": 0, "file_pdf": 0,
                 "mesi": [], "errori": errori, "bonifici": [], "presenze": [], "duplicati": [],
                 "tfr": [], "prestiti": [], "cartelle_lette": cartelle_lette,
+                "documenti": {"caricati": 0, "non_assegnati": 0, "duplicati": 0},
                 "messaggio": "Nessun allegato PDF trovato nella casella."}
     res = await _importa_documenti(pdf_items, errori)
     res["cartelle_lette"] = cartelle_lette
+    # Oltre a paghe/bonifici, archivia OGNI allegato nelle cartelle Documenti del dipendente
+    # (UNILAV, Certificazione Unica, contratti, codice fiscale…): stesso motore dell'upload massivo.
+    db_doc = get_db()
+    indici = await _indici_dipendenti(db_doc)
+    doc_caricati, doc_non_ass, doc_dup = 0, 0, 0
+    for origine, raw in pdf_items:
+        try:
+            esito, _cat, _nome = await _archivia_documento_cloud(db_doc, origine, raw, indici=indici, origine="email")
+            if esito == "caricato":
+                doc_caricati += 1
+            elif esito == "non_assegnato":
+                doc_non_ass += 1
+            elif esito == "duplicato":
+                doc_dup += 1
+        except Exception as e:
+            errori.append(f"archivio doc {origine}: {e}")
+    res["documenti"] = {"caricati": doc_caricati, "non_assegnati": doc_non_ass, "duplicati": doc_dup}
     return res
 
 
@@ -1307,8 +1325,62 @@ async def create_presenze_batch(presenze: List[PresenzaCloud]):
         else:
             await get_db().presenze_cloud.insert_one(pres_dict)
         created.append(pres_dict)
-    
+
     return {"message": f"Inserite/aggiornate {len(created)} presenze"}
+
+
+@router.post("/presenze/consolida-da-turni")
+async def consolida_presenze_da_turni(data: dict = Body(default={})):
+    """Crea le presenze REALI a partire dai turni assegnati, per il mese indicato e SOLO
+    per i giorni fino a oggi (i futuri non si segnano presenti). Mappa: turno di lavoro→
+    presente (P), Riposo→RS, Ferie→F, Malattia→M. NON sovrascrive le presenze già inserite
+    a mano. Serve ad avere le presenze pronte per export/buste partendo dai turni."""
+    import calendar
+    db = get_db()
+    anno = int(data.get("anno") or datetime.now().year)
+    mese = int(data.get("mese") or datetime.now().month)
+    turni = await db.turni_cloud.find({}, {"_id": 0, "id": 1, "nome": 1}).to_list(200)
+    nome_turno = {t["id"]: (t.get("nome") or "") for t in turni}
+    GIORNI = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]  # 0=lunedì
+    ndays = calendar.monthrange(anno, mese)[1]
+    oggi = datetime.now().date()
+    settimane = set()
+    for g in range(1, ndays + 1):
+        dt = datetime(anno, mese, g).date()
+        settimane.add((dt - timedelta(days=dt.weekday())).isoformat())
+    ass = await db.assegnazioni_turni_cloud.find({"settimana": {"$in": list(settimane)}}, {"_id": 0}).to_list(8000)
+    ass_by_day = {}
+    for a in ass:
+        ass_by_day.setdefault((a.get("settimana"), a.get("giorno")), []).append((a.get("dipendente_id"), a.get("turno_id")))
+    creati, saltati = 0, 0
+    for g in range(1, ndays + 1):
+        dt = datetime(anno, mese, g).date()
+        if dt > oggi:
+            break
+        lun = (dt - timedelta(days=dt.weekday())).isoformat()
+        gname = GIORNI[dt.weekday()]
+        dstr = dt.isoformat()
+        for dip_id, turno_id in ass_by_day.get((lun, gname), []):
+            n = nome_turno.get(turno_id, "")
+            if not n or not dip_id:
+                continue
+            if await db.presenze_cloud.find_one({"dipendente_id": dip_id, "data": dstr}):
+                saltati += 1
+                continue
+            if n == "Riposo":
+                stato, giust = "giustificato", "RS"
+            elif n == "Ferie":
+                stato, giust = "giustificato", "F"
+            elif n == "Malattia":
+                stato, giust = "giustificato", "M"
+            else:
+                stato, giust = "presente", "P"
+            await db.presenze_cloud.insert_one({
+                "id": generate_id(), "dipendente_id": dip_id, "data": dstr,
+                "stato": stato, "giustificativo": giust,
+                "origine": "consolidamento_turni", "created_at": now_iso()})
+            creati += 1
+    return {"ok": True, "anno": anno, "mese": mese, "creati": creati, "saltati": saltati}
 
 # ============ FERIE E PERMESSI ============
 
@@ -2502,14 +2574,8 @@ def classifica_documento(text: str, filename: str = "") -> str:
     return "ALTRO"
 
 
-@router.post("/documenti/upload-massivo")
-async def upload_documenti_massivo(files: List[UploadFile] = File(...)):
-    """Carica più documenti insieme: per ognuno riconosce il tipo (UNILAV, C.U., contratto,
-    bonifico, codice fiscale…), trova il dipendente dal codice fiscale (o dal nome) nel testo,
-    e lo archivia nella sua cartella. Anti-duplicati per hash del file."""
-    import io
-    import pdfplumber
-    db = get_db()
+async def _indici_dipendenti(db):
+    """Indici per riconoscere il dipendente da CF/nome nei documenti."""
     dips = await db.dipendenti.find({"merged_into": {"$exists": False}},
                                     {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "nome_completo": 1, "codice_fiscale": 1}).to_list(1000)
 
@@ -2526,58 +2592,89 @@ async def upload_documenti_massivo(files: List[UploadFile] = File(...)):
                 by_nome[v] = d
         if len(c) >= 4:
             by_cogn.setdefault(c, []).append(d)
+    return {"cf": by_cf, "nome": by_nome, "cogn": by_cogn}
+
+
+async def _archivia_documento_cloud(db, filename, raw, contesto="", indici=None, origine="upload_massivo"):
+    """Classifica un PDF (UNILAV, C.U., contratto, CF, busta…), trova il dipendente dal
+    codice fiscale o dal nome, e lo archivia nella sua cartella (documenti_cloud).
+    Anti-duplicati per hash. Riusato da upload massivo E import da email/Gmail.
+    Ritorna (esito, categoria, dipendente_nome) con esito in
+    'caricato'|'non_assegnato'|'duplicato'|'vuoto'."""
+    import io
+    if not raw:
+        return ("vuoto", None, None)
+    h = hashlib.sha256(raw).hexdigest()
+    if await db.documenti_cloud.find_one({"hash": h}):
+        return ("duplicato", None, None)
+    text = ""
+    if raw[:4] == b"%PDF":
+        try:
+            import pdfplumber
+            with pdfplumber.open(io.BytesIO(raw)) as pdf:
+                for p in pdf.pages[:6]:
+                    text += (p.extract_text() or "") + "\n"
+        except Exception:
+            text = ""
+    if indici is None:
+        indici = await _indici_dipendenti(db)
+    by_cf, by_nome, by_cogn = indici["cf"], indici["nome"], indici["cogn"]
+
+    def norm(s):
+        return re.sub(r"\s+", " ", str(s or "").strip()).lower()
+    categoria = classifica_documento(text, f"{contesto} {filename}".strip())
+    d = None
+    for cf in _CF_DOC_RE.findall((text or "").upper()):
+        if cf in by_cf:
+            d = by_cf[cf]
+            break
+    if not d:
+        tl = norm(text)
+        for nome_n, dd in by_nome.items():
+            if nome_n in tl:
+                d = dd
+                break
+    if not d:
+        fn_norm = norm(f"{contesto} {filename}".replace("_", " ").replace("-", " "))
+        for nome_n, dd in by_nome.items():
+            if nome_n in fn_norm:
+                d = dd
+                break
+        if not d:
+            for cogn, lst in by_cogn.items():
+                if cogn in fn_norm and len(lst) == 1:
+                    d = lst[0]
+                    break
+    doc = {"id": generate_id(),
+           "dipendente_id": (d or {}).get("id"),
+           "dipendente_nome": (f"{d.get('cognome','')} {d.get('nome','')}".strip() if d else None),
+           "titolo": filename, "filename": filename,
+           "tipo": categoria, "categoria": categoria, "hash": h,
+           "file_data": base64.b64encode(raw).decode(),
+           "assegnato": bool(d), "origine": origine, "data_caricamento": now_iso()}
+    await db.documenti_cloud.insert_one(doc)
+    return ("caricato" if d else "non_assegnato", categoria, doc["dipendente_nome"])
+
+
+@router.post("/documenti/upload-massivo")
+async def upload_documenti_massivo(files: List[UploadFile] = File(...)):
+    """Carica più documenti insieme: per ognuno riconosce il tipo (UNILAV, C.U., contratto,
+    bonifico, codice fiscale…), trova il dipendente dal codice fiscale (o dal nome) nel testo,
+    e lo archivia nella sua cartella. Anti-duplicati per hash del file."""
+    import io
+    db = get_db()
+    indici = await _indici_dipendenti(db)
 
     import zipfile
     caricati, duplicati, non_assegnati, per_categoria = [], [], [], {}
 
     async def processa(filename, raw, contesto=""):
-        if not raw:
-            return
-        h = hashlib.sha256(raw).hexdigest()
-        if await db.documenti_cloud.find_one({"hash": h}):
+        esito, categoria, nome = await _archivia_documento_cloud(db, filename, raw, contesto=contesto, indici=indici)
+        if esito == "duplicato":
             duplicati.append(filename)
-            return
-        text = ""
-        if raw[:4] == b"%PDF":
-            try:
-                with pdfplumber.open(io.BytesIO(raw)) as pdf:
-                    for p in pdf.pages[:6]:
-                        text += (p.extract_text() or "") + "\n"
-            except Exception:
-                text = ""
-        categoria = classifica_documento(text, f"{contesto} {filename}".strip())
-        d = None
-        for cf in _CF_DOC_RE.findall((text or "").upper()):
-            if cf in by_cf:
-                d = by_cf[cf]
-                break
-        if not d:
-            tl = norm(text)
-            for nome_n, dd in by_nome.items():
-                if nome_n in tl:
-                    d = dd
-                    break
-        if not d:
-            fn_norm = norm(f"{contesto} {filename}".replace("_", " ").replace("-", " "))
-            for nome_n, dd in by_nome.items():
-                if nome_n in fn_norm:
-                    d = dd
-                    break
-            if not d:
-                for cogn, lst in by_cogn.items():
-                    if cogn in fn_norm and len(lst) == 1:
-                        d = lst[0]
-                        break
-        doc = {"id": generate_id(),
-               "dipendente_id": (d or {}).get("id"),
-               "dipendente_nome": (f"{d.get('cognome','')} {d.get('nome','')}".strip() if d else None),
-               "titolo": filename, "filename": filename,
-               "tipo": categoria, "categoria": categoria, "hash": h,
-               "file_data": base64.b64encode(raw).decode(),
-               "assegnato": bool(d), "origine": "upload_massivo", "data_caricamento": now_iso()}
-        await db.documenti_cloud.insert_one(doc)
-        per_categoria[categoria] = per_categoria.get(categoria, 0) + 1
-        (caricati if d else non_assegnati).append({"file": filename, "categoria": categoria, "dipendente": doc["dipendente_nome"]})
+        elif esito in ("caricato", "non_assegnato"):
+            per_categoria[categoria] = per_categoria.get(categoria, 0) + 1
+            (caricati if esito == "caricato" else non_assegnati).append({"file": filename, "categoria": categoria, "dipendente": nome})
 
     for f in files:
         raw = await f.read()
