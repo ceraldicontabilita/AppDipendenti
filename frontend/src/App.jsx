@@ -11,7 +11,7 @@ import {
   ChevronRight, Plus, Check, X, Edit2, Trash2, 
   MapPin, Euro, Download, RefreshCw, ChevronLeft, Grid3X3,
   User, FolderOpen, Settings, LogOut, ArrowLeft, AlertTriangle,
-  Wallet, Receipt, Building2, Inbox, CheckCircle2, Link2
+  Wallet, Receipt, Building2, Inbox, CheckCircle2, Link2, Activity
 } from "lucide-react";
 import "./App.css";
 
@@ -167,6 +167,7 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     { id: "turni", label: "Turni", icon: Grid3X3, section: "TURNI" },
   ] : [
     { id: "dashboard", label: "Pannello di controllo", icon: Home, section: "GESTIONE" },
+    { id: "diagnostica", label: "Diagnostica", icon: Activity, section: "GESTIONE" },
     { id: "anagrafica", label: "Anagrafica", icon: User, section: "DIPENDENTI" },
     { id: "presenze", label: "Presenze", icon: Calendar, section: "DIPENDENTI" },
     { id: "ferie-permessi", label: "Ferie & Permessi", icon: Calendar, section: "DIPENDENTI" },
@@ -189,6 +190,7 @@ export default function DipendentiCloudApp({ page: pageProp }) {
 
   const pageLabels = {
     dashboard: "Pannello di controllo",
+    diagnostica: "Diagnostica",
     anagrafica: "Anagrafica",
     presenze: "Presenze",
     "ferie-permessi": "Ferie & Permessi",
@@ -223,6 +225,8 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     switch (currentPage) {
       case "dashboard":
         return <DashboardPage stats={stats} dipendenti={dipendenti} ferie={ferie} missioni={missioni} getDipendente={getDipendente} />;
+      case "diagnostica":
+        return <DiagnosticaPage />;
       case "anagrafica":
         return <AnagraficaPage dipendenti={dipendenti} reload={loadData} />;
       case "presenze":
@@ -353,6 +357,134 @@ export default function DipendentiCloudApp({ page: pageProp }) {
 }
 
 // ==================== PAGES ====================
+
+// Diagnostica Page — autotest dal vivo di backend e pagine
+function DiagnosticaPage() {
+  const [checks, setChecks] = useState(null);
+  const [riepilogo, setRiepilogo] = useState(null);
+  const [pagine, setPagine] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [erroreBE, setErroreBE] = useState(null);
+  const oggi = new Date();
+  const Y = oggi.getFullYear(), M = oggi.getMonth() + 1;
+  const lun = (() => { const o = new Date(); const off = (o.getDay() + 6) % 7; const m = new Date(o); m.setDate(o.getDate() - off); return `${m.getFullYear()}-${String(m.getMonth() + 1).padStart(2, '0')}-${String(m.getDate()).padStart(2, '0')}`; })();
+
+  // Ping dal vivo dell'endpoint principale di ogni pagina (testa HTTP + auth + wiring)
+  const PAGINE = [
+    { pagina: "Pannello di controllo", url: `${API}/dashboard/stats` },
+    { pagina: "Anagrafica", url: `${API}/dipendenti` },
+    { pagina: "Presenze", url: `${API}/presenze?anno=${Y}&mese=${M}` },
+    { pagina: "Ferie & Permessi", url: `${API}/ferie` },
+    { pagina: "Turni (tipi)", url: `${API}/turni` },
+    { pagina: "Turni (settimana)", url: `${API}/assegnazioni-turni?settimana=${lun}` },
+    { pagina: "Buste Paga", url: `${API}/paghe?anno=${Y}&mese=${M}` },
+    { pagina: "Cedolini & Bonifici", url: `${API}/paghe/associazioni-bonifici?anno=${Y}` },
+    { pagina: "Documenti", url: `${API}/documenti` },
+    { pagina: "Missioni", url: `${API}/missioni` },
+    { pagina: "Avvisi & Scadenze", url: `${API}/alerts` },
+    { pagina: "Buste in attesa", url: `${API}/paghe/in-attesa` },
+    { pagina: "Contabilità (fatture)", url: `/api/contabilita/fatture` },
+  ];
+
+  const run = async () => {
+    setLoading(true); setErroreBE(null);
+    // 1) Diagnostica backend
+    try {
+      const r = await axios.get(`/api/diagnostica`);
+      setChecks(r.data.checks || []);
+      setRiepilogo(r.data.riepilogo || null);
+    } catch (e) {
+      setErroreBE(e?.response?.data?.detail || e.message || "Diagnostica backend non raggiungibile");
+      setChecks([]); setRiepilogo(null);
+    }
+    // 2) Ping pagine (in parallelo)
+    const res = await Promise.all(PAGINE.map(async p => {
+      const t0 = performance.now();
+      try {
+        await axios.get(p.url);
+        return { ...p, stato: "ok", ms: Math.round(performance.now() - t0) };
+      } catch (e) {
+        const s = e?.response?.status;
+        return { ...p, stato: "err", dettaglio: s ? `HTTP ${s}` : (e.message || "errore"), ms: Math.round(performance.now() - t0) };
+      }
+    }));
+    setPagine(res);
+    setLoading(false);
+  };
+  useEffect(() => { run(); }, []);
+
+  const COL = { ok: "#3d8168", warn: "#a6724a", err: "#b04a3a" };
+  const ICON = { ok: "✓", warn: "▲", err: "✗" };
+  const pill = (stato) => (
+    <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, borderRadius: "50%", background: COL[stato] || "#9ca3af", color: "#fff", fontWeight: 800, fontSize: 13, flexShrink: 0 }}>{ICON[stato] || "?"}</span>
+  );
+
+  const aree = {};
+  (checks || []).forEach(c => { (aree[c.area] = aree[c.area] || []).push(c); });
+  const pagineErr = (pagine || []).filter(p => p.stato === "err").length;
+
+  return (
+    <div className="dc-page">
+      <div className="dc-page-header">
+        <div>
+          <h1>Diagnostica</h1>
+          <p>Controlli dal vivo dell'app: se qualcosa è rosso, segnalalo e si sistema.</p>
+        </div>
+        <div className="dc-page-actions">
+          <button onClick={run} disabled={loading} className="dc-btn dc-btn-primary">
+            <RefreshCw size={16} /> {loading ? "Controllo…" : "Rilancia controlli"}
+          </button>
+        </div>
+      </div>
+
+      {/* Riepilogo */}
+      <div className="dc-stats-grid" style={{ marginBottom: 16 }}>
+        <div className="dc-stat-card" style={{ borderLeft: "4px solid #3d8168" }}>
+          <div className="dc-stat-content"><span className="dc-stat-label">OK</span><span className="dc-stat-value" style={{ color: "#3d8168" }}>{(riepilogo?.ok || 0) + (pagine || []).filter(p => p.stato === "ok").length}</span></div>
+        </div>
+        <div className="dc-stat-card" style={{ borderLeft: "4px solid #a6724a" }}>
+          <div className="dc-stat-content"><span className="dc-stat-label">DA CONTROLLARE</span><span className="dc-stat-value" style={{ color: "#a6724a" }}>{riepilogo?.warn || 0}</span></div>
+        </div>
+        <div className="dc-stat-card" style={{ borderLeft: "4px solid #b04a3a" }}>
+          <div className="dc-stat-content"><span className="dc-stat-label">ERRORI</span><span className="dc-stat-value" style={{ color: "#b04a3a" }}>{(riepilogo?.err || 0) + pagineErr}</span></div>
+        </div>
+      </div>
+
+      {/* Pagine (ping dal vivo) */}
+      <div className="dc-card" style={{ marginBottom: 16 }}>
+        <h3>Pagine dell'app</h3>
+        {!pagine ? <p className="dc-muted">Controllo…</p> : (
+          <div className="dc-list">
+            {pagine.map((p, i) => (
+              <div key={i} className="dc-list-item" style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                {pill(p.stato)}
+                <span style={{ flex: 1, fontWeight: 600 }}>{p.pagina}</span>
+                <span className="dc-muted" style={{ fontSize: 12 }}>{p.stato === "ok" ? `${p.ms} ms` : (p.dettaglio || "errore")}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Diagnostica backend per area */}
+      {erroreBE && <div className="dc-card" style={{ borderLeft: "4px solid #b04a3a", marginBottom: 16, color: "#b04a3a" }}>⚠ {erroreBE}</div>}
+      {Object.entries(aree).map(([area, lista]) => (
+        <div key={area} className="dc-card" style={{ marginBottom: 16 }}>
+          <h3>{area}</h3>
+          <div className="dc-list">
+            {lista.map((c, i) => (
+              <div key={i} className="dc-list-item" style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                {pill(c.stato)}
+                <span style={{ flex: 1, fontWeight: 600 }}>{c.nome}</span>
+                <span className="dc-muted" style={{ fontSize: 12 }}>{c.dettaglio}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 // Dashboard Page
 function DashboardPage({ stats, dipendenti, ferie, missioni, getDipendente }) {

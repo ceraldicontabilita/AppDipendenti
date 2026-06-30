@@ -96,6 +96,10 @@ def register_routers():
     from .routers import contabilita
     app.include_router(contabilita.router, prefix="/api/contabilita", tags=["Contabilità"], dependencies=ADMIN)
 
+    # Diagnostica / autotest dell'app (controlli dal vivo: DB, env, flussi)
+    from .routers import diagnostica
+    app.include_router(diagnostica.router, prefix="/api/diagnostica", tags=["Diagnostica"], dependencies=ADMIN)
+
     logger.info("✅ Router AppDipendenti registrati")
 
 
