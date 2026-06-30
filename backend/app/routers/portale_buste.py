@@ -64,6 +64,12 @@ def _owner_query(dip_id: str, cf: Optional[str]) -> Dict[str, Any]:
 
 async def _carica_mia_busta(cedolino_id: str, identity: Dict[str, Any], proj=None) -> Dict[str, Any]:
     db = Database.get_db()
+    # L'admin (titolare) può aprire la busta di QUALSIASI dipendente dal portale.
+    if identity.get("role") == "admin":
+        doc = await db[COLL_CED].find_one({"id": cedolino_id}, proj or {"_id": 0})
+        if not doc:
+            raise HTTPException(404, "Busta paga non trovata")
+        return doc
     dip_id, cf = await _dipendente_keys(identity)
     q = {"$and": [{"id": cedolino_id}, _owner_query(dip_id, cf)]}
     doc = await db[COLL_CED].find_one(q, proj or {"_id": 0})
@@ -73,9 +79,43 @@ async def _carica_mia_busta(cedolino_id: str, identity: Dict[str, Any], proj=Non
     return doc
 
 
-@router.get("", summary="Le mie buste paga")
-async def le_mie_buste(identity: Dict[str, Any] = Depends(get_identity)) -> List[Dict[str, Any]]:
+@router.get("", summary="Le mie buste paga (admin: tutte i dipendenti)")
+async def le_mie_buste(anno: Optional[int] = None, q: Optional[str] = None,
+                       identity: Dict[str, Any] = Depends(get_identity)) -> List[Dict[str, Any]]:
     db = Database.get_db()
+
+    # === ADMIN: vede TUTTE le buste di tutti i dipendenti (filtrabili) ===
+    if identity.get("role") == "admin":
+        query: Dict[str, Any] = {}
+        if anno:
+            query["anno"] = {"$in": [anno, str(anno)]}
+        if q:
+            query["$or"] = [
+                {"nome_dipendente": {"$regex": q, "$options": "i"}},
+                {"dipendente_nome": {"$regex": q, "$options": "i"}},
+            ]
+        docs = await db[COLL_CED].find(
+            query, {"_id": 0, "pdf_data": 0},
+        ).sort([("anno", -1), ("mese", -1)]).to_list(3000)
+        accettate = {a["cedolino_id"] async for a in db[COLL_ACCETT].find(
+            {"esito": "accettata"}, {"_id": 0, "cedolino_id": 1})}
+        out = []
+        for c in docs:
+            cid = c.get("id", "")
+            out.append({
+                "id": cid,
+                "dipendente_nome": c.get("nome_dipendente") or c.get("dipendente_nome") or "—",
+                "mese": c.get("mese"),
+                "anno": c.get("anno"),
+                "competenza": c.get("competenza"),
+                "netto": c.get("netto", 0),
+                "lordo": c.get("lordo", 0),
+                "filename": c.get("filename") or c.get("pdf_filename"),
+                "presa_visione": cid in accettate,
+                "admin": True,
+            })
+        return out
+
     dip_id, cf = await _dipendente_keys(identity)
     docs = await db[COLL_CED].find(
         _owner_query(dip_id, cf),

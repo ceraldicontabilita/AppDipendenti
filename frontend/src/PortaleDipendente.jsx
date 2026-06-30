@@ -702,6 +702,198 @@ function Timbra() {
   );
 }
 
+/* ============ VISTE ADMIN NEL PORTALE (il titolare dal telefono) ============ */
+/* Riusano gli endpoint admin già esistenti: nessun sistema parallelo. */
+
+function BusteAdmin() {
+  const annoCorr = new Date().getFullYear();
+  const [anno, setAnno] = useState(annoCorr);
+  const [q, setQ] = useState("");
+  const [buste, setBuste] = useState(null);
+  const load = useCallback(() => {
+    const p = new URLSearchParams();
+    if (anno) p.set("anno", anno);
+    if (q.trim()) p.set("q", q.trim());
+    api.get(`/portale/buste?${p.toString()}`).then(r => setBuste(r.data)).catch(() => setBuste([]));
+  }, [anno, q]);
+  useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t); }, [load]);
+  const apri = async (b) => {
+    const win = window.open("", "_blank");
+    try {
+      const r = await api.get(`/portale/buste/${b.id}/pdf`, { responseType: "blob" });
+      const url = URL.createObjectURL(r.data);
+      if (win) win.location = url;
+      else { const a = document.createElement("a"); a.href = url; a.download = b.filename || "busta.pdf"; a.click(); }
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch { if (win) win.close(); alert("PDF non disponibile."); }
+  };
+  const mm = (b) => String(b.mese).padStart(2, "0");
+  return (<>
+    <div className="card">
+      <h3>Buste paga · tutti i dipendenti</h3>
+      <div className="row" style={{ gap: 8, marginTop: 8 }}>
+        <select value={anno} onChange={e => setAnno(Number(e.target.value))}>
+          {Array.from({ length: 8 }, (_, i) => annoCorr - i).map(a => <option key={a} value={a}>{a}</option>)}
+        </select>
+        <input className="input" placeholder="Cerca dipendente…" value={q} onChange={e => setQ(e.target.value)} style={{ flex: 1 }} />
+      </div>
+    </div>
+    {!buste && <div className="spin">Caricamento…</div>}
+    {buste && buste.length === 0 && <div className="empty">Nessuna busta per i filtri scelti.</div>}
+    {buste && buste.map(b => (
+      <div className="card" key={b.id}>
+        <div className="row">
+          <div><b>{b.dipendente_nome}</b>
+            <div className="muted">{mm(b)}/{b.anno} · Netto € {Number(b.netto || 0).toFixed(2)}</div></div>
+          {b.presa_visione ? <span className="pill ok"><Check size={11} /> Vista</span> : <span className="pill warn">Da leggere</span>}
+        </div>
+        <button className="btn sm" style={{ width: "100%", justifyContent: "center", marginTop: 10 }} onClick={() => apri(b)}>
+          <Eye size={14} /> Apri busta (PDF)
+        </button>
+      </div>
+    ))}
+  </>);
+}
+
+function AvvisiAdmin({ onChange }) {
+  const [alerts, setAlerts] = useState([]);
+  const [notif, setNotif] = useState([]);
+  const [caricato, setCaricato] = useState(false);
+  const load = useCallback(() => {
+    api.get("/dipendenti-cloud/alerts").then(r => setAlerts(r.data.alerts || [])).catch(() => setAlerts([]));
+    api.get("/notifiche").then(r => { setNotif(r.data || []); onChange && onChange(); }).catch(() => setNotif([]))
+      .finally(() => setCaricato(true));
+  }, [onChange]);
+  useEffect(() => { load(); }, [load]);
+  const risolvi = async (a) => { try { await api.post(`/dipendenti-cloud/alerts/${a.id}/risolvi`); } catch {} load(); };
+  const segnaLetta = async (n) => { if (!n.letta) { try { await api.post(`/notifiche/${n.id}/letta`); } catch {} } load(); };
+  if (caricato && alerts.length === 0 && notif.length === 0) return <div className="empty">Nessun avviso. Tutto in regola.</div>;
+  return (<>
+    {alerts.length > 0 && <div className="card"><h3>Scadenze &amp; alert dipendenti</h3>
+      {alerts.map(a => (
+        <div className="daycard" key={a.id} style={{ alignItems: "flex-start" }}>
+          <div><b>{a.titolo || a.tipo || "Avviso"}</b>
+            <div className="muted" style={{ whiteSpace: "pre-line" }}>{a.messaggio || a.descrizione || ""}</div></div>
+          <button className="btn sm gh" onClick={() => risolvi(a)}>Risolvi</button>
+        </div>
+      ))}
+    </div>}
+    {notif.length > 0 && <div className="card"><h3>Notifiche</h3>
+      {notif.map(n => (
+        <div className="daycard" key={n.id} onClick={() => segnaLetta(n)} style={{ opacity: n.letta ? .6 : 1, cursor: "pointer" }}>
+          <div><b>{n.titolo}</b><div className="muted" style={{ whiteSpace: "pre-line" }}>{n.messaggio}</div></div>
+          {!n.letta && <span className="pill info">nuova</span>}
+        </div>
+      ))}
+    </div>}
+  </>);
+}
+
+function RichiesteAdmin() {
+  const [list, setList] = useState(null);
+  const [filtro, setFiltro] = useState("aperta");
+  const load = useCallback(() => {
+    const p = filtro ? `?stato=${filtro}` : "";
+    api.get(`/richieste${p}`).then(r => setList(r.data)).catch(() => setList([]));
+  }, [filtro]);
+  useEffect(() => { load(); }, [load]);
+  const risolvi = async (r, esito) => { try { await api.post(`/richieste/${r.id}/risolvi`, { esito }); } catch {} load(); };
+  return (<>
+    <div className="card"><h3>Richieste dipendenti</h3>
+      <div className="row" style={{ gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+        {[["aperta", "Da gestire"], ["approvata", "Approvate"], ["rifiutata", "Rifiutate"], ["", "Tutte"]].map(([v, l]) =>
+          <button key={v} className={`btn sm ${filtro === v ? "" : "gh"}`} onClick={() => setFiltro(v)}>{l}</button>)}
+      </div>
+    </div>
+    {!list && <div className="spin">Caricamento…</div>}
+    {list && list.length === 0 && <div className="empty">Nessuna richiesta.</div>}
+    {list && list.map(r => (
+      <div className="card" key={r.id}>
+        <div className="row">
+          <div><b>{r.dipendente_nome || "Dipendente"}</b>
+            <div className="muted">{tipoLabel(r.tipo)}{r.dettaglio ? ` · ${r.dettaglio}` : ""}
+              {r.dati?.dal ? ` · ${fmt(r.dati.dal)}→${fmt(r.dati.al)}` : ""}</div></div>
+          <span className={`pill ${r.stato === "approvata" ? "ok" : r.stato === "rifiutata" ? "danger" : "muted"}`}>{r.stato}</span>
+        </div>
+        {r.stato === "aperta" && <div className="row" style={{ gap: 8, marginTop: 10 }}>
+          <button className="btn sm" style={{ flex: 1, justifyContent: "center" }} onClick={() => risolvi(r, "approvata")}><Check size={14} /> Approva</button>
+          <button className="btn sm gh" style={{ flex: 1, justifyContent: "center", color: "#a6531c", borderColor: "#e6c6a8" }} onClick={() => risolvi(r, "rifiutata")}>Rifiuta</button>
+        </div>}
+      </div>
+    ))}
+  </>);
+}
+
+function DocumentiAdmin() {
+  const [docs, setDocs] = useState(null);
+  const [q, setQ] = useState("");
+  useEffect(() => { api.get("/dipendenti-cloud/documenti").then(r => setDocs(r.data || [])).catch(() => setDocs([])); }, []);
+  const scarica = async (d) => {
+    const win = window.open("", "_blank");
+    try {
+      const r = await api.get(`/dipendenti-cloud/documenti/${d.id}/file`, { responseType: "blob" });
+      const url = URL.createObjectURL(r.data);
+      if (win) win.location = url;
+      else { const a = document.createElement("a"); a.href = url; a.download = d.filename || "documento"; a.click(); }
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch { if (win) win.close(); alert("File non disponibile."); }
+  };
+  const filtered = (docs || []).filter(d => {
+    const s = q.trim().toLowerCase();
+    if (!s) return true;
+    return `${d.dipendente_nome || ""} ${d.tipo || d.categoria || ""} ${d.filename || ""}`.toLowerCase().includes(s);
+  });
+  const gruppi = {};
+  filtered.forEach(d => { const k = d.dipendente_nome || "Senza dipendente"; (gruppi[k] = gruppi[k] || []).push(d); });
+  return (<>
+    <div className="card"><h3>Documenti · tutti i dipendenti</h3>
+      <input className="input" placeholder="Cerca dipendente / tipo…" value={q} onChange={e => setQ(e.target.value)} style={{ marginTop: 8 }} />
+    </div>
+    {!docs && <div className="spin">Caricamento…</div>}
+    {docs && Object.keys(gruppi).length === 0 && <div className="empty">Nessun documento.</div>}
+    {docs && Object.entries(gruppi).sort((a, b) => a[0].localeCompare(b[0])).map(([nome, lista]) => (
+      <div className="card" key={nome}>
+        <h3 style={{ marginBottom: 6 }}>{nome}</h3>
+        {lista.map(d => (
+          <div className="daycard" key={d.id}>
+            <div><b>{d.tipo || d.categoria || "Documento"}</b><div className="muted">{d.filename || "—"}</div></div>
+            <button className="btn sm gh" onClick={() => scarica(d)}><Download size={14} /> Apri</button>
+          </div>
+        ))}
+      </div>
+    ))}
+  </>);
+}
+
+function TimbraAdmin() {
+  const oggi = new Date().toISOString().slice(0, 10);
+  const [data, setData] = useState(oggi);
+  const [ts, setTs] = useState(null);
+  useEffect(() => {
+    api.get(`/timbrature?data=${data}`).then(r => setTs(r.data.timbrature || [])).catch(() => setTs([]));
+  }, [data]);
+  const gruppi = {};
+  (ts || []).forEach(t => { const k = t.dipendente_nome || t.dipendente_id || "—"; (gruppi[k] = gruppi[k] || []).push(t); });
+  return (<>
+    <div className="card"><h3>Timbrature · tutti i dipendenti</h3>
+      <input className="input" type="date" value={data} onChange={e => setData(e.target.value)} style={{ marginTop: 8 }} />
+    </div>
+    {!ts && <div className="spin">Caricamento…</div>}
+    {ts && Object.keys(gruppi).length === 0 && <div className="empty">Nessuna timbratura per questa data.</div>}
+    {ts && Object.entries(gruppi).sort((a, b) => a[0].localeCompare(b[0])).map(([nome, lista]) => (
+      <div className="card" key={nome}>
+        <div className="row"><b>{nome}</b></div>
+        {lista.sort((a, b) => (a.ora || "").localeCompare(b.ora || "")).map((t, i) => (
+          <div className="daycard" key={i}>
+            <div><b style={{ color: t.tipo === "entrata" ? "#3d8168" : "#b04a3a" }}>{t.tipo}</b>
+              <div className="muted">{t.ora || ""}{t.fuori_sede ? " · ⚠ fuori sede" : ""}</div></div>
+          </div>
+        ))}
+      </div>
+    ))}
+  </>);
+}
+
 export default function PortaleDipendente() {
   // Sicurezza: il portale chiede SEMPRE il PIN all'apertura (niente ingresso
   // automatico per via di un token salvato nel browser).
@@ -737,18 +929,20 @@ export default function PortaleDipendente() {
         <button className="logout" onClick={logout}><LogOut size={13}/> Esci</button>
       </div>
       <div className="pt-body">
-        {tab==="timbra" && <Timbra/>}
+        {tab==="timbra" && (role==="admin" ? <TimbraAdmin/> : <Timbra/>)}
         {tab==="turni" && <Turni/>}
-        {tab==="buste" && <Buste/>}
-        {tab==="documenti" && <Documenti/>}
-        {tab==="richieste" && <Richieste/>}
-        {tab==="notifiche" && <Notifiche onChange={refreshBadge} onOpen={(n)=>{
-          const t = n.tipo;
-          if (t==="richiesta") setTab(role==="admin" ? "gestione" : "richieste");
-          else if (t==="richiesta_risolta") setTab("richieste");
-          else if (t==="turni" || t==="turno_pubblicato") setTab("turni");
-          else if (t==="busta_paga") setTab("buste");
-        }}/>}
+        {tab==="buste" && (role==="admin" ? <BusteAdmin/> : <Buste/>)}
+        {tab==="documenti" && (role==="admin" ? <DocumentiAdmin/> : <Documenti/>)}
+        {tab==="richieste" && (role==="admin" ? <RichiesteAdmin/> : <Richieste/>)}
+        {tab==="notifiche" && (role==="admin"
+          ? <AvvisiAdmin onChange={refreshBadge}/>
+          : <Notifiche onChange={refreshBadge} onOpen={(n)=>{
+              const t = n.tipo;
+              if (t==="richiesta") setTab("richieste");
+              else if (t==="richiesta_risolta") setTab("richieste");
+              else if (t==="turni" || t==="turno_pubblicato") setTab("turni");
+              else if (t==="busta_paga") setTab("buste");
+            }}/>)}
         {tab==="gestione" && isGestore && <Gestione/>}
       </div>
       <div className="tabbar">
