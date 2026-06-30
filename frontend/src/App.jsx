@@ -836,6 +836,15 @@ function PresenzePage({ dipendenti, reload }) {
     return presenze.find(p => p.dipendente_id === dipId && p.data === dataStr);
   };
 
+  // Nota della cella (es. malattia → numero di protocollo del certificato medico).
+  const notaDi = (dipId, day) => {
+    const p = getPresenza(dipId, day);
+    if (p && (p.note || p.nota)) return p.note || p.nota;
+    const date = new Date(anno, mese - 1, day);
+    const fer = ferieDi(dipId, isoD(date));
+    return (fer && (fer.note || fer.protocollo)) || "";
+  };
+
   // Riposi attesi nel mese = numero di domeniche (≈ una settimana di riposo a testa per settimana).
   const domenicheMese = (() => { let n = 0; for (let d = 1; d <= daysInMonth; d++) if (new Date(anno, mese - 1, d).getDay() === 0) n++; return n; })();
   // Conta solo i giorni di Riposo settimanale (RS): ferie e permessi NON contano.
@@ -1018,11 +1027,14 @@ function PresenzePage({ dipendenti, reload }) {
                   const code = codiceDerivato(dip.id, day);
                   const tipo = tipiGiustificativo.find(t => t.code === code);
                   const dimmed = penna && code !== penna;
+                  const nota = notaDi(dip.id, day);
+                  const titolo = `${tipo?.label || code || ""}${nota ? ` — ${nota}` : ""}`.trim();
                   return (
-                    <td key={i} className={`dc-presenze-td-day ${isWeekend ? 'weekend' : ''}`} onClick={() => applica(tuttiMode ? dipendenti.map(d => d.id) : [dip.id], day)} style={{ cursor: "pointer" }}>
+                    <td key={i} className={`dc-presenze-td-day ${isWeekend ? 'weekend' : ''}`} onClick={() => applica(tuttiMode ? dipendenti.map(d => d.id) : [dip.id], day)} style={{ cursor: "pointer", position: "relative" }} title={titolo || undefined}>
                       {code ? (
                         <span className="dc-presenza-badge" style={{ backgroundColor: tipo?.color || '#10b981', opacity: dimmed ? 0.12 : (salvata ? 1 : 0.55) }}>
                           {code}
+                          {nota ? <span title={nota} style={{ position: "absolute", top: 1, right: 2, width: 6, height: 6, borderRadius: "50%", background: "#b91c1c", border: "1px solid #fff" }} /> : null}
                         </span>
                       ) : (
                         <span className="dc-presenza-empty">-</span>
@@ -1295,7 +1307,7 @@ function TurniPage({ dipendenti, turni, reload }) {
   const [busy, setBusy] = useState(false);
   const [evid, setEvid] = useState(null);
   const [showSost, setShowSost] = useState(false);
-  const [sost, setSost] = useState({ assente: "", giorno: "", motivo: "malattia", sostituto: "", turnoSost: "" });
+  const [sost, setSost] = useState({ assente: "", giorno: "", motivo: "malattia", sostituto: "", turnoSost: "", protocollo: "", dal: "", al: "" });
   const tbodyRef = useRef(null);
   const giorni = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"];
   const lunOggi = (() => { const o = new Date(); const off = (o.getDay() + 6) % 7; const m = new Date(o); m.setDate(o.getDate() - off); m.setHours(0, 0, 0, 0); return m; })();
@@ -1555,20 +1567,58 @@ function TurniPage({ dipendenti, turni, reload }) {
   };
 
   // === SOSTITUZIONE D'EMERGENZA (malattia/assenza) ===
-  // L'assente va a Riposo (con motivo); il sostituto prende il turno scelto (di default Lunga = doppia).
+  // Data (ISO) del giorno (nome) nella settimana visualizzata.
+  const dataGiorno = (g) => { const gi = giorni.indexOf(g); if (gi < 0) return ""; const d = new Date(lunedi); d.setDate(lunedi.getDate() + gi); return iso(d); };
+  // Assicura l'esistenza di un tipo turno (es. "Malattia") e ne ritorna l'id.
+  const ensureTurno = async (nome, colore) => {
+    let id = idTurno(nome);
+    if (id) return id;
+    try {
+      await axios.post(`${API}/turni`, { nome, orario_inizio: "", orario_fine: "", colore });
+      const fresh = (await axios.get(`${API}/turni`)).data || [];
+      if (reload) reload();
+      return (fresh.find(t => t.nome === nome) || {}).id || null;
+    } catch { return null; }
+  };
   const apriSost = () => {
-    setSost({ assente: "", giorno: giorni[(new Date().getDay() + 6) % 7], motivo: "malattia",
-              sostituto: "", turnoSost: idTurno("Lunga") || "" });
+    const g = giorni[(new Date().getDay() + 6) % 7];
+    const ds = dataGiorno(g);
+    setSost({ assente: "", giorno: g, motivo: "malattia", sostituto: "", turnoSost: idTurno("Lunga") || "", protocollo: "", dal: ds, al: ds });
     setShowSost(true);
   };
+  const setSostGiorno = (g) => { const ds = dataGiorno(g); setSost(s => ({ ...s, giorno: g, dal: ds, al: ds })); };
+  const GIUST_MOTIVO = { malattia: "M", ferie: "F", permesso: "PE", assenza: "AS" };
   const confermaSost = async () => {
     if (!sost.assente || !sost.giorno) { alert("Scegli il dipendente assente e il giorno."); return; }
-    const ups = [{ dipendente_id: sost.assente, giorno: sost.giorno, turno_id: idTurno("Riposo") || null, motivo: sost.motivo || "assenza" }];
-    if (sost.sostituto && sost.turnoSost) {
-      if (sost.sostituto === sost.assente) { alert("Il sostituto deve essere un'altra persona."); return; }
-      ups.push({ dipendente_id: sost.sostituto, giorno: sost.giorno, turno_id: sost.turnoSost, motivo: "sostituzione" });
+    if (sost.sostituto && sost.sostituto === sost.assente) { alert("Il sostituto deve essere un'altra persona."); return; }
+    const ups = [];
+    const giust = GIUST_MOTIVO[sost.motivo] || "AS";
+
+    if (sost.motivo === "malattia") {
+      // MALATTIA: stato di presenza (NON Riposo), con numero di protocollo del certificato medico.
+      const dal = sost.dal || dataGiorno(sost.giorno);
+      const al = sost.al || dal;
+      const nota = sost.protocollo ? `Malattia · Protocollo INPS: ${sost.protocollo}` : "Malattia";
+      const batch = [];
+      for (let d = new Date(dal); isoT(d) <= al; d.setDate(d.getDate() + 1))
+        batch.push({ dipendente_id: sost.assente, data: isoT(d), stato: "giustificato", giustificativo: "M", note: nota });
+      if (batch.length) { try { await axios.post(`${API}/presenze/batch`, batch); } catch (e) { console.error(e); } }
+      // Nella griglia turni della settimana: cella "Malattia" (non Riposo) nei giorni del range.
+      const idMal = await ensureTurno("Malattia", "#f59e0b");
+      for (let gi = 0; gi < 7; gi++) { const d = new Date(lunedi); d.setDate(lunedi.getDate() + gi); const ds = iso(d);
+        if (ds >= dal && ds <= al) ups.push({ dipendente_id: sost.assente, giorno: giorni[gi], turno_id: idMal || null, motivo: "malattia" }); }
+    } else {
+      // Ferie/Permesso/Assenza: registro la presenza del giorno e libero il turno (Riposo).
+      const ds = dataGiorno(sost.giorno);
+      try { await axios.post(`${API}/presenze/batch`, [{ dipendente_id: sost.assente, data: ds, stato: sost.motivo === "assenza" ? "assente" : "giustificato", giustificativo: giust, note: sost.motivo }]); } catch (e) { console.error(e); }
+      const idAlt = sost.motivo === "ferie" ? (idTurno("Ferie") || idTurno("Riposo")) : idTurno("Riposo");
+      ups.push({ dipendente_id: sost.assente, giorno: sost.giorno, turno_id: idAlt || null, motivo: sost.motivo });
     }
-    await salva(ups);
+
+    if (sost.sostituto && sost.turnoSost)
+      ups.push({ dipendente_id: sost.sostituto, giorno: sost.giorno, turno_id: sost.turnoSost, motivo: "sostituzione" });
+
+    if (ups.length) await salva(ups); else await caricaSettimana(settimana);
     setShowSost(false);
   };
 
@@ -1697,7 +1747,7 @@ function TurniPage({ dipendenti, turni, reload }) {
           <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 520, width: "100%", marginTop: 40 }}>
             <h3 style={{ marginTop: 0 }}>🚨 Sostituzione d'emergenza</h3>
             <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>
-              Segna chi è assente (malattia/ferie/assenza): va a <b>Riposo</b>. Poi scegli chi lo copre: gli assegno il turno scelto (di default la <b>Lunga</b> = doppia) in quel giorno.
+              Segna chi è assente e il motivo: la <b>malattia</b> viene registrata nelle Presenze (con protocollo), ferie/permesso/assenza liberano il turno. Poi scegli chi lo copre: gli assegno il turno scelto (di default la <b>Lunga</b> = doppia) in quel giorno.
             </p>
             <div style={{ display: "grid", gap: 12 }}>
               <div>
@@ -1710,7 +1760,7 @@ function TurniPage({ dipendenti, turni, reload }) {
               <div style={{ display: "flex", gap: 10 }}>
                 <div style={{ flex: 1 }}>
                   <label style={{ fontSize: 12, fontWeight: 600, color: "#3b4a40" }}>Giorno</label>
-                  <select className="dc-input" style={{ width: "100%" }} value={sost.giorno} onChange={e => setSost(s => ({ ...s, giorno: e.target.value }))}>
+                  <select className="dc-input" style={{ width: "100%" }} value={sost.giorno} onChange={e => setSostGiorno(e.target.value)}>
                     {giorni.map(g => <option key={g} value={g}>{g}</option>)}
                   </select>
                 </div>
@@ -1729,6 +1779,27 @@ function TurniPage({ dipendenti, turni, reload }) {
                 const n = cur && nomeTurno(cur.turno_id);
                 return <div className="dc-muted" style={{ fontSize: 12 }}>Turno attuale di quel giorno: <b>{n || "—"}</b></div>;
               })()}
+              {sost.motivo === "malattia" && (
+                <div style={{ background: "#fdf6ec", border: "1px solid #f0e0c4", borderRadius: 10, padding: 12, display: "grid", gap: 10 }}>
+                  <div className="dc-muted" style={{ fontSize: 12 }}>
+                    La malattia <b>non è un riposo</b>: viene segnata come <b>Malattia (M)</b> nelle Presenze mensili. Inserisci il <b>numero di protocollo</b> del certificato medico telematico (PUC) che dà il medico.
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 12, fontWeight: 600, color: "#3b4a40" }}>Numero di protocollo (certificato medico)</label>
+                    <input className="dc-input" style={{ width: "100%" }} value={sost.protocollo} onChange={e => setSost(s => ({ ...s, protocollo: e.target.value }))} placeholder="es. 1234567890123" />
+                  </div>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <div style={{ flex: 1 }}>
+                      <label style={{ fontSize: 12, fontWeight: 600, color: "#3b4a40" }}>Dal</label>
+                      <input type="date" className="dc-input" style={{ width: "100%" }} value={sost.dal} onChange={e => setSost(s => ({ ...s, dal: e.target.value }))} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <label style={{ fontSize: 12, fontWeight: 600, color: "#3b4a40" }}>Al (fine prognosi)</label>
+                      <input type="date" className="dc-input" style={{ width: "100%" }} value={sost.al} onChange={e => setSost(s => ({ ...s, al: e.target.value }))} />
+                    </div>
+                  </div>
+                </div>
+              )}
               <div>
                 <label style={{ fontSize: 12, fontWeight: 600, color: "#3b4a40" }}>Chi lo copre (sostituto)</label>
                 <select className="dc-input" style={{ width: "100%" }} value={sost.sostituto} onChange={e => setSost(s => ({ ...s, sostituto: e.target.value }))}>
