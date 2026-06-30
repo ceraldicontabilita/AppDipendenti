@@ -2658,11 +2658,14 @@ MODULI_HR = ["dipendenti", "cedolini"]
 
 
 @router.get("/alerts")
-async def lista_alert(modulo: str = "", severita: str = ""):
-    """Elenco degli alert aperti HR (scadenze contratti/prova, contestazioni…).
+async def lista_alert(modulo: str = "", severita: str = "", stato: str = "aperto"):
+    """Elenco degli alert HR (scadenze contratti/prova, contestazioni…).
     La collezione `alerts` è condivisa con la contabilità: qui filtriamo ai soli
-    moduli del personale."""
-    q = {"stato": "aperto"}
+    moduli del personale. `stato`: 'aperto' (default), 'risolto' (archivio),
+    'tutti' (entrambi). Gli alert risolti NON vengono cancellati: restano in archivio."""
+    q = {}
+    if stato and stato != "tutti":
+        q["stato"] = stato
     if modulo:
         if modulo not in MODULI_HR:
             return {"totale": 0, "alerts": []}
@@ -2671,7 +2674,8 @@ async def lista_alert(modulo: str = "", severita: str = ""):
         q["modulo"] = {"$in": MODULI_HR}
     if severita:
         q["severita"] = severita
-    alerts = await get_db().alerts.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    sort_field = "resolved_at" if stato == "risolto" else "created_at"
+    alerts = await get_db().alerts.find(q, {"_id": 0}).sort(sort_field, -1).to_list(500)
     return {"totale": len(alerts), "alerts": alerts}
 
 

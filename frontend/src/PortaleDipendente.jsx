@@ -756,31 +756,52 @@ function BusteAdmin() {
 }
 
 function AvvisiAdmin({ onChange }) {
+  const [vista, setVista] = useState("attivi"); // attivi | archivio
   const [alerts, setAlerts] = useState([]);
   const [notif, setNotif] = useState([]);
   const [caricato, setCaricato] = useState(false);
+  const archivio = vista === "archivio";
   const load = useCallback(() => {
-    api.get("/dipendenti-cloud/alerts").then(r => setAlerts(r.data.alerts || [])).catch(() => setAlerts([]));
+    setCaricato(false);
+    const statoAlert = archivio ? "risolto" : "aperto";
+    api.get(`/dipendenti-cloud/alerts?stato=${statoAlert}`).then(r => setAlerts(r.data.alerts || [])).catch(() => setAlerts([]));
     api.get("/notifiche").then(r => { setNotif(r.data || []); onChange && onChange(); }).catch(() => setNotif([]))
       .finally(() => setCaricato(true));
-  }, [onChange]);
+  }, [onChange, archivio]);
   useEffect(() => { load(); }, [load]);
   const risolvi = async (a) => { try { await api.post(`/dipendenti-cloud/alerts/${a.id}/risolvi`); } catch {} load(); };
   const segnaLetta = async (n) => { if (!n.letta) { try { await api.post(`/notifiche/${n.id}/letta`); } catch {} } load(); };
-  if (caricato && alerts.length === 0 && notif.length === 0) return <div className="empty">Nessun avviso. Tutto in regola.</div>;
+  // In "attivi" mostro avvisi aperti + notifiche da leggere; in "archivio" i risolti + le notifiche già lette.
+  const notifMostrate = notif.filter(n => archivio ? n.letta : !n.letta);
+  const vuoto = caricato && alerts.length === 0 && notifMostrate.length === 0;
+  const fmtData = (s) => (s ? `${s.slice(8,10)}/${s.slice(5,7)}/${s.slice(0,4)}` : "");
   return (<>
+    <div className="card" style={{ paddingBottom: 10 }}>
+      <h3 style={{ marginBottom: 8 }}>Avvisi</h3>
+      <div className="row" style={{ gap: 8 }}>
+        <button className={`btn sm ${archivio ? "gh" : ""}`} onClick={() => setVista("attivi")}>Da gestire</button>
+        <button className={`btn sm ${archivio ? "" : "gh"}`} onClick={() => setVista("archivio")}>Archivio</button>
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+        {archivio ? "Avvisi già gestiti e notifiche lette: restano qui, non vengono cancellati." : "Avvisi e notifiche da leggere. Una volta gestiti vanno in Archivio."}
+      </div>
+    </div>
+    {!caricato && <div className="spin">Caricamento…</div>}
+    {vuoto && <div className="empty">{archivio ? "Archivio vuoto." : "Nessun avviso da gestire. Tutto in regola."}</div>}
     {alerts.length > 0 && <div className="card"><h3>Scadenze &amp; alert dipendenti</h3>
       {alerts.map(a => (
         <div className="daycard" key={a.id} style={{ alignItems: "flex-start" }}>
           <div><b>{a.titolo || a.tipo || "Avviso"}</b>
-            <div className="muted" style={{ whiteSpace: "pre-line" }}>{a.messaggio || a.descrizione || ""}</div></div>
-          <button className="btn sm gh" onClick={() => risolvi(a)}>Risolvi</button>
+            <div className="muted" style={{ whiteSpace: "pre-line" }}>{a.messaggio || a.descrizione || ""}</div>
+            {archivio && a.resolved_at && <div className="muted" style={{ fontSize: 11 }}>Gestito il {fmtData(a.resolved_at)}</div>}
+          </div>
+          {!archivio && <button className="btn sm gh" onClick={() => risolvi(a)}>Risolvi</button>}
         </div>
       ))}
     </div>}
-    {notif.length > 0 && <div className="card"><h3>Notifiche</h3>
-      {notif.map(n => (
-        <div className="daycard" key={n.id} onClick={() => segnaLetta(n)} style={{ opacity: n.letta ? .6 : 1, cursor: "pointer" }}>
+    {notifMostrate.length > 0 && <div className="card"><h3>Notifiche</h3>
+      {notifMostrate.map(n => (
+        <div className="daycard" key={n.id} onClick={() => !archivio && segnaLetta(n)} style={{ opacity: archivio ? .7 : 1, cursor: archivio ? "default" : "pointer" }}>
           <div><b>{n.titolo}</b><div className="muted" style={{ whiteSpace: "pre-line" }}>{n.messaggio}</div></div>
           {!n.letta && <span className="pill info">nuova</span>}
         </div>
