@@ -49,7 +49,8 @@ const formatDate = (dateStr) => {
 
 const getInitials = (nome, cognome) => `${nome?.[0] || ""}${cognome?.[0] || ""}`.toUpperCase();
 
-const AVATAR_COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899", "#06b6d4", "#84cc16"];
+// Palette on-brand (sage/cream/terracotta/oliva): niente blu/indigo/viola (regola titolare).
+const AVATAR_COLORS = ["#5b7a6b", "#3d8168", "#7d5526", "#a6724a", "#8a9a5b", "#b08968", "#4f6f5e", "#9c6b4a"];
 const getAvatarColor = (str) => {
   let hash = 0;
   for (let i = 0; i < (str || "").length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
@@ -902,14 +903,14 @@ function PresenzePage({ dipendenti, reload }) {
   const tipiGiustificativo = [
     { code: "P", label: "Presente", color: "#10b981" },
     { code: "AS", label: "Assente", color: "#ef4444" },
-    { code: "F", label: "Ferie", color: "#3b82f6" },
-    { code: "PE", label: "Permesso", color: "#8b5cf6" },
+    { code: "F", label: "Ferie", color: "#5b7a6b" },
+    { code: "PE", label: "Permesso", color: "#7d5526" },
     { code: "M", label: "Malattia", color: "#f59e0b" },
-    { code: "R", label: "ROL", color: "#06b6d4" },
+    { code: "R", label: "ROL", color: "#8a9a5b" },
     { code: "CH", label: "Chiuso", color: "#6b7280" },
     { code: "RS", label: "Riposo Sett.", color: "#9ca3af" },
     { code: "X", label: "Cessato", color: "#374151" },
-    { code: "FNL", label: "Festività Non Lav.", color: "#a855f7" },
+    { code: "FNL", label: "Festività Non Lav.", color: "#a6724a" },
   ];
 
   // Calcola statistiche
@@ -1202,8 +1203,8 @@ function FeriePage({ dipendenti, ferie, reload, getDipendente }) {
   const [mese, setMese] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
 
   const TIPI = [
-    { tipo: "Ferie", code: "F", color: "#3b82f6" },
-    { tipo: "Permesso", code: "PE", color: "#8b5cf6" },
+    { tipo: "Ferie", code: "F", color: "#5b7a6b" },
+    { tipo: "Permesso", code: "PE", color: "#7d5526" },
   ];
   const ymd = (y, m, d) => `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
   const giorniMese = new Date(mese.getFullYear(), mese.getMonth() + 1, 0).getDate();
@@ -1253,7 +1254,7 @@ function FeriePage({ dipendenti, ferie, reload, getDipendente }) {
           <strong style={{ textTransform: "capitalize", minWidth: 150, textAlign: "center" }}>{meseLabel}</strong>
           <button onClick={() => setMese(new Date(mese.getFullYear(), mese.getMonth() + 1, 1))} className="dc-btn">›</button>
           <span style={{ marginLeft: 12, fontSize: 13, color: "#6b7669" }}>
-            Clicca una cella: vuoto → <b style={{ color: "#3b82f6" }}>Ferie</b> → <b style={{ color: "#8b5cf6" }}>Permesso</b> → vuoto
+            Clicca una cella: vuoto → <b style={{ color: "#5b7a6b" }}>Ferie</b> → <b style={{ color: "#7d5526" }}>Permesso</b> → vuoto
           </span>
         </div>
         <table className="dc-table" style={{ fontSize: 12, borderCollapse: "collapse" }}>
