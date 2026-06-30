@@ -69,6 +69,32 @@ const Badge = ({ children, variant = "default" }) => {
   return <span className={`dc-badge ${variants[variant]}`}>{children}</span>;
 };
 
+/* ---------- Toast: conferme/errori non bloccanti (al posto degli alert) ---------- */
+let _pushToast = null;
+const toast = (msg, tipo = "ok") => { if (_pushToast) _pushToast(msg, tipo); else if (tipo === "err") window.alert(msg); };
+function Toaster() {
+  const [items, setItems] = useState([]);
+  useEffect(() => {
+    let n = 0;
+    _pushToast = (msg, tipo) => {
+      const id = `${++n}_${Date.now()}`;
+      setItems(x => [...x, { id, msg, tipo }]);
+      setTimeout(() => setItems(x => x.filter(i => i.id !== id)), 3200);
+    };
+    return () => { _pushToast = null; };
+  }, []);
+  const col = { ok: "#3d8168", err: "#b04a3a", info: "#5b7a6b" };
+  return (
+    <div style={{ position: "fixed", top: 16, left: "50%", transform: "translateX(-50%)", zIndex: 9999, display: "flex", flexDirection: "column", gap: 8, alignItems: "center", pointerEvents: "none" }}>
+      {items.map(i => (
+        <div key={i.id} style={{ background: col[i.tipo] || col.info, color: "#fff", padding: "10px 18px", borderRadius: 10, fontSize: 14, fontWeight: 600, boxShadow: "0 6px 20px rgba(0,0,0,.18)", maxWidth: "92vw" }}>
+          {i.tipo === "ok" ? "✓ " : i.tipo === "err" ? "⚠ " : ""}{i.msg}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // Avatar component
 const Avatar = ({ nome, cognome, size = "md" }) => {
   const sizes = { sm: "dc-avatar-sm", md: "dc-avatar-md", lg: "dc-avatar-lg" };
@@ -249,6 +275,7 @@ export default function DipendentiCloudApp({ page: pageProp }) {
 
   return (
     <div className="dc-app">
+      <Toaster />
       {/* Barra mobile con menu a tendina */}
       <div className="dc-mobile-topbar">
         <button className="dc-hamburger" onClick={() => setMobileMenuOpen(true)} aria-label="Apri menu">
@@ -508,9 +535,9 @@ function AnagraficaPage({ dipendenti, reload }) {
     try {
       const fd = new FormData(); fd.append("file", fl);
       const r = await axios.post(`${API}/dipendenti/importa-anagrafica`, fd, { headers: { "Content-Type": "multipart/form-data" } });
-      alert(`Anagrafica importata: ${r.data.creati} creati, ${r.data.aggiornati} aggiornati.`);
+      toast(`Anagrafica importata: ${r.data.creati} creati, ${r.data.aggiornati} aggiornati.`);
       reload && reload();
-    } catch (err) { alert(err?.response?.data?.detail || "Errore import anagrafica"); }
+    } catch (err) { toast(err?.response?.data?.detail || "Errore import anagrafica", "err"); }
     finally { setAnagBusy(false); if (anagRef.current) anagRef.current.value = ""; }
   };
   const [showRid, setShowRid] = useState(false);
@@ -573,9 +600,10 @@ function AnagraficaPage({ dipendenti, reload }) {
       }
       setShowModal(false);
       reload();
+      toast("Dipendente salvato");
     } catch (error) {
       console.error("Error saving:", error);
-      alert("Errore nel salvataggio");
+      toast("Errore nel salvataggio", "err");
     }
   };
 
@@ -1457,7 +1485,7 @@ function TurniPage({ dipendenti, turni, reload }) {
   useEffect(() => { axios.get(`${API}/onomastici/settimana?settimana=${settimana}`).then(r => setOnomSett(r.data || [])).catch(() => setOnomSett([])); }, [settimana]);
   const mettiRiposoOnom = async (o) => {
     const idR = idTurno("Riposo");
-    if (!idR) { alert("Manca il turno 'Riposo' tra i tipi di turno."); return; }
+    if (!idR) { toast("Manca il turno 'Riposo' tra i tipi di turno.", "err"); return; }
     await salva([{ dipendente_id: o.dipendente_id, giorno: o.giorno_nome, turno_id: idR, motivo: "onomastico" }]);
   };
   // Precompilazione automatica: nel giorno dell'onomastico → Riposo (se la cella è
@@ -1643,8 +1671,8 @@ function TurniPage({ dipendenti, turni, reload }) {
         }
       }
     });
-    if (!tocco) { alert("Niente da generare. Apri \"Configura turni\" e imposta turno/riposo (o spunta Sala per i camerieri), oppure verifica che ci siano ferie approvate."); return; }
-    if (updates.length) await salva(updates);
+    if (!tocco) { toast("Niente da generare: apri \"Configura turni\" e imposta turno/riposo (o spunta Sala), oppure verifica le ferie approvate.", "info"); return; }
+    if (updates.length) { await salva(updates); toast("Settimana generata"); }
   };
 
   // === SOSTITUZIONE D'EMERGENZA (malattia/assenza) ===
@@ -1670,8 +1698,8 @@ function TurniPage({ dipendenti, turni, reload }) {
   const setSostGiorno = (g) => { const ds = dataGiorno(g); setSost(s => ({ ...s, giorno: g, dal: ds, al: ds })); };
   const GIUST_MOTIVO = { malattia: "M", ferie: "F", permesso: "PE", assenza: "AS" };
   const confermaSost = async () => {
-    if (!sost.assente || !sost.giorno) { alert("Scegli il dipendente assente e il giorno."); return; }
-    if (sost.sostituto && sost.sostituto === sost.assente) { alert("Il sostituto deve essere un'altra persona."); return; }
+    if (!sost.assente || !sost.giorno) { toast("Scegli il dipendente assente e il giorno.", "err"); return; }
+    if (sost.sostituto && sost.sostituto === sost.assente) { toast("Il sostituto deve essere un'altra persona.", "err"); return; }
     const ups = [];
     const giust = GIUST_MOTIVO[sost.motivo] || "AS";
 
@@ -1701,6 +1729,7 @@ function TurniPage({ dipendenti, turni, reload }) {
 
     if (ups.length) await salva(ups); else await caricaSettimana(settimana);
     setShowSost(false);
+    toast(sost.motivo === "malattia" ? "Malattia registrata nelle presenze" : "Sostituzione salvata");
   };
 
   return (
@@ -2038,7 +2067,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
       bonifico_data: d.bonifico_data || null,
       acconti: (d.acconti || []).filter(a => a.importo !== "" && a.importo != null).map(a => ({ importo: parseFloat(a.importo), data: a.data || null })),
     };
-    try { await axios.post(`${API}/paghe`, payload); setSalvato(s => ({ ...s, [id]: true })); setTimeout(() => setSalvato(s => ({ ...s, [id]: false })), 1500); } catch (e) { console.error(e); alert("Errore salvataggio"); }
+    try { await axios.post(`${API}/paghe`, payload); setSalvato(s => ({ ...s, [id]: true })); setTimeout(() => setSalvato(s => ({ ...s, [id]: false })), 1500); toast("Busta salvata"); } catch (e) { console.error(e); toast("Errore salvataggio", "err"); }
   };
 
   const eur = (n) => (n || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -2629,7 +2658,7 @@ function PagheBonificiPage() {
         dipendente_id: r.dipendente_id, anno: r.anno, mese: r.mese, riconciliato: val,
       });
       await load();
-    } catch (e) { alert(e?.response?.data?.detail || "Errore conferma"); }
+    } catch (e) { toast(e?.response?.data?.detail || "Errore conferma", "err"); }
     finally { setBusy(null); }
   };
 
@@ -2964,7 +2993,7 @@ function DocumentiPage({ dipendenti, documenti, reload, getDipendente }) {
     try {
       const r = await axios.get(`${API}/documenti/${doc.id}/file`, { responseType: "blob" });
       window.open(URL.createObjectURL(r.data), "_blank");
-    } catch { alert("Impossibile aprire il documento (file non disponibile)."); }
+    } catch { toast("Impossibile aprire il documento (file non disponibile).", "err"); }
   };
 
   const handleDelete = async (id) => {

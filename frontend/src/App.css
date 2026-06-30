@@ -1061,6 +1061,17 @@ body, .dc-app, input, select, textarea, button { font-family: 'Plus Jakarta Sans
     position: sticky; left: 0; z-index: 2; background: #fff;
     box-shadow: 2px 0 4px rgba(0,0,0,.05);
   }
+
+  /* Presenze più leggibili su mobile: celle/badge più grandi, tap facile,
+     colonna nome fissa con ombra. */
+  .dc-presenze-table { font-size: 0.9rem; }
+  .dc-presenze-th-name, .dc-presenze-td-name {
+    min-width: 130px; box-shadow: 2px 0 4px rgba(0,0,0,.06);
+  }
+  .dc-presenze-th-day { min-width: 40px; }
+  .dc-presenze-td-day { padding: 0.4rem 0.2rem; }
+  .dc-presenza-badge { width: 30px; height: 30px; font-size: 0.8rem; }
+  .dc-day-num { font-size: 0.85rem; }
 }
 
 /* ===== Buste Paga: card responsive (no scroll laterale su mobile) ===== */
