@@ -65,7 +65,7 @@ def register_routers():
     app.include_router(shifts.router, prefix="/api/shifts", tags=["Turni"], dependencies=STAFF)
     app.include_router(fascicolo_dipendente.router, prefix="/api", tags=["Fascicolo"], dependencies=STAFF)
 
-    from .routers import cedolini, cedolini_riconciliazione, tfr, attendance, dimissioni, richieste, portale_buste, turni, notifiche
+    from .routers import cedolini, tfr, attendance, dimissioni, richieste, portale_buste, turni, notifiche
     from .routers import dipendenti_cloud
     from .routers import portale_documenti
     from .routers import timbrature
@@ -80,7 +80,6 @@ def register_routers():
     # Turni del responsabile carica dati da questo router).
     app.include_router(dipendenti_cloud.router, prefix="/api", tags=["Dipendenti Cloud"],
                        dependencies=[Depends(require_staff)])
-    app.include_router(cedolini_riconciliazione.router, prefix="/api/cedolini", tags=["Cedolini Ric."], dependencies=ADMIN)
     app.include_router(cedolini.router, prefix="/api/cedolini", tags=["Cedolini"], dependencies=ADMIN)
     app.include_router(tfr.router, prefix="/api/tfr", tags=["TFR"], dependencies=ADMIN)
     app.include_router(attendance.router, prefix="/api/attendance", tags=["Presenze"], dependencies=STAFF)
