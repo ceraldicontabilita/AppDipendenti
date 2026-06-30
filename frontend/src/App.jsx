@@ -1294,6 +1294,8 @@ function TurniPage({ dipendenti, turni, reload }) {
   const [assegnazioni, setAssegnazioni] = useState([]);
   const [busy, setBusy] = useState(false);
   const [evid, setEvid] = useState(null);
+  const [showSost, setShowSost] = useState(false);
+  const [sost, setSost] = useState({ assente: "", giorno: "", motivo: "malattia", sostituto: "", turnoSost: "" });
   const tbodyRef = useRef(null);
   const giorni = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"];
   const lunOggi = (() => { const o = new Date(); const off = (o.getDay() + 6) % 7; const m = new Date(o); m.setDate(o.getDate() - off); m.setHours(0, 0, 0, 0); return m; })();
@@ -1396,20 +1398,28 @@ function TurniPage({ dipendenti, turni, reload }) {
     let onom = [];
     try { onom = (await axios.get(`${API}/onomastici`)).data || []; } catch {}
     const om = {}; onom.forEach(o => { om[o.dipendente_id] = o; });
-    setCfgRows(dipTurni.map(d => { const c = cfgDi(d.id); const o = om[d.id] || {}; return {
+    setCfgRows(dipTurni.map(d => { const c = cfgDi(d.id); const o = om[d.id] || {}; const lg = c.lunga_giorni || []; return {
       dipendente_id: d.id, nome: `${d.cognome || ''} ${d.nome || ''}`.trim() || d.nome,
-      turno_id: c.turno_id || '', riposo_giorno: c.riposo_giorno || '', lunga_giorni: c.lunga_giorni || [], rotazione: c.rotazione || '', sala: !!c.sala,
+      turno_id: c.turno_id || '', riposo_giorno: c.riposo_giorno || '', rotazione: c.rotazione || '', sala: !!c.sala,
+      lunga1: lg[0] || '', lunga2: lg[1] || '', doppia: lg.length > 1,
       onom_mese: o.mese ?? '', onom_giorno: o.giorno ?? '', onom_attivo: o.attivo ?? false, straniero: o.straniero || false }; }));
     setShowCfg(true);
   };
-  const setCfgRow = (i, k, v) => setCfgRows(rows => rows.map((r, j) => j === i ? { ...r, [k]: v } : r));
-  const toggleLunga = (i, g) => setCfgRows(rows => rows.map((r, j) => {
+  const setCfgRow = (i, k, v) => setCfgRows(rows => rows.map((r, j) => {
     if (j !== i) return r;
-    const has = (r.lunga_giorni || []).includes(g);
-    return { ...r, lunga_giorni: has ? r.lunga_giorni.filter(x => x !== g) : [...(r.lunga_giorni || []), g] };
+    const nr = { ...r, [k]: v };
+    if (k === "doppia" && !v) nr.lunga2 = "";   // tolgo il 2° giorno se disattivo la doppia
+    return nr;
   }));
+  // Da lunga1/lunga2/doppia costruisco l'array lunga_giorni (1 di default, 2 solo se doppia spuntata)
+  const lungaGiorniDi = (r) => {
+    const out = [];
+    if (r.lunga1) out.push(r.lunga1);
+    if (r.doppia && r.lunga2 && r.lunga2 !== r.lunga1) out.push(r.lunga2);
+    return out;
+  };
   const salvaCfg = async () => {
-    await axios.post(`${API}/turni-config`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, turno_id: r.turno_id || null, riposo_giorno: r.riposo_giorno || null, lunga_giorni: r.lunga_giorni || [], rotazione: r.rotazione || null, sala: !!r.sala })) });
+    await axios.post(`${API}/turni-config`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, turno_id: r.turno_id || null, riposo_giorno: r.riposo_giorno || null, lunga_giorni: lungaGiorniDi(r), rotazione: r.rotazione || null, sala: !!r.sala })) });
     await axios.post(`${API}/onomastici`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, mese: r.onom_mese ? Number(r.onom_mese) : null, giorno: r.onom_giorno ? Number(r.onom_giorno) : null, attivo: r.onom_attivo })) });
     await caricaCfg();
     axios.get(`${API}/onomastici/settimana?settimana=${settimana}`).then(r => setOnomSett(r.data || []));
@@ -1514,8 +1524,52 @@ function TurniPage({ dipendenti, turni, reload }) {
         }
       }
     });
+    // === REGOLA: chi fa la sera non fa la mattina successiva (forzata) ===
+    // Ricostruisco l'orario effettivo della settimana (esistente + modifiche appena calcolate)
+    // e, se trovo "mattina" subito dopo una "sera/pomeriggio", sposto la mattina al pomeriggio.
+    const isSera = (id) => { const n = nomeTurno(id) || ""; return /pomerig|15-21|sera/i.test(n); };
+    const isMattina = (id) => { const n = nomeTurno(id) || ""; return /mattin|6:30|7-15|8-16/i.test(n); };
+    const pomeriggioPer = (id) => {
+      const n = nomeTurno(id) || "";
+      if (/bar|6:30|15/i.test(n)) return idTurno("Bar 15-21") || idTurno("Pomeriggio");
+      return idTurno("Pomeriggio") || idTurno("Bar 15-21");
+    };
+    const sched = {};
+    dipTurni.forEach(d => { sched[d.id] = giorni.map(g => (getAssegnazione(d.id, g) || {}).turno_id || null); });
+    updates.forEach(u => { const gi = giorni.indexOf(u.giorno); if (sched[u.dipendente_id] && gi >= 0) sched[u.dipendente_id][gi] = u.turno_id; });
+    dipTurni.forEach(d => {
+      for (let gi = 1; gi < 7; gi++) {
+        const ieri = sched[d.id][gi - 1], oggi = sched[d.id][gi];
+        if (isSera(ieri) && isMattina(oggi)) {
+          const nuovo = pomeriggioPer(oggi);
+          if (nuovo && nuovo !== oggi) {
+            sched[d.id][gi] = nuovo;
+            updates.push({ dipendente_id: d.id, giorno: giorni[gi], turno_id: nuovo, motivo: "regola sera→mattina" });
+            tocco++;
+          }
+        }
+      }
+    });
     if (!tocco) { alert("Niente da generare. Apri \"Configura turni\" e imposta turno/riposo (o spunta Sala per i camerieri), oppure verifica che ci siano ferie approvate."); return; }
     if (updates.length) await salva(updates);
+  };
+
+  // === SOSTITUZIONE D'EMERGENZA (malattia/assenza) ===
+  // L'assente va a Riposo (con motivo); il sostituto prende il turno scelto (di default Lunga = doppia).
+  const apriSost = () => {
+    setSost({ assente: "", giorno: giorni[(new Date().getDay() + 6) % 7], motivo: "malattia",
+              sostituto: "", turnoSost: idTurno("Lunga") || "" });
+    setShowSost(true);
+  };
+  const confermaSost = async () => {
+    if (!sost.assente || !sost.giorno) { alert("Scegli il dipendente assente e il giorno."); return; }
+    const ups = [{ dipendente_id: sost.assente, giorno: sost.giorno, turno_id: idTurno("Riposo") || null, motivo: sost.motivo || "assenza" }];
+    if (sost.sostituto && sost.turnoSost) {
+      if (sost.sostituto === sost.assente) { alert("Il sostituto deve essere un'altra persona."); return; }
+      ups.push({ dipendente_id: sost.sostituto, giorno: sost.giorno, turno_id: sost.turnoSost, motivo: "sostituzione" });
+    }
+    await salva(ups);
+    setShowSost(false);
   };
 
   return (
@@ -1560,6 +1614,10 @@ function TurniPage({ dipendenti, turni, reload }) {
           style={{ marginLeft: "auto", padding: "10px 16px", borderRadius: 10, fontWeight: 600 }}>
           ⚙️ Configura turni
         </button>
+        <button onClick={apriSost} disabled={busy} className="dc-btn"
+          style={{ padding: "10px 16px", borderRadius: 10, fontWeight: 600 }} title="Sostituzione d'emergenza: malattia/assenza e chi copre">
+          🚨 Sostituzione
+        </button>
         <button onClick={generaProduzione} disabled={busy}
           style={{ background: "#5b7a6b", color: "#fff", border: "none", padding: "10px 18px", borderRadius: 10, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
           {busy ? "Attendi…" : "Genera settimana"}
@@ -1570,10 +1628,10 @@ function TurniPage({ dipendenti, turni, reload }) {
         <div onClick={() => setShowCfg(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
           <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 920, width: "100%", marginTop: 20 }}>
             <h3 style={{ marginTop: 0 }}>⚙️ Configura turni dipendenti</h3>
-            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Punto unico dei turni. Per ognuno scegli UNA modalità: <b>Sala</b> (cameriere → rotazione automatica 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo, riposi nei feriali per coprire il weekend), oppure <b>turno abituale</b>, oppure <b>rotazione bar</b> (mattina ↔ pomeriggio ogni settimana). In più: <b>riposo fisso</b>, chi fa la <b>Lunga</b> (Ven/Sab/Dom) e l’<b>onomastico</b>. “Genera settimana” mette sempre Ferie nei giorni approvati e Riposo nell’onomastico. Le celle restano modificabili a mano. Salva su database (MongoDB Atlas).</p>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Punto unico dei turni. Per ognuno scegli UNA modalità: <b>Sala</b> (cameriere → rotazione automatica 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo, riposi nei feriali per coprire il weekend), oppure <b>turno abituale</b>, oppure <b>rotazione bar</b> (mattina ↔ pomeriggio ogni settimana). In più: <b>riposo fisso</b>, la <b>Lunga</b> (1 a settimana, Ven/Sab/Dom; spunta <b>doppia</b> per chi la fa due volte) e l’<b>onomastico</b>. “Genera settimana” mette sempre Ferie nei giorni approvati e Riposo nell’onomastico. Le celle restano modificabili a mano. Salva su database (MongoDB Atlas).</p>
             <div style={{ maxHeight: "60vh", overflow: "auto" }}>
             <table className="dc-table">
-              <thead><tr><th>Dipendente</th><th>Sala<br/><span style={{fontWeight:400,fontSize:11}}>cameriere</span></th><th>Turno abituale</th><th>Rotazione bar<br/><span style={{fontWeight:400,fontSize:11}}>mattina ↔ pom</span></th><th>Riposo fisso</th><th>Lunga<br/><span style={{fontWeight:400,fontSize:11}}>V · S · D</span></th><th>Onomastico<br/><span style={{fontWeight:400,fontSize:11}}>gg / mm · attivo</span></th></tr></thead>
+              <thead><tr><th>Dipendente</th><th>Sala<br/><span style={{fontWeight:400,fontSize:11}}>cameriere</span></th><th>Turno abituale</th><th>Rotazione bar<br/><span style={{fontWeight:400,fontSize:11}}>mattina ↔ pom</span></th><th>Riposo fisso</th><th>Lunga<br/><span style={{fontWeight:400,fontSize:11}}>1/sett · doppia</span></th><th>Onomastico<br/><span style={{fontWeight:400,fontSize:11}}>gg / mm · attivo</span></th></tr></thead>
               <tbody>
                 {cfgRows.map((r, i) => (
                   <tr key={r.dipendente_id}>
@@ -1601,11 +1659,19 @@ function TurniPage({ dipendenti, turni, reload }) {
                       </select>
                     </td>
                     <td style={{ whiteSpace: "nowrap" }}>
-                      {LUNGA_GIORNI.map(g => (
-                        <label key={g} title={g} style={{ marginRight: 6, fontSize: 12 }}>
-                          <input type="checkbox" checked={(r.lunga_giorni || []).includes(g)} onChange={() => toggleLunga(i, g)} /> {g[0]}
-                        </label>
-                      ))}
+                      <select className="dc-input" style={{ width: 95, display: "inline-block" }} value={r.lunga1} onChange={e => setCfgRow(i, "lunga1", e.target.value)} title="Giorno della Lunga (1 a settimana)">
+                        <option value="">— no —</option>
+                        {LUNGA_GIORNI.map(g => <option key={g} value={g}>{g}</option>)}
+                      </select>
+                      <label style={{ marginLeft: 6, fontSize: 12 }} title="Spunta se questo dipendente fa la Lunga due volte a settimana">
+                        <input type="checkbox" checked={!!r.doppia} disabled={!r.lunga1} onChange={e => setCfgRow(i, "doppia", e.target.checked)} /> doppia
+                      </label>
+                      {r.doppia && (
+                        <select className="dc-input" style={{ width: 95, display: "inline-block", marginLeft: 6 }} value={r.lunga2} onChange={e => setCfgRow(i, "lunga2", e.target.value)} title="2° giorno di Lunga">
+                          <option value="">— 2° giorno —</option>
+                          {LUNGA_GIORNI.filter(g => g !== r.lunga1).map(g => <option key={g} value={g}>{g}</option>)}
+                        </select>
+                      )}
                     </td>
                     <td style={{ whiteSpace: "nowrap" }}>
                       <input className="dc-input" style={{ width: 48, display: "inline-block" }} type="number" min="1" max="31" value={r.onom_giorno ?? ""} onChange={e => setCfgRow(i, "onom_giorno", e.target.value)} />
@@ -1621,6 +1687,67 @@ function TurniPage({ dipendenti, turni, reload }) {
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
               <button className="dc-btn" onClick={() => setShowCfg(false)}>Chiudi</button>
               <button className="dc-btn-primary" onClick={salvaCfg}>Salva</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSost && (
+        <div onClick={() => setShowSost(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
+          <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 520, width: "100%", marginTop: 40 }}>
+            <h3 style={{ marginTop: 0 }}>🚨 Sostituzione d'emergenza</h3>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>
+              Segna chi è assente (malattia/ferie/assenza): va a <b>Riposo</b>. Poi scegli chi lo copre: gli assegno il turno scelto (di default la <b>Lunga</b> = doppia) in quel giorno.
+            </p>
+            <div style={{ display: "grid", gap: 12 }}>
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: "#3b4a40" }}>Dipendente assente</label>
+                <select className="dc-input" style={{ width: "100%" }} value={sost.assente} onChange={e => setSost(s => ({ ...s, assente: e.target.value }))}>
+                  <option value="">— scegli —</option>
+                  {dipTurni.map(d => <option key={d.id} value={d.id}>{`${d.cognome || ''} ${d.nome || ''}`.trim() || d.nome}</option>)}
+                </select>
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: "#3b4a40" }}>Giorno</label>
+                  <select className="dc-input" style={{ width: "100%" }} value={sost.giorno} onChange={e => setSost(s => ({ ...s, giorno: e.target.value }))}>
+                    {giorni.map(g => <option key={g} value={g}>{g}</option>)}
+                  </select>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: "#3b4a40" }}>Motivo</label>
+                  <select className="dc-input" style={{ width: "100%" }} value={sost.motivo} onChange={e => setSost(s => ({ ...s, motivo: e.target.value }))}>
+                    <option value="malattia">Malattia</option>
+                    <option value="assenza">Assenza</option>
+                    <option value="ferie">Ferie</option>
+                    <option value="permesso">Permesso</option>
+                  </select>
+                </div>
+              </div>
+              {sost.assente && sost.giorno && (() => {
+                const cur = getAssegnazione(sost.assente, sost.giorno);
+                const n = cur && nomeTurno(cur.turno_id);
+                return <div className="dc-muted" style={{ fontSize: 12 }}>Turno attuale di quel giorno: <b>{n || "—"}</b></div>;
+              })()}
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: "#3b4a40" }}>Chi lo copre (sostituto)</label>
+                <select className="dc-input" style={{ width: "100%" }} value={sost.sostituto} onChange={e => setSost(s => ({ ...s, sostituto: e.target.value }))}>
+                  <option value="">— nessuno (lascio scoperto) —</option>
+                  {dipTurni.filter(d => d.id !== sost.assente).map(d => <option key={d.id} value={d.id}>{`${d.cognome || ''} ${d.nome || ''}`.trim() || d.nome}</option>)}
+                </select>
+              </div>
+              {sost.sostituto && (
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: "#3b4a40" }}>Turno del sostituto</label>
+                  <select className="dc-input" style={{ width: "100%" }} value={sost.turnoSost} onChange={e => setSost(s => ({ ...s, turnoSost: e.target.value }))}>
+                    {turni.map(t => <option key={t.id} value={t.id}>{t.nome}</option>)}
+                  </select>
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
+              <button className="dc-btn" onClick={() => setShowSost(false)}>Annulla</button>
+              <button className="dc-btn-primary" onClick={confermaSost} disabled={busy}>Conferma sostituzione</button>
             </div>
           </div>
         </div>
