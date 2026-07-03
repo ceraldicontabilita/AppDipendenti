@@ -1329,18 +1329,128 @@ async def create_presenze_batch(presenze: List[PresenzaCloud]):
     return {"message": f"Inserite/aggiornate {len(created)} presenze"}
 
 
+_MESI_PRES = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", "Luglio",
+              "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
+# Colori codici presenza (RGB 0-1) coerenti col frontend (niente blu/viola)
+_COL_PRES = {
+    "P": (0.24, 0.51, 0.41), "AS": (0.83, 0.37, 0.30), "F": (0.36, 0.48, 0.42),
+    "PE": (0.49, 0.33, 0.15), "M": (0.96, 0.62, 0.04), "R": (0.54, 0.60, 0.36),
+    "RS": (0.61, 0.64, 0.58), "CH": (0.42, 0.45, 0.50), "FNL": (0.65, 0.45, 0.29),
+    "X": (0.22, 0.25, 0.20),
+}
+
+
+def _csv_presenze(anno, mese, giorni, righe):
+    sep = ";"
+    intest = ["Dipendente"] + [str(i + 1) for i in range(giorni)]
+    out = [f"Presenze {_MESI_PRES[mese - 1]} {anno} - Ceraldi Group S.r.l.", "", sep.join(intest)]
+    for r in righe:
+        out.append(sep.join([str(r.get("nome", ""))] + [str(c or "") for c in (r.get("celle") or [])]))
+    out.append("")
+    out.append("Legenda: P=Presente · AS=Assente · F=Ferie · PE=Permesso · M=Malattia · R=ROL · RS=Riposo · CH=Chiuso · FNL=Festivita non lav.")
+    return "\n".join(out)
+
+
+def _pdf_presenze(anno, mese, giorni, righe):
+    """Foglio presenze del mese in PDF, UNA SOLA PAGINA orizzontale (A4 landscape)."""
+    import fitz
+    W, H = 842, 595  # A4 orizzontale in punti
+    pdf = fitz.open()
+    page = pdf.new_page(width=W, height=H)
+    mL, mR, mT, mB = 24, 24, 60, 60
+    page.insert_text((mL, 34), f"Presenze {_MESI_PRES[mese - 1]} {anno}", fontsize=15, fontname="hebo")
+    page.insert_text((mL, 50), "Ceraldi Group S.r.l.", fontsize=9, fontname="helv", color=(0.4, 0.4, 0.4))
+
+    n = max(1, len(righe))
+    name_w = 120
+    grid_w = W - mL - mR - name_w
+    col_w = grid_w / max(1, giorni)
+    grid_h = H - mT - mB
+    row_h = min(22, grid_h / (n + 1))
+    fs = max(4.5, min(8, row_h - 3))
+    x0, y0 = mL, mT
+
+    # Intestazione giorni
+    page.insert_text((x0 + 4, y0 - 4), "Dipendente", fontsize=7, fontname="hebo")
+    for g in range(giorni):
+        cx = x0 + name_w + g * col_w
+        page.insert_text((cx + col_w / 2 - 3, y0 - 4), str(g + 1), fontsize=6, fontname="helv", color=(0.4, 0.4, 0.4))
+
+    for ri, r in enumerate(righe):
+        ry = y0 + ri * row_h
+        # nome
+        nome = str(r.get("nome", ""))[:22]
+        page.draw_rect(fitz.Rect(x0, ry, x0 + name_w, ry + row_h), color=(0.9, 0.88, 0.83), width=0.3)
+        page.insert_text((x0 + 3, ry + row_h - 4), nome, fontsize=fs, fontname="helv")
+        celle = r.get("celle") or []
+        for g in range(giorni):
+            code = str(celle[g]) if g < len(celle) and celle[g] else ""
+            cx = x0 + name_w + g * col_w
+            rect = fitz.Rect(cx, ry, cx + col_w, ry + row_h)
+            col = _COL_PRES.get(code)
+            if col:
+                page.draw_rect(rect, color=col, fill=col, width=0)
+                page.insert_text((cx + col_w / 2 - fs * 0.55, ry + row_h - 4), code, fontsize=fs, fontname="hebo", color=(1, 1, 1))
+            else:
+                page.draw_rect(rect, color=(0.9, 0.88, 0.83), width=0.3)
+
+    # Legenda in fondo
+    ly = H - mB + 16
+    page.insert_text((mL, ly), "Legenda:", fontsize=7, fontname="hebo")
+    lx = mL + 42
+    for code, lab in [("P", "Presente"), ("AS", "Assente"), ("F", "Ferie"), ("PE", "Permesso"),
+                      ("M", "Malattia"), ("R", "ROL"), ("RS", "Riposo"), ("CH", "Chiuso"), ("FNL", "Fest.")]:
+        col = _COL_PRES.get(code, (0.6, 0.6, 0.6))
+        page.draw_rect(fitz.Rect(lx, ly - 7, lx + 9, ly + 1), color=col, fill=col, width=0)
+        page.insert_text((lx + 12, ly), f"{code} {lab}", fontsize=6, fontname="helv")
+        lx += 62
+    return pdf.tobytes()
+
+
+@router.post("/presenze/pdf")
+async def presenze_pdf(data: dict = Body(...)):
+    """Genera il PDF del foglio presenze del mese (una pagina), dai dati passati dal frontend."""
+    from fastapi.responses import StreamingResponse
+    import io as _io
+    anno = int(data.get("anno") or datetime.now().year)
+    mese = int(data.get("mese") or datetime.now().month)
+    giorni = int(data.get("giorni") or 31)
+    righe = data.get("righe") or []
+    try:
+        pdf_bytes = _pdf_presenze(anno, mese, giorni, righe)
+    except Exception as e:
+        raise HTTPException(500, f"Errore generazione PDF: {e}")
+    fname = f"presenze_{anno}_{str(mese).zfill(2)}.pdf"
+    return StreamingResponse(_io.BytesIO(pdf_bytes), media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@router.get("/presenze/invii")
+async def lista_invii_presenze(anno: Optional[int] = None, mese: Optional[int] = None):
+    """Storico degli invii del foglio presenze: a chi e quando."""
+    q = {}
+    if anno:
+        q["anno"] = int(anno)
+    if mese:
+        q["mese"] = int(mese)
+    invii = await get_db().presenze_invii.find(q, {"_id": 0}).sort("data_invio", -1).to_list(500)
+    return {"invii": invii, "totale": len(invii)}
+
+
 @router.post("/presenze/invia-commercialista")
 async def invia_presenze_commercialista(data: dict = Body(...)):
-    """Invia via email al commercialista il foglio presenze del mese (CSV allegato,
-    generato dal frontend = esattamente ciò che vede l'utente). Destinatario dal body
-    o dalla env COMMERCIALISTA_EMAIL. SMTP dalle env di Render (SMTP_* o PEC_*)."""
+    """Invia via email al commercialista il foglio presenze del mese (allegati PDF una
+    pagina + CSV). Salva lo storico dell'invio (destinatario + data). Destinatario dal
+    body o dalla env COMMERCIALISTA_EMAIL. SMTP dalle env di Render (SMTP_* o PEC_*)."""
     import smtplib
     import ssl
     from email.message import EmailMessage
     anno = int(data.get("anno") or datetime.now().year)
     mese = int(data.get("mese") or datetime.now().month)
-    csv = data.get("csv") or ""
-    if not csv.strip():
+    giorni = int(data.get("giorni") or 31)
+    righe = data.get("righe") or []
+    csv = data.get("csv") or (_csv_presenze(anno, mese, giorni, righe) if righe else "")
+    if not csv.strip() and not righe:
         raise HTTPException(400, "Nessun dato presenze da inviare")
     dest = (data.get("destinatario") or os.getenv("COMMERCIALISTA_EMAIL") or "").strip()
     if not dest:
@@ -1353,19 +1463,27 @@ async def invia_presenze_commercialista(data: dict = Body(...)):
     if not (host and user and pwd):
         raise HTTPException(400, "SMTP non configurato su Render (SMTP_HOST, SMTP_EMAIL/SMTP_USER, SMTP_PASSWORD).")
 
-    mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", "Luglio",
-               "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
-    periodo = f"{mesi_it[mese - 1]} {anno}"
-    fname = f"presenze_{anno}_{str(mese).zfill(2)}.csv"
+    periodo = f"{_MESI_PRES[mese - 1]} {anno}"
+    base = f"presenze_{anno}_{str(mese).zfill(2)}"
+    # PDF una pagina (se possibile); il CSV resta come allegato per l'import del commercialista
+    pdf_bytes = None
+    if righe:
+        try:
+            pdf_bytes = _pdf_presenze(anno, mese, giorni, righe)
+        except Exception:
+            pdf_bytes = None
 
     def _send():
         msg = EmailMessage()
         msg["From"] = user
         msg["To"] = dest
         msg["Subject"] = f"Presenze {periodo} — Ceraldi Group S.r.l."
-        msg.set_content(f"In allegato il foglio presenze di {periodo}.\n\n"
+        msg.set_content(f"In allegato il foglio presenze di {periodo} (PDF + CSV).\n\n"
                         f"Messaggio generato automaticamente dal gestionale Ceraldi Group.")
-        msg.add_attachment(csv.encode("utf-8"), maintype="text", subtype="csv", filename=fname)
+        if pdf_bytes:
+            msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=f"{base}.pdf")
+        if csv.strip():
+            msg.add_attachment(csv.encode("utf-8"), maintype="text", subtype="csv", filename=f"{base}.csv")
         if port == 465:
             with smtplib.SMTP_SSL(host, port, timeout=25) as s:
                 s.login(user, pwd)
@@ -1381,7 +1499,14 @@ async def invia_presenze_commercialista(data: dict = Body(...)):
         await asyncio.to_thread(_send)
     except Exception as e:
         raise HTTPException(502, f"Invio email fallito: {e}")
-    return {"ok": True, "destinatario": dest, "periodo": periodo}
+
+    # Salva lo storico dell'invio (a chi, quando)
+    rec = {"id": generate_id(), "anno": anno, "mese": mese, "periodo": periodo,
+           "destinatario": dest, "data_invio": now_iso(),
+           "n_dipendenti": len(righe), "con_pdf": bool(pdf_bytes)}
+    await get_db().presenze_invii.insert_one(rec.copy())
+    rec.pop("_id", None)
+    return {"ok": True, "destinatario": dest, "periodo": periodo, "invio": rec}
 
 
 @router.post("/presenze/consolida-da-turni")

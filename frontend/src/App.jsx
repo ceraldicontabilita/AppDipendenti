@@ -934,6 +934,7 @@ function PresenzePage({ dipendenti, reload }) {
   const paintingRef = useRef(false);
   const selRef = useRef(new Set());
   const [, setSelVer] = useState(0);
+  const [invii, setInvii] = useState([]);
   const [ferieList, setFerieList] = useState([]);
   const [turniMese, setTurniMese] = useState([]);
   const [tipiTurno, setTipiTurno] = useState([]);
@@ -1089,17 +1090,21 @@ function PresenzePage({ dipendenti, reload }) {
     return () => { window.removeEventListener("mouseup", h); window.removeEventListener("touchend", h); };
   }, []);
 
-  // ---- Esporta / invia al commercialista il foglio del mese ----
+  // ---- Esporta / stampa / invia il foglio del mese ----
+  const buildRighe = () => ({
+    giorni: daysInMonth,
+    righe: dipendenti.map(dip => ({
+      nome: `${dip.cognome || ''} ${dip.nome || ''}`.trim(),
+      celle: Array.from({ length: daysInMonth }, (_, i) => codiceDerivato(dip.id, i + 1) || ""),
+    })),
+  });
   const buildCSV = () => {
     const sep = ";";
-    const intest = ["Dipendente", ...Array.from({ length: daysInMonth }, (_, i) => String(i + 1))].join(sep);
-    const righe = dipendenti.map(dip => {
-      const nome = `${dip.cognome || ''} ${dip.nome || ''}`.trim();
-      const celle = Array.from({ length: daysInMonth }, (_, i) => codiceDerivato(dip.id, i + 1) || "");
-      return [nome, ...celle].join(sep);
-    });
+    const { giorni, righe } = buildRighe();
+    const intest = ["Dipendente", ...Array.from({ length: giorni }, (_, i) => String(i + 1))].join(sep);
+    const body = righe.map(r => [r.nome, ...r.celle].join(sep));
     const legenda = "Legenda: P=Presente · AS=Assente · F=Ferie · PE=Permesso · M=Malattia · R=ROL · RS=Riposo · CH=Chiuso · FNL=Festivita non lav.";
-    return [`Presenze ${mesi[mese - 1]} ${anno} - Ceraldi Group S.r.l.`, "", intest, ...righe, "", legenda].join("\n");
+    return [`Presenze ${mesi[mese - 1]} ${anno} - Ceraldi Group S.r.l.`, "", intest, ...body, "", legenda].join("\n");
   };
   const scaricaPresenze = () => {
     const csv = "﻿" + buildCSV();
@@ -1107,16 +1112,48 @@ function PresenzePage({ dipendenti, reload }) {
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
     a.download = `presenze_${anno}_${String(mese).padStart(2, '0')}.csv`; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-    toast("Foglio presenze scaricato");
+    toast("Foglio presenze scaricato (CSV)");
+  };
+  const scaricaPDF = async () => {
+    try {
+      const r = await axios.post(`${API}/presenze/pdf`, { anno, mese, ...buildRighe() }, { responseType: "blob" });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(r.data);
+      a.download = `presenze_${anno}_${String(mese).padStart(2, '0')}.pdf`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      toast("PDF presenze scaricato");
+    } catch (e) { toast("Errore generazione PDF", "err"); }
+  };
+  const COLST = { P: "#3d8168", AS: "#d35f4e", F: "#5b7a6b", PE: "#7d5526", M: "#f59e0b", R: "#8a9a5b", RS: "#9ca3af", CH: "#6b7280", FNL: "#a6724a", X: "#374151" };
+  const stampaPresenze = () => {
+    const { giorni, righe } = buildRighe();
+    const th = Array.from({ length: giorni }, (_, i) => `<th>${i + 1}</th>`).join("");
+    const rows = righe.map(r => `<tr><td class="nm">${r.nome}</td>${r.celle.map(c => `<td style="background:${COLST[c] || '#fff'};color:${c ? '#fff' : '#000'}">${c || ''}</td>`).join("")}</tr>`).join("");
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Presenze ${mesi[mese - 1]} ${anno}</title>
+      <style>@page{size:A4 landscape;margin:8mm} body{font-family:Arial,sans-serif;margin:0}
+      h2{margin:0 0 6px;font-size:14px} table{border-collapse:collapse;width:100%;table-layout:fixed}
+      th,td{border:1px solid #ccc;text-align:center;font-size:8px;padding:1px;overflow:hidden}
+      td.nm,th.nm{text-align:left;width:110px;font-size:8px;padding:2px 4px;overflow:hidden;white-space:nowrap}
+      thead th{background:#eee}</style></head>
+      <body onload="setTimeout(function(){window.print()},250)"><h2>Presenze ${mesi[mese - 1]} ${anno} — Ceraldi Group S.r.l.</h2>
+      <table><thead><tr><th class="nm">Dipendente</th>${th}</tr></thead><tbody>${rows}</tbody></table>
+      <p style="font-size:8px;color:#555;margin-top:6px">Legenda: P=Presente · AS=Assente · F=Ferie · PE=Permesso · M=Malattia · R=ROL · RS=Riposo · CH=Chiuso · FNL=Festività non lav.</p>
+      </body></html>`;
+    const w = window.open("", "_blank");
+    if (w) { w.document.write(html); w.document.close(); } else toast("Consenti i popup per stampare", "err");
   };
   const inviaCommercialista = async () => {
-    const email = window.prompt("Email del commercialista a cui inviare le presenze:", "");
+    const email = window.prompt("Email del commercialista a cui inviare le presenze:", (invii[0]?.destinatario) || "");
     if (email === null) return;
     try {
-      const r = await axios.post(`${API}/presenze/invia-commercialista`, { anno, mese, csv: buildCSV(), destinatario: email || undefined });
+      const r = await axios.post(`${API}/presenze/invia-commercialista`, { anno, mese, ...buildRighe(), destinatario: email || undefined });
       toast(`Presenze inviate a ${r.data.destinatario}`);
+      loadInvii();
     } catch (e) { toast(e?.response?.data?.detail || "Invio non riuscito (SMTP da configurare su Render)", "err"); }
   };
+  const loadInvii = async () => {
+    try { const r = await axios.get(`${API}/presenze/invii?anno=${anno}&mese=${mese}`); setInvii(r.data.invii || []); } catch { setInvii([]); }
+  };
+  useEffect(() => { loadInvii(); }, [anno, mese]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -1241,11 +1278,17 @@ function PresenzePage({ dipendenti, reload }) {
         <button onClick={consolidaDaTurni} className="dc-btn" title="Crea le presenze dei giorni passati a partire dai turni assegnati (non sovrascrive il manuale)">
           <RefreshCw size={16} /> Consolida da turni
         </button>
-        <button onClick={scaricaPresenze} className="dc-btn" title="Scarica il foglio presenze del mese (Excel/CSV)">
-          <Download size={16} /> Scarica
+        <button onClick={scaricaPDF} className="dc-btn" title="Scarica il PDF del mese (una pagina, pulito e stampabile)">
+          <Download size={16} /> PDF
         </button>
-        <button onClick={inviaCommercialista} className="dc-btn dc-btn-primary" title="Invia il foglio presenze del mese al commercialista via email">
-          <Send size={16} /> Invia al commercialista
+        <button onClick={scaricaPresenze} className="dc-btn" title="Scarica in Excel/CSV">
+          <Download size={16} /> CSV
+        </button>
+        <button onClick={stampaPresenze} className="dc-btn" title="Stampa su una sola pagina (o salva come PDF dalla finestra di stampa)">
+          🖨 Stampa
+        </button>
+        <button onClick={inviaCommercialista} className="dc-btn dc-btn-primary" title="Invia PDF+CSV al commercialista via email (salva a chi e quando)">
+          <Send size={16} /> Invia
         </button>
       </div>
 
@@ -1369,6 +1412,39 @@ function PresenzePage({ dipendenti, reload }) {
                         {prot ? <span style={{ fontFamily: "monospace", background: "#fdf6ec", border: "1px solid #f0e0c4", borderRadius: 6, padding: "2px 8px" }}>{prot}</span>
                           : <span style={{ color: "#d35f4e", fontSize: 12 }}>protocollo mancante</span>}
                       </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Storico invii al commercialista */}
+      <div className="dc-card" style={{ marginTop: 12 }}>
+        <h3 style={{ margin: "0 0 10px" }}>📧 Invii al commercialista — {mesi[mese - 1]} {anno}</h3>
+        {invii.length === 0 ? (
+          <p style={{ color: "#94a3b8", margin: 0, fontSize: 14 }}>Ancora nessun invio per questo mese.</p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+              <thead>
+                <tr style={{ textAlign: "left", color: "#6b7669", fontSize: 12, textTransform: "uppercase" }}>
+                  <th style={{ padding: "6px 8px", borderBottom: "2px solid #e6e0d4" }}>Data invio</th>
+                  <th style={{ padding: "6px 8px", borderBottom: "2px solid #e6e0d4" }}>Destinatario</th>
+                  <th style={{ padding: "6px 8px", borderBottom: "2px solid #e6e0d4" }}>Allegati</th>
+                </tr>
+              </thead>
+              <tbody>
+                {invii.map((v, i) => {
+                  const d = v.data_invio ? new Date(v.data_invio) : null;
+                  const dstr = d ? `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` : "—";
+                  return (
+                    <tr key={i}>
+                      <td style={{ padding: "6px 8px", borderBottom: "1px solid #efe9dd" }}>{dstr}</td>
+                      <td style={{ padding: "6px 8px", borderBottom: "1px solid #efe9dd", fontWeight: 600 }}>{v.destinatario}</td>
+                      <td style={{ padding: "6px 8px", borderBottom: "1px solid #efe9dd", color: "#6b7669" }}>{v.con_pdf ? "PDF + CSV" : "CSV"}</td>
                     </tr>
                   );
                 })}
