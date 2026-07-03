@@ -48,6 +48,8 @@ function Login({ onLogin }) {
       localStorage.setItem(TK, r.data.access_token);
       localStorage.setItem("pt_role", r.data.role);
       localStorage.setItem("pt_name", r.data.name || sel.nome_completo);
+      // L'amministratore entra DIRETTAMENTE nella Gestione (desktop), non nel portale.
+      if (r.data.role === "admin") { window.location.href = "/dipendenti"; return; }
       onLogin();
     } catch { setErr("PIN errato"); setPin(""); }
   };

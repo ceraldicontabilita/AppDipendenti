@@ -177,15 +177,7 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     { id: "paghe-bonifici", label: "Cedolini & Bonifici", icon: Link2, section: "DIPENDENTI" },
     { id: "documenti", label: "Documenti", icon: FolderOpen, section: "DIPENDENTI" },
     { id: "assunzione", label: "Assunzione & Contratti", icon: Briefcase, section: "DIPENDENTI" },
-    { id: "contabilita", label: "Pagamenti", icon: Wallet, section: "CONTABILITÀ" },
-    { id: "da-pagare", label: "Da Pagare", icon: AlertTriangle, section: "CONTABILITÀ" },
-    { id: "fatture", label: "Fatture", icon: Receipt, section: "CONTABILITÀ" },
-    { id: "fornitori", label: "Fornitori", icon: Building2, section: "CONTABILITÀ" },
-    { id: "bonifici-banca", label: "Bonifici", icon: Euro, section: "CONTABILITÀ" },
-    { id: "riconciliazione", label: "Da Verificare", icon: RefreshCw, section: "CONTABILITÀ" },
-    { id: "calendario-pagamenti", label: "Calendario", icon: Calendar, section: "CONTABILITÀ" },
-    { id: "documenti-fiscali", label: "Documenti fiscali", icon: Inbox, section: "CONTABILITÀ" },
-    { id: "paypal", label: "PayPal", icon: Wallet, section: "CONTABILITÀ" },
+    { id: "bonifici-banca", label: "Bonifici effettuati", icon: Euro, section: "PAGAMENTI" },
   ];
 
   const pageLabels = {
@@ -299,12 +291,6 @@ export default function DipendentiCloudApp({ page: pageProp }) {
             </div>
           </div>
         </div>
-
-        {/* Back to ERP button */}
-        <Link to="/" className="dc-back-to-erp" data-testid="back-to-erp">
-          <ArrowLeft size={16} />
-          <span>Torna a OpenClaw ERP</span>
-        </Link>
 
         <nav className="dc-sidebar-nav">
           {Object.entries(sections).map(([section, items]) => (
