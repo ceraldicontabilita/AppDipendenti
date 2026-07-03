@@ -11,7 +11,7 @@ import {
   ChevronRight, Plus, Check, X, Edit2, Trash2, 
   MapPin, Euro, Download, RefreshCw, ChevronLeft, Grid3X3,
   User, FolderOpen, Settings, LogOut, ArrowLeft, AlertTriangle,
-  Wallet, Receipt, Building2, Inbox, CheckCircle2, Link2, Activity
+  Wallet, Receipt, Building2, Inbox, CheckCircle2, Link2, Activity, Send
 } from "lucide-react";
 import "./App.css";
 
@@ -931,6 +931,9 @@ function PresenzePage({ dipendenti, reload }) {
   });
   const [penna, setPenna] = useState(null);
   const [tuttiMode, setTuttiMode] = useState(false);
+  const paintingRef = useRef(false);
+  const selRef = useRef(new Set());
+  const [, setSelVer] = useState(0);
   const [ferieList, setFerieList] = useState([]);
   const [turniMese, setTurniMese] = useState([]);
   const [tipiTurno, setTipiTurno] = useState([]);
@@ -1041,6 +1044,78 @@ function PresenzePage({ dipendenti, reload }) {
       await loadPresenze();
       toast(`Consolidate ${r.data.creati} presenze dai turni (${r.data.saltati} già presenti)`);
     } catch (e) { toast(e?.response?.data?.detail || "Errore consolidamento", "err"); }
+  };
+
+  // ---- Pennello con TRASCINAMENTO: seleziona un tipo, tieni premuto e trascina sui giorni ----
+  const keyCell = (dipId, day) => `${dipId}|${day}`;
+  const cellsForDay = (dipId, day) => (tuttiMode ? dipendenti.map(d => keyCell(d.id, day)) : [keyCell(dipId, day)]);
+  const startPaint = (dipId, day) => {
+    if (!penna) return;
+    paintingRef.current = true;
+    selRef.current = new Set(cellsForDay(dipId, day));
+    setSelVer(v => v + 1);
+  };
+  const extendPaint = (dipId, day) => {
+    if (!paintingRef.current) return;
+    cellsForDay(dipId, day).forEach(k => selRef.current.add(k));
+    setSelVer(v => v + 1);
+  };
+  const applicaCelle = async (cells) => {
+    if (!penna || !cells.length) return;
+    let note;
+    if (penna === 'M') {
+      const p = window.prompt("Numero di protocollo del certificato medico (facoltativo):", "");
+      if (p && p.trim()) note = `Malattia · Protocollo INPS: ${p.trim()}`;
+    }
+    const stato = penna === 'P' ? 'presente' : penna === 'AS' ? 'assente' : 'giustificato';
+    const batch = cells.map(k => { const [dipId, d] = k.split("|"); return { dipendente_id: dipId, data: `${anno}-${String(mese).padStart(2, '0')}-${String(d).padStart(2, '0')}`, stato, giustificativo: penna, ...(note ? { note } : {}) }; });
+    try { await axios.post(`${API}/presenze/batch`, batch); await loadPresenze(); toast(`Applicato "${penna}" a ${cells.length} ${cells.length === 1 ? 'casella' : 'caselle'}`); }
+    catch (e) { console.error(e); toast("Errore applicazione", "err"); }
+  };
+  const endPaint = () => {
+    if (!paintingRef.current) return;
+    paintingRef.current = false;
+    const cells = Array.from(selRef.current);
+    selRef.current = new Set();
+    setSelVer(v => v + 1);
+    if (cells.length) applicaCelle(cells);
+  };
+  const endPaintRef = useRef(endPaint);
+  endPaintRef.current = endPaint;
+  useEffect(() => {
+    const h = () => endPaintRef.current && endPaintRef.current();
+    window.addEventListener("mouseup", h);
+    window.addEventListener("touchend", h);
+    return () => { window.removeEventListener("mouseup", h); window.removeEventListener("touchend", h); };
+  }, []);
+
+  // ---- Esporta / invia al commercialista il foglio del mese ----
+  const buildCSV = () => {
+    const sep = ";";
+    const intest = ["Dipendente", ...Array.from({ length: daysInMonth }, (_, i) => String(i + 1))].join(sep);
+    const righe = dipendenti.map(dip => {
+      const nome = `${dip.cognome || ''} ${dip.nome || ''}`.trim();
+      const celle = Array.from({ length: daysInMonth }, (_, i) => codiceDerivato(dip.id, i + 1) || "");
+      return [nome, ...celle].join(sep);
+    });
+    const legenda = "Legenda: P=Presente · AS=Assente · F=Ferie · PE=Permesso · M=Malattia · R=ROL · RS=Riposo · CH=Chiuso · FNL=Festivita non lav.";
+    return [`Presenze ${mesi[mese - 1]} ${anno} - Ceraldi Group S.r.l.`, "", intest, ...righe, "", legenda].join("\n");
+  };
+  const scaricaPresenze = () => {
+    const csv = "﻿" + buildCSV();
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `presenze_${anno}_${String(mese).padStart(2, '0')}.csv`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    toast("Foglio presenze scaricato");
+  };
+  const inviaCommercialista = async () => {
+    const email = window.prompt("Email del commercialista a cui inviare le presenze:", "");
+    if (email === null) return;
+    try {
+      const r = await axios.post(`${API}/presenze/invia-commercialista`, { anno, mese, csv: buildCSV(), destinatario: email || undefined });
+      toast(`Presenze inviate a ${r.data.destinatario}`);
+    } catch (e) { toast(e?.response?.data?.detail || "Invio non riuscito (SMTP da configurare su Render)", "err"); }
   };
 
   const handleSubmit = async (e) => {
@@ -1166,8 +1241,11 @@ function PresenzePage({ dipendenti, reload }) {
         <button onClick={consolidaDaTurni} className="dc-btn" title="Crea le presenze dei giorni passati a partire dai turni assegnati (non sovrascrive il manuale)">
           <RefreshCw size={16} /> Consolida da turni
         </button>
-        <button onClick={() => setShowModal(true)} className="dc-btn dc-btn-primary">
-          <Plus size={16} /> Giustificativo
+        <button onClick={scaricaPresenze} className="dc-btn" title="Scarica il foglio presenze del mese (Excel/CSV)">
+          <Download size={16} /> Scarica
+        </button>
+        <button onClick={inviaCommercialista} className="dc-btn dc-btn-primary" title="Invia il foglio presenze del mese al commercialista via email">
+          <Send size={16} /> Invia al commercialista
         </button>
       </div>
 
@@ -1187,7 +1265,7 @@ function PresenzePage({ dipendenti, reload }) {
           </label>
         </div>
         <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 8 }}>
-          Seleziona un tipo: nel mese si <b>evidenziano</b> tutte le sue caselle. Poi clicca una cella dipendente/giorno per <b>applicarlo</b> (anche su giorni passati), o il <b>numero del giorno</b> in cima per applicarlo a tutti.
+          Seleziona un tipo, poi <b>tieni premuto e trascina</b> sui giorni per applicarlo (anche più giorni in una volta). Un clic singolo applica una casella; il <b>numero del giorno</b> in cima lo applica a tutti. Per la Malattia chiede il numero di protocollo.
         </div>
       </div>
 
@@ -1235,8 +1313,15 @@ function PresenzePage({ dipendenti, reload }) {
                   const dimmed = penna && code !== penna;
                   const nota = notaDi(dip.id, day);
                   const titolo = `${tipo?.label || code || ""}${nota ? ` — ${nota}` : ""}`.trim();
+                  const inSel = selRef.current.has(keyCell(dip.id, day));
                   return (
-                    <td key={i} className={`dc-presenze-td-day ${isWeekend ? 'weekend' : ''}`} onClick={() => applica(tuttiMode ? dipendenti.map(d => d.id) : [dip.id], day)} style={{ cursor: "pointer", position: "relative" }} title={titolo || undefined}>
+                    <td key={i} className={`dc-presenze-td-day ${isWeekend ? 'weekend' : ''}`}
+                      onMouseDown={(e) => { if (penna) { e.preventDefault(); startPaint(dip.id, day); } }}
+                      onMouseEnter={() => extendPaint(dip.id, day)}
+                      onTouchStart={() => { if (penna) applicaCelle(cellsForDay(dip.id, day)); }}
+                      style={{ cursor: penna ? "cell" : "default", position: "relative", userSelect: "none",
+                        outline: inSel ? "2px solid #5b7a6b" : "none", background: inSel ? "#e8efe9" : undefined }}
+                      title={titolo || undefined}>
                       {code ? (
                         <span className="dc-presenza-badge" style={{ backgroundColor: tipo?.color || '#10b981', opacity: dimmed ? 0.12 : (salvata ? 1 : 0.55) }}>
                           {code}
@@ -1293,75 +1378,6 @@ function PresenzePage({ dipendenti, reload }) {
         )}
       </div>
 
-      {/* Modal Nuovo Giustificativo */}
-      {showModal && (
-        <div className="dc-modal-overlay" onClick={() => setShowModal(false)}>
-          <div className="dc-modal dc-modal-lg" onClick={e => e.stopPropagation()}>
-            <div className="dc-modal-header">
-              <h3>Nuovo Giustificativo</h3>
-              <button onClick={() => setShowModal(false)} className="dc-modal-close"><X size={20} /></button>
-            </div>
-            <form onSubmit={handleSubmit} className="dc-modal-body">
-              <div className="dc-form-group">
-                <label>Dipendente *</label>
-                <select required value={formData.dipendente_id} onChange={e => setFormData({...formData, dipendente_id: e.target.value})}>
-                  <option value="">Seleziona dipendente...</option>
-                  {dipendenti.map(d => (
-                    <option key={d.id} value={d.id}>{d.cognome} {d.nome}</option>
-                  ))}
-                </select>
-              </div>
-              
-              <div className="dc-form-group">
-                <label>Tipo Giustificativo *</label>
-                <div className="dc-giustificativo-grid">
-                  {tipiGiustificativo.map(t => (
-                    <button
-                      type="button"
-                      key={t.code}
-                      onClick={() => setFormData({...formData, tipo: t.code})}
-                      className={`dc-giustificativo-btn ${formData.tipo === t.code ? 'active' : ''}`}
-                      style={{ borderColor: formData.tipo === t.code ? t.color : '#e5e7eb', backgroundColor: formData.tipo === t.code ? t.color : 'white', color: formData.tipo === t.code ? 'white' : '#374151' }}
-                    >
-                      <span className="dc-giust-code">{t.code}</span>
-                      <span className="dc-giust-label">{t.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="dc-form-row">
-                <div className="dc-form-group">
-                  <label>Data di inizio *</label>
-                  <input type="date" required value={formData.data_inizio} onChange={e => setFormData({...formData, data_inizio: e.target.value})} />
-                </div>
-                <div className="dc-form-group">
-                  <label>Data Fine *</label>
-                  <input type="date" required value={formData.data_fine} onChange={e => setFormData({...formData, data_fine: e.target.value})} />
-                </div>
-              </div>
-
-              {formData.tipo === 'M' && (
-                <div className="dc-form-group">
-                  <label>Numero di protocollo (certificato medico telematico)</label>
-                  <input type="text" value={formData.protocollo} onChange={e => setFormData({...formData, protocollo: e.target.value})} placeholder="es. 1234567890123 (PUC che dà il medico)" />
-                  <small style={{ color: "#94a3b8", fontSize: 12 }}>La malattia viene segnata come M nelle presenze, con questo protocollo in nota.</small>
-                </div>
-              )}
-
-              <div className="dc-form-group">
-                <label>Nota (facoltativa)</label>
-                <textarea value={formData.nota} onChange={e => setFormData({...formData, nota: e.target.value})} placeholder="Es: Certificato medico n. 12345" />
-              </div>
-
-              <div className="dc-modal-footer">
-                <button type="button" onClick={() => setShowModal(false)} className="dc-btn">Annulla</button>
-                <button type="submit" className="dc-btn dc-btn-primary">Salva Giustificativo</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -1329,6 +1329,61 @@ async def create_presenze_batch(presenze: List[PresenzaCloud]):
     return {"message": f"Inserite/aggiornate {len(created)} presenze"}
 
 
+@router.post("/presenze/invia-commercialista")
+async def invia_presenze_commercialista(data: dict = Body(...)):
+    """Invia via email al commercialista il foglio presenze del mese (CSV allegato,
+    generato dal frontend = esattamente ciò che vede l'utente). Destinatario dal body
+    o dalla env COMMERCIALISTA_EMAIL. SMTP dalle env di Render (SMTP_* o PEC_*)."""
+    import smtplib
+    import ssl
+    from email.message import EmailMessage
+    anno = int(data.get("anno") or datetime.now().year)
+    mese = int(data.get("mese") or datetime.now().month)
+    csv = data.get("csv") or ""
+    if not csv.strip():
+        raise HTTPException(400, "Nessun dato presenze da inviare")
+    dest = (data.get("destinatario") or os.getenv("COMMERCIALISTA_EMAIL") or "").strip()
+    if not dest:
+        raise HTTPException(400, "Manca l'email del commercialista (impostala o inseriscila).")
+
+    host = os.getenv("SMTP_HOST") or os.getenv("PEC_HOST")
+    port = int(os.getenv("SMTP_PORT") or os.getenv("PEC_PORT") or 465)
+    user = os.getenv("SMTP_EMAIL") or os.getenv("SMTP_USER") or os.getenv("PEC_USER")
+    pwd = os.getenv("SMTP_PASSWORD") or os.getenv("PEC_PASSWORD")
+    if not (host and user and pwd):
+        raise HTTPException(400, "SMTP non configurato su Render (SMTP_HOST, SMTP_EMAIL/SMTP_USER, SMTP_PASSWORD).")
+
+    mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", "Luglio",
+               "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
+    periodo = f"{mesi_it[mese - 1]} {anno}"
+    fname = f"presenze_{anno}_{str(mese).zfill(2)}.csv"
+
+    def _send():
+        msg = EmailMessage()
+        msg["From"] = user
+        msg["To"] = dest
+        msg["Subject"] = f"Presenze {periodo} — Ceraldi Group S.r.l."
+        msg.set_content(f"In allegato il foglio presenze di {periodo}.\n\n"
+                        f"Messaggio generato automaticamente dal gestionale Ceraldi Group.")
+        msg.add_attachment(csv.encode("utf-8"), maintype="text", subtype="csv", filename=fname)
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, timeout=25) as s:
+                s.login(user, pwd)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=25) as s:
+                s.starttls(context=ssl.create_default_context())
+                s.login(user, pwd)
+                s.send_message(msg)
+
+    try:
+        import asyncio
+        await asyncio.to_thread(_send)
+    except Exception as e:
+        raise HTTPException(502, f"Invio email fallito: {e}")
+    return {"ok": True, "destinatario": dest, "periodo": periodo}
+
+
 @router.post("/presenze/consolida-da-turni")
 async def consolida_presenze_da_turni(data: dict = Body(default={})):
     """Crea le presenze REALI a partire dai turni assegnati, per il mese indicato e SOLO
