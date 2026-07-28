@@ -1672,10 +1672,17 @@ async def get_storico_tfr(dipendente_id: str) -> Dict[str, Any]:
 #   apre il nuovo, sempre aperto. L'import da Excel (una tantum, per tutti i
 #   dipendenti insieme) fa lo stesso: l'ultima riga di ciascun foglio diventa il
 #   periodo aperto, ignorando la data di fine eventualmente scritta nel file.
-# Formula (concordata col titolare): l'importo settimanale registrato è NETTO;
-# TFR = importo_settimanale_netto × settimane intere lavorate / 13,5 (art. 2120
-# c.c., 52 settimane per l'anno pieno); 13ª/14ª = importo × settimane del ciclo
-# di competenza / 12. Nessuna tassazione aggiuntiva: il risultato è già netto.
+# Formula (stessa del foglio storico del titolare, verificata al centesimo sulla
+# riga 2023: 300€/sett → lordo 1.314,44, tassazione 27% 354,90, netto 959,54):
+#   mesi  = giorni del periodo / 30            (il giorno finale non si conta,
+#                                               come DATEDIF di Excel: un anno
+#                                               intero = 364/30 = 12,13 mesi)
+#   lordo = importo_settimanale × 52/12/12 × mesi   (mensilità/12 per ogni mese)
+#   tassazione = lordo × aliquota del periodo   (23% di default, modificabile
+#                                               periodo per periodo — il foglio
+#                                               usava 27% su alcuni anni)
+#   netto = lordo − tassazione                  (il "netto da ricevere")
+# 13ª/14ª (liquidazione): stessa struttura con divisore 30,416 come nel foglio.
 # È un sandbox separato da 'dipendenti.tfr_accantonato' (quello alimentato in
 # automatico dai cedolini): la simulazione non lo tocca, per non mescolare un
 # dato storico ancora da verificare con quello già vivo in produzione.
@@ -1687,6 +1694,8 @@ class PeriodoSimulazioneInput(BaseModel):
     data_inizio: Optional[str] = None
     # Se omessa: periodo APERTO (tuttora in corso). Se valorizzata: periodo storico chiuso.
     data_fine: Optional[str] = None
+    # Percentuale di tassazione del periodo (default 23; il foglio storico usava 27 su alcuni anni)
+    aliquota_tassazione: Optional[float] = None
 
 
 class RateSimulazioneInput(BaseModel):
@@ -1702,29 +1711,32 @@ def _oggi_tfr() -> datetime:
     return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
 
 
-def _settimane_periodo(dal: datetime, al: datetime) -> int:
-    """Settimane effettivamente lavorate nel periodo [dal, al], contate come SETTIMANE
-    INTERE (giorni/7 arrotondato): un anno intero conta 52 settimane esatte — non
-    52,14 — perché la regola concordata col titolare è 'settimane lavorate nell'anno
-    × importo settimanale', con 52 per l'anno pieno."""
-    if al < dal:
-        return 0
-    return round(((al - dal).days + 1) / 7)
+def _mesi_excel(dal: datetime, al: datetime, divisore: float = 30.0) -> float:
+    """Mesi del periodo come nel foglio storico: giorni (senza contare il giorno
+    finale, come DATEDIF di Excel) diviso 30 — un anno intero 1/1→31/12 fa
+    364/30 = 12,13 mesi. Per 13ª/14ª il foglio usava il divisore 30,416."""
+    if al <= dal:
+        return 0.0
+    return (al - dal).days / divisore
 
 
-def _calcola_periodo_tfr(data_inizio: datetime, data_fine: datetime, importo_settimanale: float) -> Dict[str, Any]:
-    """Quota TFR del periodo: paga settimanale moltiplicata per il NUMERO DI SETTIMANE
-    effettivamente lavorate nel periodo (52 se ha lavorato tutto l'anno), diviso 13,5
-    (art. 2120 c.c.) — non si passa da una retribuzione annua né da mesi: si lavora
-    direttamente in settimane, perché la paga di riferimento è settimanale.
-    L'importo settimanale inserito è già NETTO (quello che il dipendente percepisce
-    davvero): il risultato è quindi già il maturato netto, senza nessuna tassazione
-    da sottrarre sopra — non si parte da un lordo fittizio."""
-    settimane = _settimane_periodo(data_inizio, data_fine)
-    netto = importo_settimanale * settimane / TFR_DIVISORE
+def _calcola_periodo_tfr(data_inizio: datetime, data_fine: datetime, importo_settimanale: float,
+                         aliquota_tassazione: Optional[float] = None) -> Dict[str, Any]:
+    """Quota TFR del periodo, con la STESSA formula del foglio storico del titolare
+    (verificata al centesimo sulla riga 2023: 300€/sett, 27% → 1.314,44 / 354,90 /
+    959,54): lordo = importo_settimanale × 52/12/12 × mesi (mesi = giorni/30, giorno
+    finale escluso), tassazione = lordo × aliquota del periodo (default 23%),
+    netto = lordo − tassazione."""
+    aliquota = ALIQUOTA_TFR if aliquota_tassazione is None else aliquota_tassazione
+    mesi = _mesi_excel(data_inizio, data_fine)
+    lordo = importo_settimanale * 52 / 12 / 12 * mesi
+    tassazione = lordo * aliquota / 100
+    netto = lordo - tassazione
     return {
-        "giorni": max(0, (data_fine - data_inizio).days + 1),
-        "settimane": settimane,
+        "giorni": max(0, (data_fine - data_inizio).days),
+        "mesi": round(mesi, 2),
+        "lordo": round(lordo, 2),
+        "tassazione": round(tassazione, 2),
         "netto": round(netto, 2),
     }
 
@@ -1749,7 +1761,8 @@ def _periodo_con_calcolo_live(p: Dict[str, Any], fino_a: Optional[datetime] = No
     if p.get("data_fine"):
         return {**p, "aperto": False}
     limite = fino_a or _oggi_tfr()
-    calc = _calcola_periodo_tfr(_parse_data_tfr(p["data_inizio"]), limite, p["importo_settimanale"])
+    calc = _calcola_periodo_tfr(_parse_data_tfr(p["data_inizio"]), limite,
+                                p["importo_settimanale"], p.get("aliquota_tassazione"))
     return {**p, **calc, "data_fine": None, "aperto": True}
 
 
@@ -1769,26 +1782,32 @@ def _periodo_competenza_14(fino_a: datetime):
 def _quota_mensilita_aggiuntiva(periodi_grezzi: List[Dict[str, Any]], data_assunzione: Optional[datetime],
                                 inizio_competenza: datetime, fine_competenza: datetime,
                                 fino_a: datetime) -> Dict[str, Any]:
-    """Rateo di tredicesima/quattordicesima maturato nel ciclo di competenza indicato:
-    paga settimanale (già netta) moltiplicata per il numero di settimane lavorate in
-    quel ciclo, diviso 12 — stessa logica diretta in settimane del TFR, senza passare
-    da mesi né da un lordo fittizio: il risultato è già il netto maturato."""
+    """Rateo di tredicesima/quattordicesima maturato nel ciclo di competenza indicato,
+    con la stessa struttura del foglio storico (righe "13°"/"14°"): per ogni pezzo di
+    ciclo coperto da un periodo di paga, lordo = importo_settimanale × 52/12/12 × mesi
+    (mesi = giorni/30,416 come nel foglio), tassazione con l'aliquota di quel periodo,
+    netto = lordo − tassazione."""
     inizio_eff = max(inizio_competenza, data_assunzione) if data_assunzione else inizio_competenza
     fine_eff = min(fine_competenza, fino_a)
     if fine_eff < inizio_eff:
-        return {"netto": 0.0, "settimane": 0.0,
+        return {"lordo": 0.0, "tassazione": 0.0, "netto": 0.0, "mesi": 0.0,
                 "dal": inizio_eff.strftime("%Y-%m-%d"), "al": fine_eff.strftime("%Y-%m-%d")}
-    tot, settimane_tot = 0.0, 0
+    tot_lordo, tot_tass, mesi_tot = 0.0, 0.0, 0.0
     for p in periodi_grezzi:
         p_inizio = _parse_data_tfr(p["data_inizio"])
         p_fine = fino_a if not p.get("data_fine") else _parse_data_tfr(p["data_fine"])
         oi, of = max(p_inizio, inizio_eff), min(p_fine, fine_eff)
-        if of < oi:
+        if of <= oi:
             continue
-        settimane = _settimane_periodo(oi, of)
-        tot += p["importo_settimanale"] * settimane / 12
-        settimane_tot += settimane
-    return {"netto": round(tot, 2), "settimane": settimane_tot,
+        mesi = _mesi_excel(oi, of, 30.416)
+        lordo = p["importo_settimanale"] * 52 / 12 / 12 * mesi
+        aliquota = p.get("aliquota_tassazione")
+        aliquota = ALIQUOTA_TFR if aliquota is None else aliquota
+        tot_lordo += lordo
+        tot_tass += lordo * aliquota / 100
+        mesi_tot += mesi
+    return {"lordo": round(tot_lordo, 2), "tassazione": round(tot_tass, 2),
+            "netto": round(tot_lordo - tot_tass, 2), "mesi": round(mesi_tot, 2),
             "dal": inizio_eff.strftime("%Y-%m-%d"), "al": fine_eff.strftime("%Y-%m-%d")}
 
 
@@ -1822,6 +1841,8 @@ async def get_simulazione_tfr(dipendente_id: str) -> Dict[str, Any]:
         "dipendente_id": dipendente_id,
         "dipendente_nome": dipendente.get("nome_completo", ""),
         "periodi": periodi,
+        "totale_lordo": round(sum(p["lordo"] for p in periodi), 2),
+        "totale_tassazione": round(sum(p["tassazione"] for p in periodi), 2),
         "totale_netto": round(sum(p["netto"] for p in periodi), 2),
         "prossimo_data_inizio": prossimo_inizio,
         "paga_attuale": periodo_aperto["importo_settimanale"] if periodo_aperto else None,
@@ -1888,7 +1909,8 @@ async def aggiungi_periodo_simulazione(dipendente_id: str, input_data: PeriodoSi
                        f"({ultimo['data_inizio']})")
         # Chiude da solo il periodo aperto precedente: finisce il giorno prima del nuovo.
         data_fine_chiusura = data_inizio - timedelta(days=1)
-        calc_chiusura = _calcola_periodo_tfr(ultimo_inizio, data_fine_chiusura, ultimo["importo_settimanale"])
+        calc_chiusura = _calcola_periodo_tfr(ultimo_inizio, data_fine_chiusura,
+                                             ultimo["importo_settimanale"], ultimo.get("aliquota_tassazione"))
         await db["tfr_simulazione_periodi"].update_one(
             {"id": ultimo["id"]},
             {"$set": {"data_fine": data_fine_chiusura.strftime("%Y-%m-%d"),
@@ -1901,17 +1923,22 @@ async def aggiungi_periodo_simulazione(dipendente_id: str, input_data: PeriodoSi
                 detail=f"Il periodo si sovrappone: l'ultimo periodo finisce il "
                        f"{ultimo['data_fine']}, questo dovrebbe iniziare dopo")
 
+    aliquota = ALIQUOTA_TFR if input_data.aliquota_tassazione is None else input_data.aliquota_tassazione
+    if not (0 <= aliquota < 100):
+        raise HTTPException(status_code=400, detail="L'aliquota di tassazione deve essere tra 0 e 100")
+
     periodo = {
         "id": str(uuid4()),
         "dipendente_id": dipendente_id,
         "data_inizio": data_inizio_str,
         "data_fine": data_fine.strftime("%Y-%m-%d") if data_fine else None,
         "importo_settimanale": round(input_data.importo_settimanale, 2),
+        "aliquota_tassazione": round(aliquota, 2),
         "chiuso_automaticamente": False,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     if data_fine:
-        periodo.update(_calcola_periodo_tfr(data_inizio, data_fine, input_data.importo_settimanale))
+        periodo.update(_calcola_periodo_tfr(data_inizio, data_fine, input_data.importo_settimanale, aliquota))
     await db["tfr_simulazione_periodi"].insert_one(periodo.copy())
 
     return {"success": True, "periodo": _periodo_con_calcolo_live(periodo)}
@@ -1921,6 +1948,7 @@ class ModificaPeriodoInput(BaseModel):
     importo_settimanale: Optional[float] = None
     data_inizio: Optional[str] = None
     data_fine: Optional[str] = None  # ha effetto solo se il periodo era già chiuso
+    aliquota_tassazione: Optional[float] = None  # percentuale, es. 23 o 27
 
 
 @router.put("/simulazione/{dipendente_id}/periodi/{periodo_id}")
@@ -1972,13 +2000,21 @@ async def modifica_periodo_simulazione(dipendente_id: str, periodo_id: str,
             raise HTTPException(status_code=400,
                                 detail=f"Si sovrapporrebbe al periodo successivo (inizia il {succ_inizio_str})")
 
-    aggiornamento: Dict[str, Any] = {"data_inizio": nuova_inizio_str, "importo_settimanale": round(nuovo_importo, 2)}
+    nuova_aliquota = (input_data.aliquota_tassazione if input_data.aliquota_tassazione is not None
+                      else periodo.get("aliquota_tassazione"))
+    nuova_aliquota = ALIQUOTA_TFR if nuova_aliquota is None else nuova_aliquota
+    if not (0 <= nuova_aliquota < 100):
+        raise HTTPException(status_code=400, detail="L'aliquota di tassazione deve essere tra 0 e 100")
+
+    aggiornamento: Dict[str, Any] = {"data_inizio": nuova_inizio_str,
+                                     "importo_settimanale": round(nuovo_importo, 2),
+                                     "aliquota_tassazione": round(nuova_aliquota, 2)}
     update_op: Dict[str, Any] = {"$set": aggiornamento}
     if nuova_fine:
         aggiornamento["data_fine"] = nuova_fine_str
-        aggiornamento.update(_calcola_periodo_tfr(nuova_inizio, nuova_fine, nuovo_importo))
+        aggiornamento.update(_calcola_periodo_tfr(nuova_inizio, nuova_fine, nuovo_importo, nuova_aliquota))
     else:
-        update_op["$unset"] = {"giorni": "", "settimane": "", "netto": ""}
+        update_op["$unset"] = {"giorni": "", "mesi": "", "lordo": "", "tassazione": "", "netto": ""}
 
     await db["tfr_simulazione_periodi"].update_one({"id": periodo_id}, update_op)
 
@@ -2012,7 +2048,7 @@ async def elimina_periodo_simulazione(dipendente_id: str, periodo_id: str) -> Di
             await db["tfr_simulazione_periodi"].update_one(
                 {"id": precedente["id"]},
                 {"$set": {"data_fine": None, "chiuso_automaticamente": False},
-                 "$unset": {"giorni": "", "settimane": "", "netto": ""}})
+                 "$unset": {"giorni": "", "mesi": "", "lordo": "", "tassazione": "", "netto": ""}})
 
     return {"success": True, "messaggio": "Periodo eliminato"}
 
@@ -2065,10 +2101,11 @@ async def liquidazione_finale_simulazione(dipendente_id: str) -> Dict[str, Any]:
     per la 13ª, 1° luglio-30 giugno per la 14ª) e controvalore delle ferie residue.
     Se il dipendente è cessato, tutto si ferma alla data di cessazione anziché a oggi
     — stessa logica del periodo aperto che si chiude su un aumento.
-    L'importo settimanale inserito nel simulatore è già netto, quindi tredicesima e
-    quattordicesima qui calcolate sono già il maturato netto (nessuna tassazione da
-    sottrarre). Le ferie residue riusano il dato già tracciato dall'app dai cedolini
-    (dipendenti.ferie_residue), non un calcolo parallelo."""
+    Tredicesima e quattordicesima usano la stessa formula del foglio storico (righe
+    "13°"/"14°": mensilità/12 × mesi con divisore 30,416, tassazione con l'aliquota
+    del periodo) e restituiscono lordo, tassazione e netto. Le ferie residue riusano
+    il dato già tracciato dall'app dai cedolini (dipendenti.ferie_residue), non un
+    calcolo parallelo."""
     db = Database.get_db()
     dipendente = await db["dipendenti"].find_one({"id": dipendente_id}, {"_id": 0})
     if not dipendente:
@@ -2250,7 +2287,9 @@ async def importa_simulazione_da_excel(
                                       f"'{dipendenti_processati[dip['id']]}' in questo import: saltato"})
             continue
 
-        # Scaletta anno per anno: righe 2-20, colonne B(inizio) C(fine) G(paga settimanale)
+        # Scaletta anno per anno: righe 2-20, colonne B(inizio) C(fine) G(paga settimanale);
+        # H(lordo) e I(tassazione) servono solo a ricavare l'aliquota usata dal foglio su
+        # quella riga (23% o 27% a seconda dell'anno) — se mancano, default 23%.
         righe = []
         for r in range(2, 21):
             b, c, g = ws[f"B{r}"].value, ws[f"C{r}"].value, ws[f"G{r}"].value
@@ -2264,7 +2303,14 @@ async def importa_simulazione_da_excel(
                 continue
             b = b if isinstance(b, datetime) else datetime(b.year, b.month, b.day)
             c = c if isinstance(c, datetime) else datetime(c.year, c.month, c.day)
-            righe.append((b, c, g))
+            aliquota = ALIQUOTA_TFR
+            try:
+                h, i_val = float(ws[f"H{r}"].value), float(ws[f"I{r}"].value)
+                if h > 0 and 0 <= i_val / h < 1:
+                    aliquota = round(i_val / h * 100, 2)
+            except (TypeError, ValueError):
+                pass
+            righe.append((b, c, g, aliquota))
 
         if not righe:
             risultati.append({"foglio": titolo, "abbinato": True, "dipendente": nome_dip,
@@ -2286,7 +2332,7 @@ async def importa_simulazione_da_excel(
             await db.tfr_simulazione_periodi.delete_many({"dipendente_id": dip["id"]})
 
         inseriti = 0
-        for idx, (b, c, g) in enumerate(righe):
+        for idx, (b, c, g, aliquota) in enumerate(righe):
             e_ultimo = idx == len(righe) - 1
             periodo = {
                 "id": str(uuid4()), "dipendente_id": dip["id"],
@@ -2296,11 +2342,12 @@ async def importa_simulazione_da_excel(
                 # da qui in avanti il sistema la tiene aggiornata da sola fino ad oggi.
                 "data_fine": None if e_ultimo else c.strftime("%Y-%m-%d"),
                 "importo_settimanale": round(g, 2),
+                "aliquota_tassazione": aliquota,
                 "chiuso_automaticamente": False,
                 "fonte": "excel_calcolo_ferie_tfr", "created_at": datetime.now(timezone.utc).isoformat(),
             }
             if not e_ultimo:
-                periodo.update(_calcola_periodo_tfr(b, c, g))
+                periodo.update(_calcola_periodo_tfr(b, c, g, aliquota))
             await db.tfr_simulazione_periodi.insert_one(periodo)
             inseriti += 1
 
@@ -2319,11 +2366,11 @@ async def importa_simulazione_da_excel(
 # ============================================
 # CALCOLO NETTO DA LORDO (stipendio mensile, IRPEF 2026)
 # ============================================
-# Strumento SEPARATO dal simulatore TFR sopra: lì l'importo settimanale è NETTO
-# (per calcolare il maturato TFR/13ª/14ª); qui invece si parte da un importo
-# settimanale LORDO per calcolare quanto arriva netto in busta, con le regole
-# fiscali italiane 2026 (INPS 9,19%, scaglioni IRPEF progressivi, detrazione
-# lavoro dipendente). Non tocca né legge nulla del simulatore TFR.
+# Strumento SEPARATO dal simulatore TFR sopra (che usa la formula del foglio
+# storico con aliquota fissa per periodo): qui si parte da un importo settimanale
+# LORDO per stimare quanto arriva netto in busta con le regole fiscali italiane
+# 2026 (INPS 9,19%, scaglioni IRPEF progressivi, detrazione lavoro dipendente).
+# Non tocca né legge nulla del simulatore TFR.
 #
 # Non include: addizionale regionale/comunale (variano per comune/regione) né
 # eventuali bonus (es. trattamento integrativo/cuneo fiscale per i redditi più
