@@ -2,10 +2,10 @@
 Router TFR - Gestione Trattamento Fine Rapporto
 Accantonamento, rivalutazione ISTAT, liquidazione TFR e gestione acconti
 """
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query, Body, UploadFile, File
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from uuid import uuid4
 import logging
 import os
@@ -1866,4 +1866,179 @@ async def dividi_in_rate_simulazione(dipendente_id: str, input_data: RateSimulaz
         rate.append(voce)
 
     return {"totale_netto": totale_netto, "numero_rate": n, "rate": rate}
+
+
+@router.post("/simulazione/importa-da-excel")
+@handle_errors
+async def importa_simulazione_da_excel(
+    file: UploadFile = File(...),
+    sostituisci: bool = Query(False, description="Sovrascrive i periodi già salvati per i dipendenti trovati nel file"),
+) -> Dict[str, Any]:
+    """Importa i periodi della simulazione storica TFR dal file Excel 'calcolo ferie e TFR'
+    (un foglio per dipendente: colonna B=inizio periodo, C=fine periodo, G=paga settimanale
+    anno per anno). Ogni periodo viene RICALCOLATO con la formula di legge (art. 2120 c.c.),
+    non con l'approssimazione "una mensilità" del foglio originale.
+
+    Abbinamento foglio → dipendente: SOLO sul nome della scheda (il contenuto della cella A2
+    di alcune schede è un'etichetta rimasta da un copia-incolla e non è affidabile — es. le
+    schede 'VINCENZO' e 'VALERIO' hanno entrambe A2='CAPEZZUTO'). Si cerca il nome della
+    scheda nel foglio 'DATI' (per nome o cognome; se il nome compare come nome E cognome nella
+    stessa riga si preferisce quella riga, utile per distinguere due persone con lo stesso
+    cognome) per risalire al codice fiscale, poi si cerca quel CF in anagrafica. Se il foglio
+    non è nel DATI o il CF non è in anagrafica, si prova un abbinamento diretto per nome/cognome.
+    Se l'abbinamento è ambiguo o assente, il foglio viene segnalato e saltato (nessuna scelta
+    a caso). Se un dipendente ha già periodi salvati, restano intatti a meno di sostituisci=true."""
+    import io
+    import re as re_mod
+    import openpyxl
+    raw = await file.read()
+    if raw[:2] != b"PK":
+        raise HTTPException(400, "Il file deve essere un .xlsx")
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(raw), data_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"Excel non valido: {e}")
+
+    def norm(s):
+        return re_mod.sub(r"[^a-z0-9]", "", str(s or "").strip().lower())
+
+    db = Database.get_db()
+
+    # --- Indice dal foglio DATI: nome/cognome ripuliti -> codice fiscale ---
+    dati_idx = []
+    if "DATI" in wb.sheetnames:
+        ws_dati = wb["DATI"]
+        for row in ws_dati.iter_rows(min_row=2, max_row=ws_dati.max_row, values_only=True):
+            if not row or len(row) < 9:
+                continue
+            nome, cognome, cf = row[0], row[1], row[8]
+            if not (nome or cognome):
+                continue
+            dati_idx.append({
+                "nome_norm": norm(nome), "cognome_norm": norm(cognome),
+                "self_ref": norm(nome) == norm(cognome) and norm(nome) != "",
+                "cf": (str(cf).strip().upper() if cf else ""),
+            })
+
+    def cerca_cf_in_dati(token):
+        esatti = [d for d in dati_idx if d["nome_norm"] == token or d["cognome_norm"] == token]
+        pool = esatti
+        if not pool and len(token) >= 3:
+            pool = [d for d in dati_idx if token in d["nome_norm"] or token in d["cognome_norm"]]
+        if not pool:
+            return None, "nessuna riga DATI corrispondente"
+        forti = [d for d in pool if d["self_ref"]]
+        scelta = forti if forti else pool
+        cf_set = {d["cf"] for d in scelta if d["cf"]}
+        if len(cf_set) == 1:
+            return next(iter(cf_set)), "ok"
+        if len(cf_set) > 1:
+            return None, "più righe DATI diverse corrispondono a questo nome (ambiguo)"
+        return None, "riga DATI trovata ma senza codice fiscale"
+
+    # --- Anagrafica app: indici per CF e per nome/cognome (fallback) ---
+    dips = await db.dipendenti.find(
+        {"merged_into": {"$exists": False}},
+        {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "nome_completo": 1, "codice_fiscale": 1}
+    ).to_list(1000)
+    by_cf, by_nome = {}, {}
+    for d in dips:
+        cf = (d.get("codice_fiscale") or "").strip().upper()
+        if cf:
+            by_cf[cf] = d
+        n, c = norm(d.get("nome")), norm(d.get("cognome"))
+        for v in {norm(d.get("nome_completo")), c + n, n + c}:
+            if v:
+                by_nome[v] = d
+
+    def risolvi_dipendente(token):
+        cf, msg = cerca_cf_in_dati(token)
+        if cf and cf in by_cf:
+            return by_cf[cf], f"DATI → CF {cf}"
+        dip = by_nome.get(token)
+        if dip:
+            return dip, "nome (fallback anagrafica)" if not cf else f"nome (fallback: {msg})"
+        return None, msg if not cf else "codice fiscale del DATI non presente in anagrafica"
+
+    SHEET_SKIP = {norm(x) for x in ("DATI", "Foglio1", "13", "14", "12")}
+    risultati = []
+    dipendenti_processati = {}  # dipendente_id -> foglio (per rilevare conflitti nello stesso import)
+
+    for ws in wb.worksheets:
+        titolo = ws.title
+        tok = norm(titolo)
+        if tok in SHEET_SKIP:
+            continue
+
+        dip, motivo = risolvi_dipendente(tok)
+        if not dip:
+            risultati.append({"foglio": titolo, "abbinato": False, "motivo": motivo})
+            continue
+
+        nome_dip = dip.get("nome_completo") or f"{dip.get('cognome', '')} {dip.get('nome', '')}".strip()
+
+        if dip["id"] in dipendenti_processati:
+            risultati.append({"foglio": titolo, "abbinato": True, "dipendente": nome_dip,
+                              "periodi_importati": 0,
+                              "nota": f"stesso dipendente già risolto dal foglio "
+                                      f"'{dipendenti_processati[dip['id']]}' in questo import: saltato"})
+            continue
+
+        # Scaletta anno per anno: righe 2-20, colonne B(inizio) C(fine) G(paga settimanale)
+        righe = []
+        for r in range(2, 21):
+            b, c, g = ws[f"B{r}"].value, ws[f"C{r}"].value, ws[f"G{r}"].value
+            if not isinstance(b, (datetime, date)) or not isinstance(c, (datetime, date)):
+                continue
+            try:
+                g = float(g)
+            except (TypeError, ValueError):
+                continue
+            if g <= 0:
+                continue
+            b = b if isinstance(b, datetime) else datetime(b.year, b.month, b.day)
+            c = c if isinstance(c, datetime) else datetime(c.year, c.month, c.day)
+            righe.append((b, c, g))
+
+        if not righe:
+            risultati.append({"foglio": titolo, "abbinato": True, "dipendente": nome_dip,
+                              "motivo_abbinamento": motivo, "periodi_importati": 0,
+                              "nota": "nessuna paga settimanale valorizzata nel foglio"})
+            continue
+
+        righe.sort(key=lambda x: x[0])
+
+        esistenti = await db.tfr_simulazione_periodi.count_documents({"dipendente_id": dip["id"]})
+        if esistenti and not sostituisci:
+            risultati.append({"foglio": titolo, "abbinato": True, "dipendente": nome_dip,
+                              "motivo_abbinamento": motivo, "periodi_importati": 0,
+                              "nota": f"il dipendente ha già {esistenti} periodi salvati: "
+                                      f"ripeti con sostituisci=true per sovrascriverli"})
+            continue
+
+        if esistenti:
+            await db.tfr_simulazione_periodi.delete_many({"dipendente_id": dip["id"]})
+
+        inseriti = 0
+        for b, c, g in righe:
+            calc = _calcola_periodo_tfr(b, c, g)
+            periodo = {
+                "id": str(uuid4()), "dipendente_id": dip["id"],
+                "data_inizio": b.strftime("%Y-%m-%d"), "data_fine": c.strftime("%Y-%m-%d"),
+                "importo_settimanale": round(g, 2), **calc,
+                "fonte": "excel_calcolo_ferie_tfr", "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await db.tfr_simulazione_periodi.insert_one(periodo)
+            inseriti += 1
+
+        dipendenti_processati[dip["id"]] = titolo
+        risultati.append({"foglio": titolo, "abbinato": True, "dipendente": nome_dip,
+                          "motivo_abbinamento": motivo, "periodi_importati": inseriti})
+
+    return {
+        "fogli_processati": len(risultati),
+        "fogli_abbinati": len([r for r in risultati if r.get("abbinato")]),
+        "fogli_non_abbinati": len([r for r in risultati if not r.get("abbinato")]),
+        "risultati": risultati,
+    }
 

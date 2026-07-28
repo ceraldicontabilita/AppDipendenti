@@ -2928,6 +2928,11 @@ function TfrPage({ dipendenti, getDipendente }) {
   const [dataPrimaRata, setDataPrimaRata] = useState("");
   const [rate, setRate] = useState(null);
 
+  const importRef = useRef(null);
+  const [importando, setImportando] = useState(false);
+  const [sostituisci, setSostituisci] = useState(false);
+  const [importoEsito, setImportoEsito] = useState(null);
+
   const carica = useCallback(async (id) => {
     if (!id) return;
     setLoading(true); setErrore(""); setRate(null);
@@ -2986,6 +2991,20 @@ function TfrPage({ dipendenti, getDipendente }) {
     } catch (e) { setErrore(e?.response?.data?.detail || "Errore nel calcolo delle rate"); }
   };
 
+  const importaDaExcel = async (e) => {
+    const fl = (e.target.files || [])[0];
+    if (!fl) return;
+    setImportando(true); setImportoEsito(null); setErrore("");
+    try {
+      const fd = new FormData(); fd.append("file", fl);
+      const r = await axios.post(`${API_TFR}/simulazione/importa-da-excel?sostituisci=${sostituisci}`, fd,
+        { headers: { "Content-Type": "multipart/form-data" } });
+      setImportoEsito(r.data);
+      await carica(dipId);
+    } catch (err) { setErrore(err?.response?.data?.detail || "Errore nell'import da Excel"); }
+    finally { setImportando(false); if (importRef.current) importRef.current.value = ""; }
+  };
+
   const inp = { border: "1px solid #d1d5db", borderRadius: 8, padding: "7px 9px", fontSize: 14, width: "100%", boxSizing: "border-box" };
 
   return (
@@ -3005,6 +3024,43 @@ function TfrPage({ dipendenti, getDipendente }) {
       {errore && (
         <div className="dc-card" style={{ marginBottom: 16, borderLeft: "4px solid #d35f4e", color: "#d35f4e", fontWeight: 600 }}>⚠ {errore}</div>
       )}
+
+      <div className="dc-card" style={{ marginBottom: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Importa la simulazione da Excel</h3>
+        <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
+          Carica il file "calcolo ferie e TFR" (un foglio per dipendente): il sistema abbina ogni foglio al
+          dipendente e importa i periodi anno per anno, ricalcolati con la formula di legge.
+        </p>
+        <input ref={importRef} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          onChange={importaDaExcel} style={{ display: "none" }} />
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="dc-btn dc-btn-primary" disabled={importando} onClick={() => importRef.current?.click()}>
+            {importando ? "Importo…" : "⤵ Carica file Excel"}
+          </button>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13.5 }}>
+            <input type="checkbox" checked={sostituisci} onChange={e => setSostituisci(e.target.checked)} />
+            Sovrascrivi i periodi già salvati
+          </label>
+        </div>
+        {importoEsito && (
+          <div style={{ overflowX: "auto", marginTop: 14 }}>
+            <table className="dc-table" style={{ minWidth: 560, whiteSpace: "nowrap" }}>
+              <thead><tr><th>Foglio</th><th>Dipendente</th><th>Abbinamento</th><th style={{ textAlign: "right" }}>Periodi</th><th>Nota</th></tr></thead>
+              <tbody>
+                {importoEsito.risultati.map((r, i) => (
+                  <tr key={i}>
+                    <td>{r.foglio}</td>
+                    <td style={{ color: r.abbinato ? "#2a3329" : "#d35f4e", fontWeight: r.abbinato ? 400 : 700 }}>{r.dipendente || (r.abbinato ? "" : "non abbinato")}</td>
+                    <td className="dc-muted" style={{ fontSize: 12.5 }}>{r.motivo_abbinamento || r.motivo || ""}</td>
+                    <td style={{ textAlign: "right" }}>{r.periodi_importati ?? "—"}</td>
+                    <td className="dc-muted" style={{ fontSize: 12.5, whiteSpace: "normal" }}>{r.nota || ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       {loading ? <p className="dc-muted">Carico…</p> : (
         <>
