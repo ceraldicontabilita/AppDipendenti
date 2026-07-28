@@ -2910,6 +2910,73 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
   );
 }
 
+// Mini-calendario a griglia (mese/anno navigabili) al posto del semplice input data
+// nativo del browser — usato nel simulatore TFR per scegliere le date dei periodi.
+function MiniCalendario({ value, onChange }) {
+  const [aperto, setAperto] = useState(false);
+  const base = value ? new Date(value + "T00:00:00") : new Date();
+  const [vista, setVista] = useState({ anno: base.getFullYear(), mese: base.getMonth() });
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const onClick = (e) => { if (ref.current && !ref.current.contains(e.target)) setAperto(false); };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, []);
+
+  const meseNomi = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"];
+  const giorniSett = ["L", "M", "M", "G", "V", "S", "D"];
+  const primoDelMese = new Date(vista.anno, vista.mese, 1);
+  const ultimoGiorno = new Date(vista.anno, vista.mese + 1, 0).getDate();
+  const offset = (primoDelMese.getDay() + 6) % 7; // lunedì = 0
+  const celle = [...Array(offset).fill(null), ...Array.from({ length: ultimoGiorno }, (_, i) => i + 1)];
+
+  const isoGiorno = (g) => `${vista.anno}-${String(vista.mese + 1).padStart(2, "0")}-${String(g).padStart(2, "0")}`;
+  const scegli = (g) => { onChange(isoGiorno(g)); setAperto(false); };
+  const cambiaMese = (delta) => setVista(v => {
+    const m = v.mese + delta;
+    if (m < 0) return { anno: v.anno - 1, mese: 11 };
+    if (m > 11) return { anno: v.anno + 1, mese: 0 };
+    return { ...v, mese: m };
+  });
+
+  const btnStyle = { border: "1px solid #d1d5db", borderRadius: 8, padding: "7px 9px", fontSize: 14, width: "100%", boxSizing: "border-box", textAlign: "left", cursor: "pointer", background: "#fff", color: value ? "#2a3329" : "#9aa39a" };
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button type="button" onClick={() => setAperto(a => !a)} style={btnStyle}>
+        {value ? formatDate(value) : "Scegli data"}
+      </button>
+      {aperto && (
+        <div style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, background: "#fffefb", border: "1px solid #e6e0d4", borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,.18)", padding: 10, zIndex: 60, width: 232 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <button type="button" className="dc-btn" style={{ padding: "2px 8px" }} onClick={() => cambiaMese(-1)}>‹</button>
+            <b style={{ fontSize: 13 }}>{meseNomi[vista.mese]} {vista.anno}</b>
+            <button type="button" className="dc-btn" style={{ padding: "2px 8px" }} onClick={() => cambiaMese(1)}>›</button>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 2, fontSize: 11, textAlign: "center" }}>
+            {giorniSett.map((g, i) => <div key={i} className="dc-muted" style={{ fontWeight: 700 }}>{g}</div>)}
+            {celle.map((g, i) => {
+              const attivo = g && isoGiorno(g) === value;
+              return (
+                <button type="button" key={i} disabled={!g} onClick={() => g && scegli(g)} style={{
+                  padding: "5px 0", border: "none", borderRadius: 6, cursor: g ? "pointer" : "default",
+                  background: attivo ? "#5b7a6b" : "transparent", color: attivo ? "#fff" : g ? "#2a3329" : "transparent",
+                  fontWeight: attivo ? 700 : 400, fontSize: 12.5,
+                }}>{g || "·"}</button>
+              );
+            })}
+          </div>
+          {value && (
+            <button type="button" className="dc-btn" style={{ width: "100%", marginTop: 8, fontSize: 12 }}
+              onClick={() => { onChange(""); setAperto(false); }}>Pulisci</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // TFR — situazione ufficiale (calcolo automatico dai cedolini) + simulatore
 // storico periodo per periodo, per ricostruire il TFR maturato prima dell'app.
 function TfrPage({ dipendenti, getDipendente }) {
@@ -3002,13 +3069,10 @@ function TfrPage({ dipendenti, getDipendente }) {
     finally { setSalvandoModifica(false); }
   };
 
-  const azzeraSimulazione = async () => {
-    if (!window.confirm("Azzerare l'intera simulazione di questo dipendente? Non è reversibile.")) return;
-    try {
-      await axios.delete(`${API_TFR}/simulazione/${dipId}`);
-      await carica(dipId);
-    } catch (e) { setErrore(e?.response?.data?.detail || "Errore nell'azzeramento"); }
-  };
+  // Ricalcola: rilegge i dati dal server e li ricalcola (il periodo in corso è sempre
+  // live), senza mai cancellare nulla. Per correggere un valore sbagliato si usa la
+  // matita (✎) su ogni riga, non un azzeramento.
+  const ricalcolaSimulazione = async () => { await carica(dipId); };
 
   const calcolaRate = async () => {
     try {
@@ -3165,8 +3229,7 @@ function TfrPage({ dipendenti, getDipendente }) {
                 <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>
                   {sim?.paga_attuale != null ? "Nuova paga da" : "Dal"}
                 </label>
-                <input type="date" style={inp} value={formPeriodo.data_inizio}
-                  onChange={e => setFormPeriodo(f => ({ ...f, data_inizio: e.target.value }))} />
+                <MiniCalendario value={formPeriodo.data_inizio} onChange={v => setFormPeriodo(f => ({ ...f, data_inizio: v }))} />
               </div>
               <div>
                 <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>€ a settimana</label>
@@ -3176,8 +3239,7 @@ function TfrPage({ dipendenti, getDipendente }) {
               {comeChiuso && (
                 <div>
                   <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Al (periodo storico chiuso)</label>
-                  <input type="date" style={inp} value={formPeriodo.data_fine}
-                    onChange={e => setFormPeriodo(f => ({ ...f, data_fine: e.target.value }))} />
+                  <MiniCalendario value={formPeriodo.data_fine} onChange={v => setFormPeriodo(f => ({ ...f, data_fine: v }))} />
                 </div>
               )}
               <button className="dc-btn dc-btn-primary" disabled={salvandoPeriodo} onClick={aggiungiPeriodo}>
@@ -3188,7 +3250,7 @@ function TfrPage({ dipendenti, getDipendente }) {
                 Periodo storico già chiuso (ha una data di fine)
               </label>
               {sim?.periodi?.length > 0 && (
-                <button className="dc-btn" onClick={azzeraSimulazione} style={{ marginLeft: "auto", color: "#d35f4e" }}>Azzera simulazione</button>
+                <button className="dc-btn" onClick={ricalcolaSimulazione} style={{ marginLeft: "auto" }}>🔄 Ricalcola</button>
               )}
             </div>
           </div>
@@ -3278,14 +3340,12 @@ function TfrPage({ dipendenti, getDipendente }) {
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div>
                 <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Dal</label>
-                <input type="date" style={inp} value={modificaPeriodo.data_inizio}
-                  onChange={e => setModificaPeriodo(m => ({ ...m, data_inizio: e.target.value }))} />
+                <MiniCalendario value={modificaPeriodo.data_inizio} onChange={v => setModificaPeriodo(m => ({ ...m, data_inizio: v }))} />
               </div>
               {!modificaPeriodo.aperto && (
                 <div>
                   <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Al</label>
-                  <input type="date" style={inp} value={modificaPeriodo.data_fine}
-                    onChange={e => setModificaPeriodo(m => ({ ...m, data_fine: e.target.value }))} />
+                  <MiniCalendario value={modificaPeriodo.data_fine} onChange={v => setModificaPeriodo(m => ({ ...m, data_fine: v }))} />
                 </div>
               )}
               {modificaPeriodo.aperto && (

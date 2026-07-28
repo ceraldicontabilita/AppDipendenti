@@ -2019,15 +2019,6 @@ async def elimina_periodo_simulazione(dipendente_id: str, periodo_id: str) -> Di
     return {"success": True, "messaggio": "Periodo eliminato"}
 
 
-@router.delete("/simulazione/{dipendente_id}")
-@handle_errors
-async def reset_simulazione_tfr(dipendente_id: str) -> Dict[str, Any]:
-    """Azzera l'intera simulazione storica TFR di un dipendente (si riparte da zero)."""
-    db = Database.get_db()
-    res = await db["tfr_simulazione_periodi"].delete_many({"dipendente_id": dipendente_id})
-    return {"success": True, "periodi_eliminati": res.deleted_count}
-
-
 @router.post("/simulazione/{dipendente_id}/rate")
 @handle_errors
 async def dividi_in_rate_simulazione(dipendente_id: str, input_data: RateSimulazioneInput) -> Dict[str, Any]:
