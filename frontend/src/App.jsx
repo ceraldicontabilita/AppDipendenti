@@ -3189,10 +3189,9 @@ function TfrPage({ dipendenti, getDipendente }) {
           <div className="dc-card" style={{ marginBottom: 16 }}>
             <h3 style={{ marginTop: 0 }}>Simulazione storica TFR</h3>
             <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
-              Stessa formula del tuo foglio storico: lordo = importo settimanale × 52/12/12 × mesi (giorni÷30),
-              tassazione con l'aliquota del periodo (23% o 27%), netto = lordo − tassazione. L'ultimo periodo è
-              sempre "in corso" e matura fino ad oggi da solo: tocchi il simulatore solo quando cambi la paga a
-              qualcuno. Non modifica il TFR ufficiale qui sopra.
+              Formula semplice: settimane lavorate × importo settimanale ÷ 12 = lordo (es. 52 × 220 € = 11.440 ÷ 12
+              = 953,33), meno la tassazione del periodo (23% o 27%) = netto da ricevere. L'ultimo periodo è sempre
+              "in corso" e matura fino ad oggi da solo. Non modifica il TFR ufficiale qui sopra.
             </p>
 
             {sim?.paga_attuale != null && (
@@ -3208,7 +3207,7 @@ function TfrPage({ dipendenti, getDipendente }) {
                   <thead>
                     <tr>
                       <th>Dal</th><th>Al</th><th style={{ textAlign: "right" }}>€/sett.</th>
-                      <th style={{ textAlign: "right" }}>Mesi</th>
+                      <th style={{ textAlign: "right" }}>Settimane</th>
                       <th style={{ textAlign: "right" }}>Lordo €</th>
                       <th style={{ textAlign: "right" }}>Tassaz. €</th>
                       <th style={{ textAlign: "right" }}>Netto €</th><th></th>
@@ -3220,7 +3219,7 @@ function TfrPage({ dipendenti, getDipendente }) {
                         <td>{formatDate(p.data_inizio)}</td>
                         <td>{p.aperto ? <span style={{ color: "#3d8168", fontWeight: 700 }}>in corso</span> : formatDate(p.data_fine)}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.importo_settimanale)}</td>
-                        <td style={{ textAlign: "right" }}>{p.mesi}</td>
+                        <td style={{ textAlign: "right" }}>{p.settimane}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.lordo)}</td>
                         <td style={{ textAlign: "right" }} title={`Aliquota ${p.aliquota_tassazione ?? 23}%`}>{eur(p.tassazione)}</td>
                         <td style={{ textAlign: "right", fontWeight: 700 }}>{eur(p.netto)}</td>
