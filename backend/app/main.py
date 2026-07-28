@@ -22,6 +22,11 @@ async def lifespan(app: FastAPI):
         start_scheduler()
     except Exception as e:
         logger.warning(f"Scadenzario non avviato: {e}")
+    try:
+        from .services.tfr_seed import seed_tfr_periodi
+        await seed_tfr_periodi()
+    except Exception as e:
+        logger.warning(f"Seed TFR non avviato: {e}")
     yield
     try:
         from .services.scadenze_scheduler import stop_scheduler
