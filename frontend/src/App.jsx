@@ -2923,6 +2923,7 @@ function TfrPage({ dipendenti, getDipendente }) {
 
   const [formPeriodo, setFormPeriodo] = useState({ data_inizio: "", data_fine: "", importo_settimanale: "" });
   const [salvandoPeriodo, setSalvandoPeriodo] = useState(false);
+  const [comeChiuso, setComeChiuso] = useState(false); // avanzato: inserisci uno storico già chiuso
 
   const [numeroRate, setNumeroRate] = useState(3);
   const [dataPrimaRata, setDataPrimaRata] = useState("");
@@ -2944,6 +2945,7 @@ function TfrPage({ dipendenti, getDipendente }) {
       setSituazione(s.data);
       setSim(sm.data);
       setFormPeriodo({ data_inizio: sm.data.prossimo_data_inizio || "", data_fine: "", importo_settimanale: "" });
+      setComeChiuso(false);
     } catch (e) {
       setErrore(e?.response?.data?.detail || "Errore nel caricamento");
     } finally { setLoading(false); }
@@ -2952,12 +2954,12 @@ function TfrPage({ dipendenti, getDipendente }) {
   useEffect(() => { carica(dipId); }, [dipId, carica]);
 
   const aggiungiPeriodo = async () => {
-    if (!formPeriodo.data_fine || !formPeriodo.importo_settimanale) return;
+    if (!formPeriodo.importo_settimanale || (comeChiuso && !formPeriodo.data_fine)) return;
     setSalvandoPeriodo(true); setErrore("");
     try {
       await axios.post(`${API_TFR}/simulazione/${dipId}/periodi`, {
         data_inizio: formPeriodo.data_inizio || undefined,
-        data_fine: formPeriodo.data_fine,
+        data_fine: comeChiuso ? formPeriodo.data_fine : undefined,
         importo_settimanale: Number(formPeriodo.importo_settimanale),
       });
       await carica(dipId);
@@ -3076,12 +3078,19 @@ function TfrPage({ dipendenti, getDipendente }) {
           )}
 
           <div className="dc-card" style={{ marginBottom: 16 }}>
-            <h3 style={{ marginTop: 0 }}>Simulazione storica TFR (periodo per periodo)</h3>
+            <h3 style={{ marginTop: 0 }}>Simulazione storica TFR</h3>
             <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
-              Ricostruisci il TFR maturato prima dell'app: inserisci la paga settimanale di ogni periodo, il sistema
-              calcola quanti mesi/frazione copre e somma con i periodi successivi (formula di legge, art. 2120 c.c.).
-              Non tocca il TFR ufficiale qui sopra.
+              Ricostruisce il TFR maturato prima dell'app (formula di legge, art. 2120 c.c.) e resta aggiornata da
+              sola: l'ultimo periodo è sempre "in corso" e matura fino ad oggi. Tocchi il simulatore solo quando
+              cambi la paga a qualcuno. Non modifica il TFR ufficiale qui sopra.
             </p>
+
+            {sim?.paga_attuale != null && (
+              <div style={{ background: "#eef1ea", border: "1px solid #d7e0d3", borderRadius: 10, padding: "10px 14px", marginBottom: 14, display: "flex", gap: 20, alignItems: "center", flexWrap: "wrap" }}>
+                <div><span className="dc-muted" style={{ fontSize: 12.5 }}>Paga attuale (in corso)</span><br /><b style={{ fontSize: 16 }}>€ {eur(sim.paga_attuale)}/settimana</b></div>
+                <div><span className="dc-muted" style={{ fontSize: 12.5 }}>Dal</span><br /><b>{formatDate(sim.paga_attuale_dal)}</b></div>
+              </div>
+            )}
 
             {sim?.periodi?.length > 0 && (
               <div style={{ overflowX: "auto", marginBottom: 14 }}>
@@ -3098,7 +3107,7 @@ function TfrPage({ dipendenti, getDipendente }) {
                     {sim.periodi.map((p, i) => (
                       <tr key={p.id}>
                         <td>{formatDate(p.data_inizio)}</td>
-                        <td>{formatDate(p.data_fine)}</td>
+                        <td>{p.aperto ? <span style={{ color: "#3d8168", fontWeight: 700 }}>in corso</span> : formatDate(p.data_fine)}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.importo_settimanale)}</td>
                         <td style={{ textAlign: "right" }}>{p.mesi}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.lordo)}</td>
@@ -3112,7 +3121,7 @@ function TfrPage({ dipendenti, getDipendente }) {
                       </tr>
                     ))}
                     <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4" }}>
-                      <td colSpan={4}>Totale</td>
+                      <td colSpan={4}>Totale (incluso il periodo in corso, ad oggi)</td>
                       <td style={{ textAlign: "right" }}>{eur(sim.totale_lordo)}</td>
                       <td style={{ textAlign: "right" }}>{eur(sim.totale_tassazione)}</td>
                       <td style={{ textAlign: "right" }}>{eur(sim.totale_netto)}</td>
@@ -3125,23 +3134,31 @@ function TfrPage({ dipendenti, getDipendente }) {
 
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
               <div>
-                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Dal</label>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>
+                  {sim?.paga_attuale != null ? "Nuova paga da" : "Dal"}
+                </label>
                 <input type="date" style={inp} value={formPeriodo.data_inizio}
                   onChange={e => setFormPeriodo(f => ({ ...f, data_inizio: e.target.value }))} />
-              </div>
-              <div>
-                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Al</label>
-                <input type="date" style={inp} value={formPeriodo.data_fine}
-                  onChange={e => setFormPeriodo(f => ({ ...f, data_fine: e.target.value }))} />
               </div>
               <div>
                 <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>€ a settimana</label>
                 <input type="number" step="0.01" style={{ ...inp, width: 120 }} value={formPeriodo.importo_settimanale}
                   onChange={e => setFormPeriodo(f => ({ ...f, importo_settimanale: e.target.value }))} />
               </div>
+              {comeChiuso && (
+                <div>
+                  <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Al (periodo storico chiuso)</label>
+                  <input type="date" style={inp} value={formPeriodo.data_fine}
+                    onChange={e => setFormPeriodo(f => ({ ...f, data_fine: e.target.value }))} />
+                </div>
+              )}
               <button className="dc-btn dc-btn-primary" disabled={salvandoPeriodo} onClick={aggiungiPeriodo}>
-                {salvandoPeriodo ? "Aggiungo…" : "+ Aggiungi periodo"}
+                {salvandoPeriodo ? "Salvo…" : sim?.paga_attuale != null ? "📈 Registra aumento" : "+ Inserisci paga iniziale"}
               </button>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5 }}>
+                <input type="checkbox" checked={comeChiuso} onChange={e => setComeChiuso(e.target.checked)} />
+                Periodo storico già chiuso (ha una data di fine)
+              </label>
               {sim?.periodi?.length > 0 && (
                 <button className="dc-btn" onClick={azzeraSimulazione} style={{ marginLeft: "auto", color: "#d35f4e" }}>Azzera simulazione</button>
               )}

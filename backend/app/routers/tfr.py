@@ -1661,10 +1661,17 @@ async def get_storico_tfr(dipendente_id: str) -> Dict[str, Any]:
 # SIMULATORE TFR STORICO (periodo per periodo)
 # ============================================
 # Ricostruisce il TFR maturato PRIMA che l'app calcolasse tutto in automatico
-# dai cedolini. Il titolare inserisce, un periodo alla volta, la paga
-# settimanale in vigore in quel periodo ("ha preso 180€/sett dal... al...");
-# il sistema propone come inizio del periodo successivo il giorno dopo la
-# fine di quello precedente, esattamente come si farebbe a mano.
+# dai cedolini, e da lì in poi lo tiene aggiornato da solo. Modello:
+# - Ogni dipendente ha una catena di periodi con una paga settimanale ciascuno.
+# - L'ULTIMO periodo può essere APERTO (data_fine assente = "tuttora in corso"):
+#   il suo maturato viene ricalcolato al volo fino a oggi ad ogni lettura, senza
+#   bisogno di aggiungere un periodo ogni anno.
+# - L'unica azione manuale prevista è registrare un aumento: si comunica la
+#   nuova paga settimanale (e la data da cui vale, di default oggi); il sistema
+#   chiude da solo il periodo aperto precedente (data_fine = giorno prima) e
+#   apre il nuovo, sempre aperto. L'import da Excel (una tantum, per tutti i
+#   dipendenti insieme) fa lo stesso: l'ultima riga di ciascun foglio diventa il
+#   periodo aperto, ignorando la data di fine eventualmente scritta nel file.
 # Ogni periodo si calcola con la formula di legge (art. 2120 c.c.:
 # retribuzione annua / 13,5, riproporzionata sui giorni del periodo) — non con
 # l'approssimazione "una mensilità" usata nel vecchio foglio Excel.
@@ -1673,10 +1680,12 @@ async def get_storico_tfr(dipendente_id: str) -> Dict[str, Any]:
 # dato storico ancora da verificare con quello già vivo in produzione.
 
 class PeriodoSimulazioneInput(BaseModel):
-    data_fine: str  # YYYY-MM-DD
     importo_settimanale: float
-    # Se omessa: giorno dopo la fine dell'ultimo periodo (o data assunzione per il primo)
+    # Se omessa: giorno dopo la fine dell'ultimo periodo chiuso, oggi se il
+    # precedente è aperto (è un aumento), o data assunzione per il primo periodo.
     data_inizio: Optional[str] = None
+    # Se omessa: periodo APERTO (tuttora in corso). Se valorizzata: periodo storico chiuso.
+    data_fine: Optional[str] = None
 
 
 class RateSimulazioneInput(BaseModel):
@@ -1686,6 +1695,10 @@ class RateSimulazioneInput(BaseModel):
 
 def _parse_data_tfr(s: str) -> datetime:
     return datetime.strptime(s[:10], "%Y-%m-%d")
+
+
+def _oggi_tfr() -> datetime:
+    return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
 
 
 def _calcola_periodo_tfr(data_inizio: datetime, data_fine: datetime, importo_settimanale: float) -> Dict[str, Any]:
@@ -1707,25 +1720,39 @@ def _calcola_periodo_tfr(data_inizio: datetime, data_fine: datetime, importo_set
     }
 
 
+def _periodo_con_calcolo_live(p: Dict[str, Any]) -> Dict[str, Any]:
+    """Se il periodo è aperto (senza data_fine), ricalcola il maturato al volo
+    fino a oggi, senza scrivere nulla sul DB: il valore resta sempre aggiornato."""
+    if p.get("data_fine"):
+        return {**p, "aperto": False}
+    calc = _calcola_periodo_tfr(_parse_data_tfr(p["data_inizio"]), _oggi_tfr(), p["importo_settimanale"])
+    return {**p, **calc, "data_fine": None, "aperto": True}
+
+
 @router.get("/simulazione/{dipendente_id}")
 @handle_errors
 async def get_simulazione_tfr(dipendente_id: str) -> Dict[str, Any]:
-    """Elenca i periodi della simulazione storica TFR di un dipendente, con i
-    totali (lordo/tassazione/netto) e la data suggerita per il prossimo periodo."""
+    """Elenca i periodi della simulazione storica TFR di un dipendente (l'eventuale
+    periodo aperto è ricalcolato al volo fino a oggi), con i totali e la paga
+    settimanale attualmente in corso."""
     db = Database.get_db()
     dipendente = await db["dipendenti"].find_one({"id": dipendente_id}, {"_id": 0})
     if not dipendente:
         raise HTTPException(status_code=404, detail="Dipendente non trovato")
 
-    periodi = await db["tfr_simulazione_periodi"].find(
+    grezzi = await db["tfr_simulazione_periodi"].find(
         {"dipendente_id": dipendente_id}, {"_id": 0}
     ).sort("data_inizio", 1).to_list(500)
+    periodi = [_periodo_con_calcolo_live(p) for p in grezzi]
 
-    if periodi:
+    periodo_aperto = periodi[-1] if periodi and periodi[-1]["aperto"] else None
+    if not periodi:
+        prossimo_inizio = (dipendente.get("data_assunzione") or "")[:10] or None
+    elif periodo_aperto:
+        prossimo_inizio = None  # nessun "prossimo": si registra un aumento, non un nuovo periodo in coda
+    else:
         ultimo_fine = _parse_data_tfr(periodi[-1]["data_fine"])
         prossimo_inizio = (ultimo_fine + timedelta(days=1)).strftime("%Y-%m-%d")
-    else:
-        prossimo_inizio = (dipendente.get("data_assunzione") or "")[:10] or None
 
     return {
         "dipendente_id": dipendente_id,
@@ -1735,15 +1762,20 @@ async def get_simulazione_tfr(dipendente_id: str) -> Dict[str, Any]:
         "totale_tassazione": round(sum(p["tassazione"] for p in periodi), 2),
         "totale_netto": round(sum(p["netto"] for p in periodi), 2),
         "prossimo_data_inizio": prossimo_inizio,
+        "paga_attuale": periodo_aperto["importo_settimanale"] if periodo_aperto else None,
+        "paga_attuale_dal": periodo_aperto["data_inizio"] if periodo_aperto else None,
     }
 
 
 @router.post("/simulazione/{dipendente_id}/periodi")
 @handle_errors
 async def aggiungi_periodo_simulazione(dipendente_id: str, input_data: PeriodoSimulazioneInput) -> Dict[str, Any]:
-    """Aggiunge un periodo alla simulazione storica TFR. Se non indichi la data di
-    inizio, riparte automaticamente dal giorno dopo la fine dell'ultimo periodo
-    inserito (o dalla data di assunzione in anagrafica, per il primo periodo)."""
+    """Aggiunge un periodo alla simulazione. Se non indichi la data di fine, il
+    periodo resta APERTO (in corso): è il caso normale per registrare un aumento,
+    che chiude da solo il periodo aperto precedente (se c'era) il giorno prima
+    della nuova data. Se non indichi la data di inizio: riparte dal giorno dopo
+    la fine dell'ultimo periodo chiuso, da oggi se il precedente era aperto
+    (è un aumento), o dalla data di assunzione per il primissimo periodo."""
     db = Database.get_db()
     dipendente = await db["dipendenti"].find_one({"id": dipendente_id}, {"_id": 0})
     if not dipendente:
@@ -1756,10 +1788,15 @@ async def aggiungi_periodo_simulazione(dipendente_id: str, input_data: PeriodoSi
         {"dipendente_id": dipendente_id}, {"_id": 0}
     ).sort("data_inizio", 1).to_list(500)
 
+    ultimo = periodi_esistenti[-1] if periodi_esistenti else None
+    ultimo_aperto = bool(ultimo) and not ultimo.get("data_fine")
+
     if input_data.data_inizio:
         data_inizio_str = input_data.data_inizio[:10]
-    elif periodi_esistenti:
-        ultimo_fine = _parse_data_tfr(periodi_esistenti[-1]["data_fine"])
+    elif ultimo_aperto:
+        data_inizio_str = _oggi_tfr().strftime("%Y-%m-%d")
+    elif ultimo:
+        ultimo_fine = _parse_data_tfr(ultimo["data_fine"])
         data_inizio_str = (ultimo_fine + timedelta(days=1)).strftime("%Y-%m-%d")
     elif dipendente.get("data_assunzione"):
         data_inizio_str = dipendente["data_assunzione"][:10]
@@ -1771,42 +1808,58 @@ async def aggiungi_periodo_simulazione(dipendente_id: str, input_data: PeriodoSi
 
     try:
         data_inizio = _parse_data_tfr(data_inizio_str)
-        data_fine = _parse_data_tfr(input_data.data_fine)
+        data_fine = _parse_data_tfr(input_data.data_fine) if input_data.data_fine else None
     except ValueError:
         raise HTTPException(status_code=400, detail="Date non valide, usa il formato YYYY-MM-DD")
 
-    if data_fine <= data_inizio:
+    if data_fine and data_fine <= data_inizio:
         raise HTTPException(status_code=400, detail="La data di fine deve essere successiva alla data di inizio")
 
-    if periodi_esistenti:
-        ultimo_fine = _parse_data_tfr(periodi_esistenti[-1]["data_fine"])
+    if ultimo_aperto:
+        ultimo_inizio = _parse_data_tfr(ultimo["data_inizio"])
+        if data_inizio <= ultimo_inizio:
+            raise HTTPException(
+                status_code=400,
+                detail=f"La data del nuovo periodo deve essere successiva all'inizio di quello in corso "
+                       f"({ultimo['data_inizio']})")
+        # Chiude da solo il periodo aperto precedente: finisce il giorno prima del nuovo.
+        data_fine_chiusura = data_inizio - timedelta(days=1)
+        calc_chiusura = _calcola_periodo_tfr(ultimo_inizio, data_fine_chiusura, ultimo["importo_settimanale"])
+        await db["tfr_simulazione_periodi"].update_one(
+            {"id": ultimo["id"]},
+            {"$set": {"data_fine": data_fine_chiusura.strftime("%Y-%m-%d"),
+                      "chiuso_automaticamente": True, **calc_chiusura}})
+    elif ultimo:
+        ultimo_fine = _parse_data_tfr(ultimo["data_fine"])
         if data_inizio <= ultimo_fine:
             raise HTTPException(
                 status_code=400,
                 detail=f"Il periodo si sovrappone: l'ultimo periodo finisce il "
-                       f"{periodi_esistenti[-1]['data_fine']}, questo dovrebbe iniziare dopo")
-
-    calc = _calcola_periodo_tfr(data_inizio, data_fine, input_data.importo_settimanale)
+                       f"{ultimo['data_fine']}, questo dovrebbe iniziare dopo")
 
     periodo = {
         "id": str(uuid4()),
         "dipendente_id": dipendente_id,
         "data_inizio": data_inizio_str,
-        "data_fine": input_data.data_fine[:10],
+        "data_fine": data_fine.strftime("%Y-%m-%d") if data_fine else None,
         "importo_settimanale": round(input_data.importo_settimanale, 2),
-        **calc,
+        "chiuso_automaticamente": False,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if data_fine:
+        periodo.update(_calcola_periodo_tfr(data_inizio, data_fine, input_data.importo_settimanale))
     await db["tfr_simulazione_periodi"].insert_one(periodo.copy())
 
-    return {"success": True, "periodo": periodo}
+    return {"success": True, "periodo": _periodo_con_calcolo_live(periodo)}
 
 
 @router.delete("/simulazione/{dipendente_id}/periodi/{periodo_id}")
 @handle_errors
 async def elimina_periodo_simulazione(dipendente_id: str, periodo_id: str) -> Dict[str, Any]:
     """Elimina un periodo dalla simulazione. Consentito solo per l'ULTIMO periodo
-    (in ordine di data), per non lasciare buchi nella catena di date."""
+    (in ordine di data), per non lasciare buchi nella catena di date. Se
+    l'eliminazione scopre un periodo che era stato chiuso automaticamente da
+    questo (un aumento annullato), lo riapre."""
     db = Database.get_db()
     periodi = await db["tfr_simulazione_periodi"].find(
         {"dipendente_id": dipendente_id}, {"_id": 0}
@@ -1818,6 +1871,16 @@ async def elimina_periodo_simulazione(dipendente_id: str, periodo_id: str) -> Di
             status_code=400,
             detail="Puoi eliminare solo l'ultimo periodo inserito (in ordine di data), per non lasciare buchi")
     await db["tfr_simulazione_periodi"].delete_one({"id": periodo_id})
+
+    if len(periodi) >= 2:
+        precedente = periodi[-2]
+        if precedente.get("chiuso_automaticamente"):
+            await db["tfr_simulazione_periodi"].update_one(
+                {"id": precedente["id"]},
+                {"$set": {"data_fine": None, "chiuso_automaticamente": False},
+                 "$unset": {"giorni": "", "mesi": "", "retribuzione_annua_equivalente": "",
+                            "lordo": "", "tassazione": "", "netto": ""}})
+
     return {"success": True, "messaggio": "Periodo eliminato"}
 
 
@@ -1840,10 +1903,11 @@ async def dividi_in_rate_simulazione(dipendente_id: str, input_data: RateSimulaz
         raise HTTPException(status_code=400, detail="Il numero di rate deve essere almeno 1")
 
     db = Database.get_db()
-    periodi = await db["tfr_simulazione_periodi"].find(
+    grezzi = await db["tfr_simulazione_periodi"].find(
         {"dipendente_id": dipendente_id}, {"_id": 0}).to_list(500)
-    if not periodi:
+    if not grezzi:
         raise HTTPException(status_code=400, detail="Nessun periodo inserito nella simulazione")
+    periodi = [_periodo_con_calcolo_live(p) for p in grezzi]
 
     totale_netto = round(sum(p["netto"] for p in periodi), 2)
     if totale_netto <= 0:
@@ -2031,14 +2095,21 @@ async def importa_simulazione_da_excel(
             await db.tfr_simulazione_periodi.delete_many({"dipendente_id": dip["id"]})
 
         inseriti = 0
-        for b, c, g in righe:
-            calc = _calcola_periodo_tfr(b, c, g)
+        for idx, (b, c, g) in enumerate(righe):
+            e_ultimo = idx == len(righe) - 1
             periodo = {
                 "id": str(uuid4()), "dipendente_id": dip["id"],
-                "data_inizio": b.strftime("%Y-%m-%d"), "data_fine": c.strftime("%Y-%m-%d"),
-                "importo_settimanale": round(g, 2), **calc,
+                "data_inizio": b.strftime("%Y-%m-%d"),
+                # L'ultima riga (la più recente) diventa il periodo APERTO: la data di fine
+                # scritta nel file è solo "quando è stato esportato", non una vera chiusura —
+                # da qui in avanti il sistema la tiene aggiornata da sola fino ad oggi.
+                "data_fine": None if e_ultimo else c.strftime("%Y-%m-%d"),
+                "importo_settimanale": round(g, 2),
+                "chiuso_automaticamente": False,
                 "fonte": "excel_calcolo_ferie_tfr", "created_at": datetime.now(timezone.utc).isoformat(),
             }
+            if not e_ultimo:
+                periodo.update(_calcola_periodo_tfr(b, c, g))
             await db.tfr_simulazione_periodi.insert_one(periodo)
             inseriti += 1
 
