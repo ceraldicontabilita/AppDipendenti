@@ -3084,6 +3084,39 @@ function TfrPage({ dipendenti, getDipendente }) {
   // matita (✎) su ogni riga, non un azzeramento.
   const ricalcolaSimulazione = async () => { await carica(dipId); };
 
+  // Modifica diretta in tabella (importo settimanale): salva su Invio o
+  // quando esci dalla cella, poi ricarica per ricalcolare tutto.
+  const salvaCella = async (periodoId, campo, valore, valorePrecedente) => {
+    const v = Number(valore);
+    if (valore === "" || isNaN(v) || v === Number(valorePrecedente)) return;
+    setErrore("");
+    try {
+      await axios.put(`${API_TFR}/simulazione/${dipId}/periodi/${periodoId}`, { [campo]: v });
+      await carica(dipId);
+    } catch (e) { setErrore(e?.response?.data?.detail || "Errore nel salvataggio"); }
+  };
+  const cellaInput = { border: "1px solid #d1d5db", borderRadius: 6, padding: "3px 6px", fontSize: 13.5, width: 84, textAlign: "right", boxSizing: "border-box" };
+
+  // Parametri di calcolo globali (divisore 12/13,5 e % IRPEF), modificabili qui.
+  const [parametri, setParametri] = useState({ divisore: "12", irpef_percento: "23" });
+  const [salvandoParametri, setSalvandoParametri] = useState(false);
+  useEffect(() => {
+    axios.get(`${API_TFR}/simulazione-parametri`)
+      .then(r => setParametri({ divisore: String(r.data.divisore), irpef_percento: String(r.data.irpef_percento) }))
+      .catch(() => {});
+  }, []);
+  const salvaParametri = async () => {
+    setSalvandoParametri(true); setErrore("");
+    try {
+      await axios.put(`${API_TFR}/simulazione-parametri`, {
+        divisore: Number(parametri.divisore),
+        irpef_percento: Number(parametri.irpef_percento),
+      });
+      await carica(dipId);
+    } catch (e) { setErrore(e?.response?.data?.detail || "Errore nel salvataggio dei parametri"); }
+    finally { setSalvandoParametri(false); }
+  };
+
   const calcolaRate = async () => {
     try {
       const r = await axios.post(`${API_TFR}/simulazione/${dipId}/rate`, {
@@ -3128,12 +3161,38 @@ function TfrPage({ dipendenti, getDipendente }) {
           )}
 
           <div className="dc-card" style={{ marginBottom: 16 }}>
+            <h3 style={{ marginTop: 0 }}>⚙️ Parametri di calcolo</h3>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
+              Valgono per tutti i dipendenti e ricalcolano subito tutto lo storico. Divisore 12: 11.440 ÷ 12 =
+              953,33 · divisore 13,5: 11.440 ÷ 13,5 = 847,41.
+            </p>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Divisore</label>
+                <select className="dc-select" value={parametri.divisore}
+                  onChange={e => setParametri(pr => ({ ...pr, divisore: e.target.value }))}>
+                  <option value="12">12 (mensilità)</option>
+                  <option value="13.5">13,5 (art. 2120 c.c.)</option>
+                </select>
+              </div>
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>% IRPEF</label>
+                <input type="number" step="0.01" style={{ ...inp, width: 100 }} value={parametri.irpef_percento}
+                  onChange={e => setParametri(pr => ({ ...pr, irpef_percento: e.target.value }))} />
+              </div>
+              <button className="dc-btn dc-btn-primary" disabled={salvandoParametri} onClick={salvaParametri}>
+                {salvandoParametri ? "Salvo…" : "Salva e ricalcola"}
+              </button>
+            </div>
+          </div>
+
+          <div className="dc-card" style={{ marginBottom: 16 }}>
             <h3 style={{ marginTop: 0 }}>Simulazione storica TFR</h3>
             <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
-              Formula: importo settimanale × settimane = retribuzione utile (es. 250 € × 52 = 13.000) → ÷ 13,5 =
-              quota lorda (962,96) → meno lo 0,50% INPS sulla retribuzione utile (65,00) = accantonamento netto
-              (897,96). L'ultimo periodo è sempre "in corso" e matura fino ad oggi da solo. Non modifica il TFR
-              ufficiale qui sopra.
+              Formula: importo settimanale × settimane = retribuzione utile → ÷ divisore = quota lorda → meno
+              INPS 0,50% sulla retribuzione utile → meno IRPEF {parametri.irpef_percento}% sul lordo = netto.
+              L'ultimo periodo è sempre "in corso" e matura fino ad oggi da solo. Non modifica il TFR ufficiale
+              qui sopra.
             </p>
 
             {sim?.paga_attuale != null && (
@@ -3145,14 +3204,17 @@ function TfrPage({ dipendenti, getDipendente }) {
 
             {sim?.periodi?.length > 0 && (
               <div style={{ overflowX: "auto", marginBottom: 14 }}>
-                <table className="dc-table" style={{ minWidth: 640, whiteSpace: "nowrap" }}>
+                <table className="dc-table" style={{ minWidth: 860, whiteSpace: "nowrap" }}>
                   <thead>
                     <tr>
-                      <th>Dal</th><th>Al</th><th style={{ textAlign: "right" }}>€/sett.</th>
+                      <th>Dal</th><th>Al</th>
+                      <th style={{ textAlign: "right" }}>€/sett.</th>
                       <th style={{ textAlign: "right" }}>Settimane</th>
+                      <th style={{ textAlign: "right" }}>Mensile €</th>
                       <th style={{ textAlign: "right" }}>Retrib. utile €</th>
                       <th style={{ textAlign: "right" }}>Lordo €</th>
                       <th style={{ textAlign: "right" }}>INPS 0,50% €</th>
+                      <th style={{ textAlign: "right" }}>IRPEF {parametri.irpef_percento}% €</th>
                       <th style={{ textAlign: "right" }}>Netto €</th><th></th>
                     </tr>
                   </thead>
@@ -3161,14 +3223,22 @@ function TfrPage({ dipendenti, getDipendente }) {
                       <tr key={p.id}>
                         <td>{formatDate(p.data_inizio)}</td>
                         <td>{p.aperto ? <span style={{ color: "#3d8168", fontWeight: 700 }}>in corso</span> : formatDate(p.data_fine)}</td>
-                        <td style={{ textAlign: "right" }}>{eur(p.importo_settimanale)}</td>
+                        <td style={{ textAlign: "right" }}>
+                          <input type="number" step="0.01" style={cellaInput} key={`s-${p.id}-${p.importo_settimanale}`}
+                            defaultValue={p.importo_settimanale}
+                            title="Modifica e premi Invio (o esci dalla casella) per salvare"
+                            onBlur={e => salvaCella(p.id, "importo_settimanale", e.target.value, p.importo_settimanale)}
+                            onKeyDown={e => e.key === "Enter" && e.target.blur()} />
+                        </td>
                         <td style={{ textAlign: "right" }}>{p.settimane}</td>
+                        <td style={{ textAlign: "right" }}>{eur(p.mensile)}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.retribuzione_utile)}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.lordo)}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.inps)}</td>
+                        <td style={{ textAlign: "right" }}>{eur(p.imposte)}</td>
                         <td style={{ textAlign: "right", fontWeight: 700 }}>{eur(p.netto)}</td>
                         <td style={{ display: "flex", gap: 4 }}>
-                          <button className="dc-btn" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => apriModificaPeriodo(p)} title="Correggi importo o date">✎</button>
+                          <button className="dc-btn" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => apriModificaPeriodo(p)} title="Correggi le date">✎</button>
                           {i === sim.periodi.length - 1 && (
                             <button className="dc-btn" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => eliminaUltimoPeriodo(p.id)}>✕</button>
                           )}
@@ -3176,9 +3246,10 @@ function TfrPage({ dipendenti, getDipendente }) {
                       </tr>
                     ))}
                     <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4" }}>
-                      <td colSpan={5}>Totale (incluso il periodo in corso, ad oggi)</td>
+                      <td colSpan={6}>Totale (incluso il periodo in corso, ad oggi)</td>
                       <td style={{ textAlign: "right" }}>{eur(sim.totale_lordo)}</td>
                       <td style={{ textAlign: "right" }}>{eur(sim.totale_inps)}</td>
+                      <td style={{ textAlign: "right" }}>{eur(sim.totale_imposte)}</td>
                       <td style={{ textAlign: "right" }}>{eur(sim.totale_netto)}</td>
                       <td></td>
                     </tr>
