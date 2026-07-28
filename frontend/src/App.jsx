@@ -3003,6 +3003,21 @@ function TfrPage({ dipendenti, getDipendente }) {
 
   const [liquidazione, setLiquidazione] = useState(null);
 
+  const [nlForm, setNlForm] = useState({ importo: "", settimane: "52", mesi: "12" });
+  const [nlEsito, setNlEsito] = useState(null);
+  const calcolaNetto = async () => {
+    if (!nlForm.importo || !nlForm.settimane || !nlForm.mesi) return;
+    setNlEsito(null);
+    try {
+      const r = await axios.post(`${API_TFR}/calcolo-netto-da-lordo`, {
+        importo_settimanale_lordo: Number(nlForm.importo),
+        settimane_lavorate: Number(nlForm.settimane),
+        mesi_lavorati: Number(nlForm.mesi),
+      });
+      setNlEsito(r.data);
+    } catch (e) { setNlEsito({ errore: e?.response?.data?.detail || "Errore nel calcolo" }); }
+  };
+
   const carica = useCallback(async (id) => {
     if (!id) return;
     setLoading(true); setErrore(""); setRate(null);
@@ -3322,6 +3337,44 @@ function TfrPage({ dipendenti, getDipendente }) {
               )}
             </div>
           )}
+
+          <div className="dc-card" style={{ marginTop: 16 }}>
+            <h3 style={{ marginTop: 0 }}>Calcolo netto da lordo (IRPEF 2026)</h3>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
+              Strumento separato dal simulatore: da un importo settimanale LORDO calcola il mensile lordo
+              (settimane × importo ÷ mesi), toglie INPS 9,19% e IRPEF a scaglioni 2026 (con detrazione lavoro
+              dipendente) e restituisce il netto da ricevere. Non include addizionali regionali/comunali né bonus.
+            </p>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>€/settimana (lordo)</label>
+                <input type="number" step="0.01" style={{ ...inp, width: 130 }} value={nlForm.importo}
+                  onChange={e => setNlForm(f => ({ ...f, importo: e.target.value }))} />
+              </div>
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Settimane lavorate</label>
+                <input type="number" step="0.01" style={{ ...inp, width: 120 }} value={nlForm.settimane}
+                  onChange={e => setNlForm(f => ({ ...f, settimane: e.target.value }))} />
+              </div>
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Mesi lavorati</label>
+                <input type="number" step="0.01" style={{ ...inp, width: 110 }} value={nlForm.mesi}
+                  onChange={e => setNlForm(f => ({ ...f, mesi: e.target.value }))} />
+              </div>
+              <button className="dc-btn dc-btn-primary" onClick={calcolaNetto}>Calcola netto</button>
+            </div>
+            {nlEsito && !nlEsito.errore && (
+              <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginTop: 14 }}>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>Lordo mensile medio</div><div style={{ fontWeight: 700, fontSize: 17 }}>€ {eur(nlEsito.lordo_mensile_medio)}</div></div>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>INPS (anno)</div><div style={{ fontWeight: 700, fontSize: 17 }}>€ {eur(nlEsito.contributi_inps)}</div></div>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>IRPEF netta (anno)</div><div style={{ fontWeight: 700, fontSize: 17 }}>€ {eur(nlEsito.irpef_netta)}</div></div>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>Aliquota media</div><div style={{ fontWeight: 700, fontSize: 17 }}>{nlEsito.aliquota_media_effettiva}%</div></div>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>Netto mensile da ricevere</div><div style={{ fontWeight: 700, fontSize: 20, color: "#3d8168" }}>€ {eur(nlEsito.netto_mensile)}</div></div>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>Netto del periodo</div><div style={{ fontWeight: 700, fontSize: 17 }}>€ {eur(nlEsito.netto_periodo)}</div></div>
+              </div>
+            )}
+            {nlEsito?.errore && <div style={{ color: "#d35f4e", fontWeight: 600, marginTop: 10 }}>⚠ {nlEsito.errore}</div>}
+          </div>
         </>
       )}
 

@@ -1672,9 +1672,10 @@ async def get_storico_tfr(dipendente_id: str) -> Dict[str, Any]:
 #   apre il nuovo, sempre aperto. L'import da Excel (una tantum, per tutti i
 #   dipendenti insieme) fa lo stesso: l'ultima riga di ciascun foglio diventa il
 #   periodo aperto, ignorando la data di fine eventualmente scritta nel file.
-# Ogni periodo si calcola con la formula di legge (art. 2120 c.c.:
-# retribuzione annua / 13,5, riproporzionata sui giorni del periodo) — non con
-# l'approssimazione "una mensilità" usata nel vecchio foglio Excel.
+# Formula (concordata col titolare): l'importo settimanale registrato è NETTO;
+# TFR = importo_settimanale_netto × settimane intere lavorate / 13,5 (art. 2120
+# c.c., 52 settimane per l'anno pieno); 13ª/14ª = importo × settimane del ciclo
+# di competenza / 12. Nessuna tassazione aggiuntiva: il risultato è già netto.
 # È un sandbox separato da 'dipendenti.tfr_accantonato' (quello alimentato in
 # automatico dai cedolini): la simulazione non lo tocca, per non mescolare un
 # dato storico ancora da verificare con quello già vivo in produzione.
@@ -1701,12 +1702,14 @@ def _oggi_tfr() -> datetime:
     return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
 
 
-def _settimane_periodo(dal: datetime, al: datetime) -> float:
-    """Settimane effettivamente lavorate nel periodo [dal, al]: giorni del periodo / 7,
-    come frazione continua (non arrotondata a mese)."""
+def _settimane_periodo(dal: datetime, al: datetime) -> int:
+    """Settimane effettivamente lavorate nel periodo [dal, al], contate come SETTIMANE
+    INTERE (giorni/7 arrotondato): un anno intero conta 52 settimane esatte — non
+    52,14 — perché la regola concordata col titolare è 'settimane lavorate nell'anno
+    × importo settimanale', con 52 per l'anno pieno."""
     if al < dal:
-        return 0.0
-    return ((al - dal).days + 1) / 7
+        return 0
+    return round(((al - dal).days + 1) / 7)
 
 
 def _calcola_periodo_tfr(data_inizio: datetime, data_fine: datetime, importo_settimanale: float) -> Dict[str, Any]:
@@ -1720,8 +1723,8 @@ def _calcola_periodo_tfr(data_inizio: datetime, data_fine: datetime, importo_set
     settimane = _settimane_periodo(data_inizio, data_fine)
     netto = importo_settimanale * settimane / TFR_DIVISORE
     return {
-        "giorni": (data_fine - data_inizio).days + 1,
-        "settimane": round(settimane, 2),
+        "giorni": max(0, (data_fine - data_inizio).days + 1),
+        "settimane": settimane,
         "netto": round(netto, 2),
     }
 
@@ -1775,7 +1778,7 @@ def _quota_mensilita_aggiuntiva(periodi_grezzi: List[Dict[str, Any]], data_assun
     if fine_eff < inizio_eff:
         return {"netto": 0.0, "settimane": 0.0,
                 "dal": inizio_eff.strftime("%Y-%m-%d"), "al": fine_eff.strftime("%Y-%m-%d")}
-    tot, settimane_tot = 0.0, 0.0
+    tot, settimane_tot = 0.0, 0
     for p in periodi_grezzi:
         p_inizio = _parse_data_tfr(p["data_inizio"])
         p_fine = fino_a if not p.get("data_fine") else _parse_data_tfr(p["data_fine"])
@@ -1785,7 +1788,7 @@ def _quota_mensilita_aggiuntiva(periodi_grezzi: List[Dict[str, Any]], data_assun
         settimane = _settimane_periodo(oi, of)
         tot += p["importo_settimanale"] * settimane / 12
         settimane_tot += settimane
-    return {"netto": round(tot, 2), "settimane": round(settimane_tot, 2),
+    return {"netto": round(tot, 2), "settimane": settimane_tot,
             "dal": inizio_eff.strftime("%Y-%m-%d"), "al": fine_eff.strftime("%Y-%m-%d")}
 
 
@@ -2310,5 +2313,100 @@ async def importa_simulazione_da_excel(
         "fogli_abbinati": len([r for r in risultati if r.get("abbinato")]),
         "fogli_non_abbinati": len([r for r in risultati if not r.get("abbinato")]),
         "risultati": risultati,
+    }
+
+
+# ============================================
+# CALCOLO NETTO DA LORDO (stipendio mensile, IRPEF 2026)
+# ============================================
+# Strumento SEPARATO dal simulatore TFR sopra: lì l'importo settimanale è NETTO
+# (per calcolare il maturato TFR/13ª/14ª); qui invece si parte da un importo
+# settimanale LORDO per calcolare quanto arriva netto in busta, con le regole
+# fiscali italiane 2026 (INPS 9,19%, scaglioni IRPEF progressivi, detrazione
+# lavoro dipendente). Non tocca né legge nulla del simulatore TFR.
+#
+# Non include: addizionale regionale/comunale (variano per comune/regione) né
+# eventuali bonus (es. trattamento integrativo/cuneo fiscale per i redditi più
+# bassi) — per il netto esatto in busta paga, verifica con il commercialista.
+
+# Scaglioni IRPEF 2026 (soglia cumulativa, aliquota marginale in quella fascia)
+_SCAGLIONI_IRPEF_2026 = [(28000.0, 0.23), (50000.0, 0.33), (float("inf"), 0.43)]
+_ALIQUOTA_INPS_DIPENDENTE = 0.0919  # quota INPS a carico del lavoratore
+
+
+def _irpef_lorda(imponibile: float) -> float:
+    """IRPEF a scaglioni PROGRESSIVI (marginale): ogni fascia di reddito paga
+    la propria aliquota, non tutto il reddito all'aliquota più alta raggiunta."""
+    irpef, residuo, soglia_precedente = 0.0, imponibile, 0.0
+    for soglia, aliquota in _SCAGLIONI_IRPEF_2026:
+        fascia = min(residuo, soglia - soglia_precedente)
+        if fascia <= 0:
+            break
+        irpef += fascia * aliquota
+        residuo -= fascia
+        soglia_precedente = soglia
+    return irpef
+
+
+def _detrazione_lavoro_dipendente_2026(reddito: float) -> float:
+    """Detrazione lavoro dipendente 2026: piena (1.955€) fino a 15.000€ di
+    reddito, poi decrescente in due tratti fino ad azzerarsi a 50.000€."""
+    if reddito <= 15000:
+        return 1955.0
+    if reddito <= 28000:
+        return 1910 + 1190 * (28000 - reddito) / 13000
+    if reddito <= 50000:
+        return 1910 * (50000 - reddito) / 22000
+    return 0.0
+
+
+class CalcoloNettoInput(BaseModel):
+    importo_settimanale_lordo: float
+    settimane_lavorate: float
+    mesi_lavorati: float  # es. 12 per un anno intero, o i mesi effettivi del periodo
+
+
+@router.post("/calcolo-netto-da-lordo")
+@handle_errors
+async def calcolo_netto_da_lordo(input_data: CalcoloNettoInput) -> Dict[str, Any]:
+    """Da un importo settimanale LORDO: calcola la media mensile lorda del periodo
+    (settimane_lavorate × importo_settimanale_lordo / mesi_lavorati), la annualizza
+    (×12) per determinare correttamente gli scaglioni IRPEF e la detrazione lavoro
+    dipendente, poi applica la stessa aliquota media alla mensilità per ottenere il
+    netto mensile. Formula INPS 9,19% + IRPEF 2026 (23/33/43%) + detrazione lavoro
+    dipendente 2026 — non include addizionali regionali/comunali né bonus."""
+    if input_data.importo_settimanale_lordo <= 0:
+        raise HTTPException(status_code=400, detail="L'importo settimanale lordo deve essere positivo")
+    if input_data.settimane_lavorate <= 0:
+        raise HTTPException(status_code=400, detail="Le settimane lavorate devono essere positive")
+    if input_data.mesi_lavorati <= 0:
+        raise HTTPException(status_code=400, detail="I mesi lavorati devono essere positivi")
+
+    lordo_periodo = input_data.importo_settimanale_lordo * input_data.settimane_lavorate
+    lordo_mensile_medio = lordo_periodo / input_data.mesi_lavorati
+    ral_equivalente = lordo_mensile_medio * 12
+
+    contributi_inps = ral_equivalente * _ALIQUOTA_INPS_DIPENDENTE
+    imponibile_fiscale = ral_equivalente - contributi_inps
+    irpef_lorda = _irpef_lorda(imponibile_fiscale)
+    detrazione = _detrazione_lavoro_dipendente_2026(imponibile_fiscale)
+    irpef_netta = max(0.0, irpef_lorda - detrazione)
+
+    netto_annuo_equivalente = ral_equivalente - contributi_inps - irpef_netta
+    aliquota_media_effettiva = (contributi_inps + irpef_netta) / ral_equivalente if ral_equivalente else 0.0
+    netto_mensile = lordo_mensile_medio * (1 - aliquota_media_effettiva)
+
+    return {
+        "lordo_periodo": round(lordo_periodo, 2),
+        "lordo_mensile_medio": round(lordo_mensile_medio, 2),
+        "ral_equivalente_annua": round(ral_equivalente, 2),
+        "contributi_inps": round(contributi_inps, 2),
+        "imponibile_fiscale": round(imponibile_fiscale, 2),
+        "irpef_lorda": round(irpef_lorda, 2),
+        "detrazione_lavoro_dipendente": round(detrazione, 2),
+        "irpef_netta": round(irpef_netta, 2),
+        "aliquota_media_effettiva": round(aliquota_media_effettiva * 100, 2),
+        "netto_mensile": round(netto_mensile, 2),
+        "netto_periodo": round(netto_mensile * input_data.mesi_lavorati, 2),
     }
 
