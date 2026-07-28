@@ -3188,10 +3188,9 @@ function TfrPage({ dipendenti, getDipendente }) {
                 <table className="dc-table" style={{ minWidth: 640, whiteSpace: "nowrap" }}>
                   <thead>
                     <tr>
-                      <th>Dal</th><th>Al</th><th style={{ textAlign: "right" }}>€/sett.</th>
+                      <th>Dal</th><th>Al</th><th style={{ textAlign: "right" }}>€/sett. (netto)</th>
                       <th style={{ textAlign: "right" }}>Settimane</th>
-                      <th style={{ textAlign: "right" }}>Lordo €</th><th style={{ textAlign: "right" }}>Tassaz. €</th>
-                      <th style={{ textAlign: "right" }}>Netto €</th><th></th>
+                      <th style={{ textAlign: "right" }}>Maturato netto €</th><th></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3201,8 +3200,6 @@ function TfrPage({ dipendenti, getDipendente }) {
                         <td>{p.aperto ? <span style={{ color: "#3d8168", fontWeight: 700 }}>in corso</span> : formatDate(p.data_fine)}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.importo_settimanale)}</td>
                         <td style={{ textAlign: "right" }}>{p.settimane}</td>
-                        <td style={{ textAlign: "right" }}>{eur(p.lordo)}</td>
-                        <td style={{ textAlign: "right" }}>{eur(p.tassazione)}</td>
                         <td style={{ textAlign: "right", fontWeight: 700 }}>{eur(p.netto)}</td>
                         <td style={{ display: "flex", gap: 4 }}>
                           <button className="dc-btn" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => apriModificaPeriodo(p)} title="Correggi importo o date">✎</button>
@@ -3214,8 +3211,6 @@ function TfrPage({ dipendenti, getDipendente }) {
                     ))}
                     <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4" }}>
                       <td colSpan={4}>Totale (incluso il periodo in corso, ad oggi)</td>
-                      <td style={{ textAlign: "right" }}>{eur(sim.totale_lordo)}</td>
-                      <td style={{ textAlign: "right" }}>{eur(sim.totale_tassazione)}</td>
                       <td style={{ textAlign: "right" }}>{eur(sim.totale_netto)}</td>
                       <td></td>
                     </tr>
@@ -3264,18 +3259,18 @@ function TfrPage({ dipendenti, getDipendente }) {
                 {liquidazione.cessato
                   ? `Calcolata fino alla data di cessazione (${formatDate(liquidazione.data_cessazione)}): il rapporto non matura più nulla dopo.`
                   : `Il dipendente è ancora in forza: questa è una simulazione "se finisse oggi" (${formatDate(liquidazione.calcolato_fino_a)}).`}
-                {" "}Tredicesima e quattordicesima sono al lordo: la tassazione ordinaria dipende dal reddito
-                annuo complessivo e non è approssimabile con un'aliquota fissa come per il TFR.
+                {" "}L'importo settimanale inserito nel simulatore è già netto, quindi anche tredicesima e
+                quattordicesima qui sotto sono già il maturato netto.
               </p>
               <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
                 <div>
-                  <div className="dc-muted" style={{ fontSize: 12.5 }}>Tredicesima maturata (lordo)</div>
-                  <div style={{ fontWeight: 700, fontSize: 18 }}>€ {eur(liquidazione.tredicesima.lordo)}</div>
+                  <div className="dc-muted" style={{ fontSize: 12.5 }}>Tredicesima maturata (netto)</div>
+                  <div style={{ fontWeight: 700, fontSize: 18 }}>€ {eur(liquidazione.tredicesima.netto)}</div>
                   <div className="dc-muted" style={{ fontSize: 11.5 }}>{formatDate(liquidazione.tredicesima.dal)} → {formatDate(liquidazione.tredicesima.al)}</div>
                 </div>
                 <div>
-                  <div className="dc-muted" style={{ fontSize: 12.5 }}>Quattordicesima maturata (lordo)</div>
-                  <div style={{ fontWeight: 700, fontSize: 18 }}>€ {eur(liquidazione.quattordicesima.lordo)}</div>
+                  <div className="dc-muted" style={{ fontSize: 12.5 }}>Quattordicesima maturata (netto)</div>
+                  <div style={{ fontWeight: 700, fontSize: 18 }}>€ {eur(liquidazione.quattordicesima.netto)}</div>
                   <div className="dc-muted" style={{ fontSize: 11.5 }}>{formatDate(liquidazione.quattordicesima.dal)} → {formatDate(liquidazione.quattordicesima.al)}</div>
                 </div>
                 <div>

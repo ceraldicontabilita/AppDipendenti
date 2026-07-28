@@ -1711,20 +1711,17 @@ def _settimane_periodo(dal: datetime, al: datetime) -> float:
 
 def _calcola_periodo_tfr(data_inizio: datetime, data_fine: datetime, importo_settimanale: float) -> Dict[str, Any]:
     """Quota TFR del periodo: paga settimanale moltiplicata per il NUMERO DI SETTIMANE
-    effettivamente lavorate nel periodo, diviso 13,5 (art. 2120 c.c.) — non si passa
-    da una retribuzione annua né da mesi: si lavora direttamente in settimane, perché
-    la paga di riferimento è settimanale. Per un anno intero (52 settimane) equivale
-    esattamente alla retribuzione annua/13,5. Tassazione approssimata con la stessa
-    aliquota usata per le liquidazioni (ALIQUOTA_TFR)."""
+    effettivamente lavorate nel periodo (52 se ha lavorato tutto l'anno), diviso 13,5
+    (art. 2120 c.c.) — non si passa da una retribuzione annua né da mesi: si lavora
+    direttamente in settimane, perché la paga di riferimento è settimanale.
+    L'importo settimanale inserito è già NETTO (quello che il dipendente percepisce
+    davvero): il risultato è quindi già il maturato netto, senza nessuna tassazione
+    da sottrarre sopra — non si parte da un lordo fittizio."""
     settimane = _settimane_periodo(data_inizio, data_fine)
-    lordo = importo_settimanale * settimane / TFR_DIVISORE
-    tassazione = lordo * ALIQUOTA_TFR / 100
-    netto = lordo - tassazione
+    netto = importo_settimanale * settimane / TFR_DIVISORE
     return {
         "giorni": (data_fine - data_inizio).days + 1,
         "settimane": round(settimane, 2),
-        "lordo": round(lordo, 2),
-        "tassazione": round(tassazione, 2),
         "netto": round(netto, 2),
     }
 
@@ -1770,13 +1767,13 @@ def _quota_mensilita_aggiuntiva(periodi_grezzi: List[Dict[str, Any]], data_assun
                                 inizio_competenza: datetime, fine_competenza: datetime,
                                 fino_a: datetime) -> Dict[str, Any]:
     """Rateo di tredicesima/quattordicesima maturato nel ciclo di competenza indicato:
-    paga settimanale moltiplicata per il numero di settimane lavorate in quel ciclo,
-    diviso 12 (un dodicesimo di mensilità aggiuntiva per ogni settimana/12 d'anno
-    lavorata) — stessa logica diretta in settimane del TFR, senza passare da mesi."""
+    paga settimanale (già netta) moltiplicata per il numero di settimane lavorate in
+    quel ciclo, diviso 12 — stessa logica diretta in settimane del TFR, senza passare
+    da mesi né da un lordo fittizio: il risultato è già il netto maturato."""
     inizio_eff = max(inizio_competenza, data_assunzione) if data_assunzione else inizio_competenza
     fine_eff = min(fine_competenza, fino_a)
     if fine_eff < inizio_eff:
-        return {"lordo": 0.0, "settimane": 0.0,
+        return {"netto": 0.0, "settimane": 0.0,
                 "dal": inizio_eff.strftime("%Y-%m-%d"), "al": fine_eff.strftime("%Y-%m-%d")}
     tot, settimane_tot = 0.0, 0.0
     for p in periodi_grezzi:
@@ -1788,7 +1785,7 @@ def _quota_mensilita_aggiuntiva(periodi_grezzi: List[Dict[str, Any]], data_assun
         settimane = _settimane_periodo(oi, of)
         tot += p["importo_settimanale"] * settimane / 12
         settimane_tot += settimane
-    return {"lordo": round(tot, 2), "settimane": round(settimane_tot, 2),
+    return {"netto": round(tot, 2), "settimane": round(settimane_tot, 2),
             "dal": inizio_eff.strftime("%Y-%m-%d"), "al": fine_eff.strftime("%Y-%m-%d")}
 
 
@@ -1822,8 +1819,6 @@ async def get_simulazione_tfr(dipendente_id: str) -> Dict[str, Any]:
         "dipendente_id": dipendente_id,
         "dipendente_nome": dipendente.get("nome_completo", ""),
         "periodi": periodi,
-        "totale_lordo": round(sum(p["lordo"] for p in periodi), 2),
-        "totale_tassazione": round(sum(p["tassazione"] for p in periodi), 2),
         "totale_netto": round(sum(p["netto"] for p in periodi), 2),
         "prossimo_data_inizio": prossimo_inizio,
         "paga_attuale": periodo_aperto["importo_settimanale"] if periodo_aperto else None,
@@ -1980,7 +1975,7 @@ async def modifica_periodo_simulazione(dipendente_id: str, periodo_id: str,
         aggiornamento["data_fine"] = nuova_fine_str
         aggiornamento.update(_calcola_periodo_tfr(nuova_inizio, nuova_fine, nuovo_importo))
     else:
-        update_op["$unset"] = {"giorni": "", "settimane": "", "lordo": "", "tassazione": "", "netto": ""}
+        update_op["$unset"] = {"giorni": "", "settimane": "", "netto": ""}
 
     await db["tfr_simulazione_periodi"].update_one({"id": periodo_id}, update_op)
 
@@ -2014,7 +2009,7 @@ async def elimina_periodo_simulazione(dipendente_id: str, periodo_id: str) -> Di
             await db["tfr_simulazione_periodi"].update_one(
                 {"id": precedente["id"]},
                 {"$set": {"data_fine": None, "chiuso_automaticamente": False},
-                 "$unset": {"giorni": "", "settimane": "", "lordo": "", "tassazione": "", "netto": ""}})
+                 "$unset": {"giorni": "", "settimane": "", "netto": ""}})
 
     return {"success": True, "messaggio": "Periodo eliminato"}
 
@@ -2067,10 +2062,10 @@ async def liquidazione_finale_simulazione(dipendente_id: str) -> Dict[str, Any]:
     per la 13ª, 1° luglio-30 giugno per la 14ª) e controvalore delle ferie residue.
     Se il dipendente è cessato, tutto si ferma alla data di cessazione anziché a oggi
     — stessa logica del periodo aperto che si chiude su un aumento.
-    Tredicesima e quattordicesima sono mostrate solo LORDE: la tassazione è quella
-    ordinaria IRPEF (dipende dal reddito annuo complessivo), non approssimabile con
-    un'aliquota fissa come per il TFR. Le ferie residue riusano il dato già tracciato
-    dall'app dai cedolini (dipendenti.ferie_residue), non un calcolo parallelo."""
+    L'importo settimanale inserito nel simulatore è già netto, quindi tredicesima e
+    quattordicesima qui calcolate sono già il maturato netto (nessuna tassazione da
+    sottrarre). Le ferie residue riusano il dato già tracciato dall'app dai cedolini
+    (dipendenti.ferie_residue), non un calcolo parallelo."""
     db = Database.get_db()
     dipendente = await db["dipendenti"].find_one({"id": dipendente_id}, {"_id": 0})
     if not dipendente:
