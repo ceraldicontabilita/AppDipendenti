@@ -100,7 +100,10 @@ async def riconcilia_tutti_stipendi(db, anno: int = None, mese: int = None) -> d
     Riconcilia tutti gli stipendi DA_PAGARE con i movimenti bancari.
     Chiamato automaticamente dopo import estratto conto.
     """
-    query = {"stato_pagamento": "DA_PAGARE", "netto_mese": {"$gt": 0}}
+    # netto_mese >= 50: sotto quella soglia è quasi certo un valore mal estratto dal
+    # parser PDF (pagina, aliquota, trattenuta isolata) e non un vero netto in busta —
+    # va corretto a monte, non riconciliato con la banca.
+    query = {"stato_pagamento": "DA_PAGARE", "netto_mese": {"$gte": 50}}
     if anno and mese:
         query["periodo"] = f"{anno:04d}-{mese:02d}"
     

@@ -7,7 +7,6 @@ from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone, timedelta, date
 from uuid import uuid4
-import calendar
 import logging
 import os
 from pathlib import Path
@@ -1702,49 +1701,28 @@ def _oggi_tfr() -> datetime:
     return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
 
 
-def _fine_mese_tfr(anno: int, mese: int) -> datetime:
-    ultimo_giorno = calendar.monthrange(anno, mese)[1]
-    return datetime(anno, mese, ultimo_giorno)
-
-
-def _mese_successivo_tfr(anno: int, mese: int):
-    return (anno + 1, 1) if mese == 12 else (anno, mese + 1)
-
-
-def _mesi_interi_periodo(dal: datetime, al: datetime) -> int:
-    """Conta i mesi di calendario compresi in [dal, al] con la 'regola dei 15 giorni'
-    (art. 2120 c.c. e prassi payroll standard, usata per TFR, tredicesima e
-    quattordicesima): un mese conta per intero se il periodo copre almeno 15 dei suoi
-    giorni di calendario, altrimenti non conta affatto. NON è una frazione continua
-    (giorni/365)."""
+def _settimane_periodo(dal: datetime, al: datetime) -> float:
+    """Settimane effettivamente lavorate nel periodo [dal, al]: giorni del periodo / 7,
+    come frazione continua (non arrotondata a mese)."""
     if al < dal:
-        return 0
-    mesi = 0
-    anno, mese = dal.year, dal.month
-    while datetime(anno, mese, 1) <= al:
-        mese_inizio = max(datetime(anno, mese, 1), dal)
-        mese_fine = min(_fine_mese_tfr(anno, mese), al)
-        if mese_fine >= mese_inizio and (mese_fine - mese_inizio).days + 1 >= 15:
-            mesi += 1
-        anno, mese = _mese_successivo_tfr(anno, mese)
-    return mesi
+        return 0.0
+    return ((al - dal).days + 1) / 7
 
 
 def _calcola_periodo_tfr(data_inizio: datetime, data_fine: datetime, importo_settimanale: float) -> Dict[str, Any]:
-    """Quota TFR del periodo = retribuzione annua equivalente / 13,5, riproporzionata
-    sui mesi interi coperti dal periodo (regola dei 15 giorni: le frazioni di mese
-    pari o superiori a 15 giorni contano come mese intero, altrimenti non contano —
-    NON è una frazione continua di giorni/365). Tassazione approssimata con la stessa
+    """Quota TFR del periodo: paga settimanale moltiplicata per il NUMERO DI SETTIMANE
+    effettivamente lavorate nel periodo, diviso 13,5 (art. 2120 c.c.) — non si passa
+    da una retribuzione annua né da mesi: si lavora direttamente in settimane, perché
+    la paga di riferimento è settimanale. Per un anno intero (52 settimane) equivale
+    esattamente alla retribuzione annua/13,5. Tassazione approssimata con la stessa
     aliquota usata per le liquidazioni (ALIQUOTA_TFR)."""
-    mesi = _mesi_interi_periodo(data_inizio, data_fine)
-    retribuzione_annua = importo_settimanale * 52
-    lordo = retribuzione_annua / TFR_DIVISORE * (mesi / 12)
+    settimane = _settimane_periodo(data_inizio, data_fine)
+    lordo = importo_settimanale * settimane / TFR_DIVISORE
     tassazione = lordo * ALIQUOTA_TFR / 100
     netto = lordo - tassazione
     return {
         "giorni": (data_fine - data_inizio).days + 1,
-        "mesi": mesi,
-        "retribuzione_annua_equivalente": round(retribuzione_annua, 2),
+        "settimane": round(settimane, 2),
         "lordo": round(lordo, 2),
         "tassazione": round(tassazione, 2),
         "netto": round(netto, 2),
@@ -1792,26 +1770,25 @@ def _quota_mensilita_aggiuntiva(periodi_grezzi: List[Dict[str, Any]], data_assun
                                 inizio_competenza: datetime, fine_competenza: datetime,
                                 fino_a: datetime) -> Dict[str, Any]:
     """Rateo di tredicesima/quattordicesima maturato nel ciclo di competenza indicato:
-    1/12 della retribuzione mensile equivalente per ogni mese intero lavorato in quel
-    ciclo (regola dei 15 giorni, come il TFR — non una frazione continua di giorni),
-    usando per ogni mese la paga settimanale in vigore nel periodo del simulatore che
-    lo copre."""
+    paga settimanale moltiplicata per il numero di settimane lavorate in quel ciclo,
+    diviso 12 (un dodicesimo di mensilità aggiuntiva per ogni settimana/12 d'anno
+    lavorata) — stessa logica diretta in settimane del TFR, senza passare da mesi."""
     inizio_eff = max(inizio_competenza, data_assunzione) if data_assunzione else inizio_competenza
     fine_eff = min(fine_competenza, fino_a)
     if fine_eff < inizio_eff:
-        return {"lordo": 0.0, "mesi_interi": 0,
+        return {"lordo": 0.0, "settimane": 0.0,
                 "dal": inizio_eff.strftime("%Y-%m-%d"), "al": fine_eff.strftime("%Y-%m-%d")}
-    tot, mesi_tot = 0.0, 0
+    tot, settimane_tot = 0.0, 0.0
     for p in periodi_grezzi:
         p_inizio = _parse_data_tfr(p["data_inizio"])
         p_fine = fino_a if not p.get("data_fine") else _parse_data_tfr(p["data_fine"])
         oi, of = max(p_inizio, inizio_eff), min(p_fine, fine_eff)
         if of < oi:
             continue
-        mesi = _mesi_interi_periodo(oi, of)
-        tot += p["importo_settimanale"] * 52 / 12 * (mesi / 12)
-        mesi_tot += mesi
-    return {"lordo": round(tot, 2), "mesi_interi": mesi_tot,
+        settimane = _settimane_periodo(oi, of)
+        tot += p["importo_settimanale"] * settimane / 12
+        settimane_tot += settimane
+    return {"lordo": round(tot, 2), "settimane": round(settimane_tot, 2),
             "dal": inizio_eff.strftime("%Y-%m-%d"), "al": fine_eff.strftime("%Y-%m-%d")}
 
 
@@ -1942,6 +1919,76 @@ async def aggiungi_periodo_simulazione(dipendente_id: str, input_data: PeriodoSi
     return {"success": True, "periodo": _periodo_con_calcolo_live(periodo)}
 
 
+class ModificaPeriodoInput(BaseModel):
+    importo_settimanale: Optional[float] = None
+    data_inizio: Optional[str] = None
+    data_fine: Optional[str] = None  # ha effetto solo se il periodo era già chiuso
+
+
+@router.put("/simulazione/{dipendente_id}/periodi/{periodo_id}")
+@handle_errors
+async def modifica_periodo_simulazione(dipendente_id: str, periodo_id: str,
+                                       input_data: ModificaPeriodoInput) -> Dict[str, Any]:
+    """Corregge un periodo esistente — QUALSIASI, non solo l'ultimo — utile se hai
+    sbagliato l'importo settimanale o una data. Ricalcola solo quel periodo, senza
+    toccare gli altri. Non cambia se il periodo è aperto o chiuso: se era aperto
+    resta aperto (torna a maturare al volo), se era chiuso puoi correggerne anche la
+    data di fine. Controlla che non si sovrapponga ai periodi immediatamente
+    precedente/successivo."""
+    db = Database.get_db()
+    tutti = await db["tfr_simulazione_periodi"].find(
+        {"dipendente_id": dipendente_id}, {"_id": 0}).sort("data_inizio", 1).to_list(500)
+    idx = next((i for i, p in enumerate(tutti) if p["id"] == periodo_id), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail="Periodo non trovato")
+    periodo = tutti[idx]
+    era_aperto = not periodo.get("data_fine")
+
+    nuovo_importo = (input_data.importo_settimanale if input_data.importo_settimanale is not None
+                     else periodo["importo_settimanale"])
+    if nuovo_importo <= 0:
+        raise HTTPException(status_code=400, detail="L'importo settimanale deve essere positivo")
+
+    nuova_inizio_str = input_data.data_inizio[:10] if input_data.data_inizio else periodo["data_inizio"]
+    nuova_fine_str = periodo.get("data_fine")
+    if not era_aperto and input_data.data_fine:
+        nuova_fine_str = input_data.data_fine[:10]
+
+    try:
+        nuova_inizio = _parse_data_tfr(nuova_inizio_str)
+        nuova_fine = _parse_data_tfr(nuova_fine_str) if nuova_fine_str else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Date non valide, usa il formato YYYY-MM-DD")
+
+    if nuova_fine and nuova_fine <= nuova_inizio:
+        raise HTTPException(status_code=400, detail="La data di fine deve essere successiva alla data di inizio")
+
+    if idx > 0:
+        prec_fine = tutti[idx - 1].get("data_fine")
+        if prec_fine and nuova_inizio <= _parse_data_tfr(prec_fine):
+            raise HTTPException(status_code=400,
+                                detail=f"Si sovrapporrebbe al periodo precedente (finisce il {prec_fine})")
+    if idx < len(tutti) - 1:
+        succ_inizio_str = tutti[idx + 1]["data_inizio"]
+        if nuova_fine and nuova_fine >= _parse_data_tfr(succ_inizio_str):
+            raise HTTPException(status_code=400,
+                                detail=f"Si sovrapporrebbe al periodo successivo (inizia il {succ_inizio_str})")
+
+    aggiornamento: Dict[str, Any] = {"data_inizio": nuova_inizio_str, "importo_settimanale": round(nuovo_importo, 2)}
+    update_op: Dict[str, Any] = {"$set": aggiornamento}
+    if nuova_fine:
+        aggiornamento["data_fine"] = nuova_fine_str
+        aggiornamento.update(_calcola_periodo_tfr(nuova_inizio, nuova_fine, nuovo_importo))
+    else:
+        update_op["$unset"] = {"giorni": "", "settimane": "", "lordo": "", "tassazione": "", "netto": ""}
+
+    await db["tfr_simulazione_periodi"].update_one({"id": periodo_id}, update_op)
+
+    dipendente = await db["dipendenti"].find_one({"id": dipendente_id}, {"_id": 0}) or {}
+    aggiornato = await db["tfr_simulazione_periodi"].find_one({"id": periodo_id}, {"_id": 0})
+    return {"success": True, "periodo": _periodo_con_calcolo_live(aggiornato, _fino_a_calcolo(dipendente))}
+
+
 @router.delete("/simulazione/{dipendente_id}/periodi/{periodo_id}")
 @handle_errors
 async def elimina_periodo_simulazione(dipendente_id: str, periodo_id: str) -> Dict[str, Any]:
@@ -1967,8 +2014,7 @@ async def elimina_periodo_simulazione(dipendente_id: str, periodo_id: str) -> Di
             await db["tfr_simulazione_periodi"].update_one(
                 {"id": precedente["id"]},
                 {"$set": {"data_fine": None, "chiuso_automaticamente": False},
-                 "$unset": {"giorni": "", "mesi": "", "retribuzione_annua_equivalente": "",
-                            "lordo": "", "tassazione": "", "netto": ""}})
+                 "$unset": {"giorni": "", "settimane": "", "lordo": "", "tassazione": "", "netto": ""}})
 
     return {"success": True, "messaggio": "Periodo eliminato"}
 

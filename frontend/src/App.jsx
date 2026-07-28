@@ -2981,6 +2981,27 @@ function TfrPage({ dipendenti, getDipendente }) {
     } catch (e) { setErrore(e?.response?.data?.detail || "Errore nell'eliminazione"); }
   };
 
+  const [modificaPeriodo, setModificaPeriodo] = useState(null);
+  const [salvandoModifica, setSalvandoModifica] = useState(false);
+  const apriModificaPeriodo = (p) => setModificaPeriodo({
+    id: p.id, data_inizio: p.data_inizio, data_fine: p.data_fine || "",
+    importo_settimanale: p.importo_settimanale, aperto: p.aperto,
+  });
+  const salvaModificaPeriodo = async () => {
+    if (!modificaPeriodo.importo_settimanale) return;
+    setSalvandoModifica(true); setErrore("");
+    try {
+      await axios.put(`${API_TFR}/simulazione/${dipId}/periodi/${modificaPeriodo.id}`, {
+        importo_settimanale: Number(modificaPeriodo.importo_settimanale),
+        data_inizio: modificaPeriodo.data_inizio || undefined,
+        data_fine: modificaPeriodo.aperto ? undefined : (modificaPeriodo.data_fine || undefined),
+      });
+      setModificaPeriodo(null);
+      await carica(dipId);
+    } catch (e) { setErrore(e?.response?.data?.detail || "Errore nel salvataggio della modifica"); }
+    finally { setSalvandoModifica(false); }
+  };
+
   const azzeraSimulazione = async () => {
     if (!window.confirm("Azzerare l'intera simulazione di questo dipendente? Non è reversibile.")) return;
     try {
@@ -3104,7 +3125,7 @@ function TfrPage({ dipendenti, getDipendente }) {
                   <thead>
                     <tr>
                       <th>Dal</th><th>Al</th><th style={{ textAlign: "right" }}>€/sett.</th>
-                      <th style={{ textAlign: "right" }}>Mesi</th>
+                      <th style={{ textAlign: "right" }}>Settimane</th>
                       <th style={{ textAlign: "right" }}>Lordo €</th><th style={{ textAlign: "right" }}>Tassaz. €</th>
                       <th style={{ textAlign: "right" }}>Netto €</th><th></th>
                     </tr>
@@ -3115,11 +3136,12 @@ function TfrPage({ dipendenti, getDipendente }) {
                         <td>{formatDate(p.data_inizio)}</td>
                         <td>{p.aperto ? <span style={{ color: "#3d8168", fontWeight: 700 }}>in corso</span> : formatDate(p.data_fine)}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.importo_settimanale)}</td>
-                        <td style={{ textAlign: "right" }}>{p.mesi}</td>
+                        <td style={{ textAlign: "right" }}>{p.settimane}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.lordo)}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.tassazione)}</td>
                         <td style={{ textAlign: "right", fontWeight: 700 }}>{eur(p.netto)}</td>
-                        <td>
+                        <td style={{ display: "flex", gap: 4 }}>
+                          <button className="dc-btn" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => apriModificaPeriodo(p)} title="Correggi importo o date">✎</button>
                           {i === sim.periodi.length - 1 && (
                             <button className="dc-btn" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => eliminaUltimoPeriodo(p.id)}>✕</button>
                           )}
@@ -3244,6 +3266,42 @@ function TfrPage({ dipendenti, getDipendente }) {
             </div>
           )}
         </>
+      )}
+
+      {modificaPeriodo && (
+        <div onClick={() => setModificaPeriodo(null)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
+          <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 420, width: "100%", marginTop: 60 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <h3 style={{ margin: 0 }}>Correggi periodo</h3>
+              <button className="dc-btn" onClick={() => setModificaPeriodo(null)}>Chiudi</button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Dal</label>
+                <input type="date" style={inp} value={modificaPeriodo.data_inizio}
+                  onChange={e => setModificaPeriodo(m => ({ ...m, data_inizio: e.target.value }))} />
+              </div>
+              {!modificaPeriodo.aperto && (
+                <div>
+                  <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Al</label>
+                  <input type="date" style={inp} value={modificaPeriodo.data_fine}
+                    onChange={e => setModificaPeriodo(m => ({ ...m, data_fine: e.target.value }))} />
+                </div>
+              )}
+              {modificaPeriodo.aperto && (
+                <p className="dc-muted" style={{ fontSize: 12.5, margin: 0 }}>Periodo in corso: resta senza data di fine.</p>
+              )}
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>€ a settimana</label>
+                <input type="number" step="0.01" style={inp} value={modificaPeriodo.importo_settimanale}
+                  onChange={e => setModificaPeriodo(m => ({ ...m, importo_settimanale: e.target.value }))} />
+              </div>
+              <button className="dc-btn dc-btn-primary" disabled={salvandoModifica} onClick={salvaModificaPeriodo}>
+                {salvandoModifica ? "Salvo…" : "Salva correzione"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -146,24 +146,40 @@ class PayslipParserMultiFormat:
         
         return None
     
+    # Un netto in busta reale (mensilità intera) non scende ragionevolmente sotto questa
+    # soglia: sotto, è quasi certo un match sbagliato (pagina, aliquota, trattenuta isolata)
+    # piuttosto che il netto vero. Evita che l'alert di riconciliazione bancaria si riempia
+    # di importi assurdi come €2,00 o €1,15.
+    NETTO_MINIMO_PLAUSIBILE = 50.0
+
     def _extract_netto(self, text: str, formato: str) -> float:
         """Estrae il netto in busta."""
-        patterns = [
+        patterns_affidabili = [
             r'NETTO\s*(?:DEL\s*)?MESE\s*[:\s€]*([0-9.,]+)',
             r'NETTOsDELsMESE\s*[:\s€]*([0-9.,]+)',
             r'NETTO\s*IN\s*BUSTA\s*[:\s€]*([0-9.,]+)',
             r'TOTALE\s*NETTO\s*[:\s€]*([0-9.,]+)',
             r'NETTO\s*DA\s*PAGARE\s*[:\s€]*([0-9.,]+)',
-            r'([0-9.,]+)\s*€\s*$',  # Importo finale con €
         ]
-        
-        for pattern in patterns:
+
+        for pattern in patterns_affidabili:
             match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
             if match:
                 val = self._parse_amount(match.group(1))
-                if val > 0:
+                if val >= self.NETTO_MINIMO_PLAUSIBILE:
                     return val
-        
+
+        # Fallback generico ("qualunque numero seguito da €" a fine riga): con
+        # re.MULTILINE il '$' è fine RIGA, non fine documento, quindi può agganciare
+        # un numero di pagina, un'aliquota o una trattenuta isolata invece del netto
+        # vero. Usato solo se le etichette esplicite sopra non hanno dato nulla di
+        # plausibile, e con una soglia più alta proprio perché più a rischio di
+        # matchare il campo sbagliato.
+        for match in re.finditer(r'([0-9.,]+)\s*€\s*$', text, re.IGNORECASE | re.MULTILINE):
+            val = self._parse_amount(match.group(1))
+            if val >= 100.0:
+                return val
+
         return 0.0
     
     def _extract_lordo(self, text: str) -> float:
