@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from backend.app.database import Database
-from backend.app.routers.tfr import _calcola_periodo_tfr
 
 logger = logging.getLogger(__name__)
 
@@ -51,19 +50,15 @@ async def seed_tfr_periodi():
         esistenti = await db.tfr_simulazione_periodi.count_documents({"dipendente_id": dip["id"]})
         if esistenti:
             return  # già popolato (o modificato a mano): non toccare
+        # Si salvano solo date e importo: i valori si ricalcolano sempre alla lettura.
         for inizio, fine, importo in _PERIODI_VESPA:
-            periodo = {
+            await db.tfr_simulazione_periodi.insert_one({
                 "id": str(uuid4()), "dipendente_id": dip["id"],
                 "data_inizio": inizio, "data_fine": fine,
-                "importo_settimanale": importo, "aliquota_tassazione": 23.0,
+                "importo_settimanale": importo,
                 "chiuso_automaticamente": False, "fonte": "seed_chat_titolare",
                 "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-            if fine:
-                periodo.update(_calcola_periodo_tfr(
-                    datetime.strptime(inizio, "%Y-%m-%d"), datetime.strptime(fine, "%Y-%m-%d"),
-                    importo, 23.0))
-            await db.tfr_simulazione_periodi.insert_one(periodo)
+            })
         logger.info(f"Seed TFR: caricati {len(_PERIODI_VESPA)} periodi per Vespa")
     except Exception as e:
         logger.warning(f"Seed TFR non riuscito (non blocca l'avvio): {e}")

@@ -2988,7 +2988,7 @@ function TfrPage({ dipendenti, getDipendente }) {
   const [loading, setLoading] = useState(false);
   const [errore, setErrore] = useState("");
 
-  const [formPeriodo, setFormPeriodo] = useState({ data_inizio: "", data_fine: "", importo_settimanale: "", aliquota: "23" });
+  const [formPeriodo, setFormPeriodo] = useState({ data_inizio: "", data_fine: "", importo_settimanale: "" });
   const [salvandoPeriodo, setSalvandoPeriodo] = useState(false);
   const [comeChiuso, setComeChiuso] = useState(false); // avanzato: inserisci uno storico già chiuso
 
@@ -3023,7 +3023,7 @@ function TfrPage({ dipendenti, getDipendente }) {
       ]);
       setSituazione(s.data);
       setSim(sm.data);
-      setFormPeriodo({ data_inizio: sm.data.prossimo_data_inizio || "", data_fine: "", importo_settimanale: "", aliquota: "23" });
+      setFormPeriodo({ data_inizio: sm.data.prossimo_data_inizio || "", data_fine: "", importo_settimanale: "" });
       setComeChiuso(false);
       try {
         const l = await axios.get(`${API_TFR}/simulazione/${id}/liquidazione`);
@@ -3044,7 +3044,6 @@ function TfrPage({ dipendenti, getDipendente }) {
         data_inizio: formPeriodo.data_inizio || undefined,
         data_fine: comeChiuso ? formPeriodo.data_fine : undefined,
         importo_settimanale: Number(formPeriodo.importo_settimanale),
-        aliquota_tassazione: formPeriodo.aliquota !== "" ? Number(formPeriodo.aliquota) : undefined,
       });
       await carica(dipId);
     } catch (e) { setErrore(e?.response?.data?.detail || "Errore nel salvataggio del periodo"); }
@@ -3064,7 +3063,6 @@ function TfrPage({ dipendenti, getDipendente }) {
   const apriModificaPeriodo = (p) => setModificaPeriodo({
     id: p.id, data_inizio: p.data_inizio, data_fine: p.data_fine || "",
     importo_settimanale: p.importo_settimanale, aperto: p.aperto,
-    aliquota: p.aliquota_tassazione ?? 23,
   });
   const salvaModificaPeriodo = async () => {
     if (!modificaPeriodo.importo_settimanale) return;
@@ -3074,7 +3072,6 @@ function TfrPage({ dipendenti, getDipendente }) {
         importo_settimanale: Number(modificaPeriodo.importo_settimanale),
         data_inizio: modificaPeriodo.data_inizio || undefined,
         data_fine: modificaPeriodo.aperto ? undefined : (modificaPeriodo.data_fine || undefined),
-        aliquota_tassazione: modificaPeriodo.aliquota !== "" ? Number(modificaPeriodo.aliquota) : undefined,
       });
       setModificaPeriodo(null);
       await carica(dipId);
@@ -3133,9 +3130,10 @@ function TfrPage({ dipendenti, getDipendente }) {
           <div className="dc-card" style={{ marginBottom: 16 }}>
             <h3 style={{ marginTop: 0 }}>Simulazione storica TFR</h3>
             <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
-              Formula semplice: settimane lavorate × importo settimanale ÷ 12 = lordo (es. 52 × 220 € = 11.440 ÷ 12
-              = 953,33), meno la tassazione del periodo (23% o 27%) = netto da ricevere. L'ultimo periodo è sempre
-              "in corso" e matura fino ad oggi da solo. Non modifica il TFR ufficiale qui sopra.
+              Formula: importo settimanale × settimane = retribuzione utile (es. 250 € × 52 = 13.000) → ÷ 13,5 =
+              quota lorda (962,96) → meno lo 0,50% INPS sulla retribuzione utile (65,00) = accantonamento netto
+              (897,96). L'ultimo periodo è sempre "in corso" e matura fino ad oggi da solo. Non modifica il TFR
+              ufficiale qui sopra.
             </p>
 
             {sim?.paga_attuale != null && (
@@ -3152,8 +3150,9 @@ function TfrPage({ dipendenti, getDipendente }) {
                     <tr>
                       <th>Dal</th><th>Al</th><th style={{ textAlign: "right" }}>€/sett.</th>
                       <th style={{ textAlign: "right" }}>Settimane</th>
+                      <th style={{ textAlign: "right" }}>Retrib. utile €</th>
                       <th style={{ textAlign: "right" }}>Lordo €</th>
-                      <th style={{ textAlign: "right" }}>Tassaz. €</th>
+                      <th style={{ textAlign: "right" }}>INPS 0,50% €</th>
                       <th style={{ textAlign: "right" }}>Netto €</th><th></th>
                     </tr>
                   </thead>
@@ -3164,11 +3163,12 @@ function TfrPage({ dipendenti, getDipendente }) {
                         <td>{p.aperto ? <span style={{ color: "#3d8168", fontWeight: 700 }}>in corso</span> : formatDate(p.data_fine)}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.importo_settimanale)}</td>
                         <td style={{ textAlign: "right" }}>{p.settimane}</td>
+                        <td style={{ textAlign: "right" }}>{eur(p.retribuzione_utile)}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.lordo)}</td>
-                        <td style={{ textAlign: "right" }} title={`Aliquota ${p.aliquota_tassazione ?? 23}%`}>{eur(p.tassazione)}</td>
+                        <td style={{ textAlign: "right" }}>{eur(p.inps)}</td>
                         <td style={{ textAlign: "right", fontWeight: 700 }}>{eur(p.netto)}</td>
                         <td style={{ display: "flex", gap: 4 }}>
-                          <button className="dc-btn" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => apriModificaPeriodo(p)} title="Correggi importo, date o aliquota">✎</button>
+                          <button className="dc-btn" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => apriModificaPeriodo(p)} title="Correggi importo o date">✎</button>
                           {i === sim.periodi.length - 1 && (
                             <button className="dc-btn" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => eliminaUltimoPeriodo(p.id)}>✕</button>
                           )}
@@ -3176,9 +3176,9 @@ function TfrPage({ dipendenti, getDipendente }) {
                       </tr>
                     ))}
                     <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4" }}>
-                      <td colSpan={4}>Totale (incluso il periodo in corso, ad oggi)</td>
+                      <td colSpan={5}>Totale (incluso il periodo in corso, ad oggi)</td>
                       <td style={{ textAlign: "right" }}>{eur(sim.totale_lordo)}</td>
-                      <td style={{ textAlign: "right" }}>{eur(sim.totale_tassazione)}</td>
+                      <td style={{ textAlign: "right" }}>{eur(sim.totale_inps)}</td>
                       <td style={{ textAlign: "right" }}>{eur(sim.totale_netto)}</td>
                       <td></td>
                     </tr>
@@ -3198,11 +3198,6 @@ function TfrPage({ dipendenti, getDipendente }) {
                 <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>€ a settimana</label>
                 <input type="number" step="0.01" style={{ ...inp, width: 120 }} value={formPeriodo.importo_settimanale}
                   onChange={e => setFormPeriodo(f => ({ ...f, importo_settimanale: e.target.value }))} />
-              </div>
-              <div>
-                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Tassazione %</label>
-                <input type="number" step="0.01" style={{ ...inp, width: 90 }} value={formPeriodo.aliquota}
-                  onChange={e => setFormPeriodo(f => ({ ...f, aliquota: e.target.value }))} />
               </div>
               {comeChiuso && (
                 <div>
@@ -3232,18 +3227,18 @@ function TfrPage({ dipendenti, getDipendente }) {
                 {liquidazione.cessato
                   ? `Calcolata fino alla data di cessazione (${formatDate(liquidazione.data_cessazione)}): il rapporto non matura più nulla dopo.`
                   : `Il dipendente è ancora in forza: questa è una simulazione "se finisse oggi" (${formatDate(liquidazione.calcolato_fino_a)}).`}
-                {" "}Tredicesima e quattordicesima usano la stessa formula del tuo foglio (mensilità/12 × mesi,
-                tassate con l'aliquota del periodo): qui sotto vedi lordo e netto.
+                {" "}Tredicesima e quattordicesima = importo settimanale × settimane del ciclo ÷ 12
+                (una mensilità piena per un ciclo intero).
               </p>
               <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
                 <div>
                   <div className="dc-muted" style={{ fontSize: 12.5 }}>Tredicesima maturata</div>
-                  <div style={{ fontWeight: 700, fontSize: 18 }}>€ {eur(liquidazione.tredicesima.netto)} <span className="dc-muted" style={{ fontWeight: 400, fontSize: 12.5 }}>netto (lordo € {eur(liquidazione.tredicesima.lordo)})</span></div>
+                  <div style={{ fontWeight: 700, fontSize: 18 }}>€ {eur(liquidazione.tredicesima.netto)}</div>
                   <div className="dc-muted" style={{ fontSize: 11.5 }}>{formatDate(liquidazione.tredicesima.dal)} → {formatDate(liquidazione.tredicesima.al)}</div>
                 </div>
                 <div>
                   <div className="dc-muted" style={{ fontSize: 12.5 }}>Quattordicesima maturata</div>
-                  <div style={{ fontWeight: 700, fontSize: 18 }}>€ {eur(liquidazione.quattordicesima.netto)} <span className="dc-muted" style={{ fontWeight: 400, fontSize: 12.5 }}>netto (lordo € {eur(liquidazione.quattordicesima.lordo)})</span></div>
+                  <div style={{ fontWeight: 700, fontSize: 18 }}>€ {eur(liquidazione.quattordicesima.netto)}</div>
                   <div className="dc-muted" style={{ fontSize: 11.5 }}>{formatDate(liquidazione.quattordicesima.dal)} → {formatDate(liquidazione.quattordicesima.al)}</div>
                 </div>
                 <div>
@@ -3361,11 +3356,6 @@ function TfrPage({ dipendenti, getDipendente }) {
                 <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>€ a settimana</label>
                 <input type="number" step="0.01" style={inp} value={modificaPeriodo.importo_settimanale}
                   onChange={e => setModificaPeriodo(m => ({ ...m, importo_settimanale: e.target.value }))} />
-              </div>
-              <div>
-                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Tassazione % (23 o 27)</label>
-                <input type="number" step="0.01" style={inp} value={modificaPeriodo.aliquota}
-                  onChange={e => setModificaPeriodo(m => ({ ...m, aliquota: e.target.value }))} />
               </div>
               <button className="dc-btn dc-btn-primary" disabled={salvandoModifica} onClick={salvaModificaPeriodo}>
                 {salvandoModifica ? "Salvo…" : "Salva correzione"}
