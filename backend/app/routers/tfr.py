@@ -1942,6 +1942,12 @@ async def importa_simulazione_da_excel(
         {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "nome_completo": 1, "codice_fiscale": 1}
     ).to_list(1000)
     by_cf, by_nome = {}, {}
+    bare_counts: Dict[str, int] = {}
+    for d in dips:
+        n, c = norm(d.get("nome")), norm(d.get("cognome"))
+        for bare in {n, c}:
+            if bare:
+                bare_counts[bare] = bare_counts.get(bare, 0) + 1
     for d in dips:
         cf = (d.get("codice_fiscale") or "").strip().upper()
         if cf:
@@ -1950,6 +1956,11 @@ async def importa_simulazione_da_excel(
         for v in {norm(d.get("nome_completo")), c + n, n + c}:
             if v:
                 by_nome[v] = d
+        # Fallback su singolo nome o cognome (utile per file senza scheda DATI):
+        # solo se quel nome/cognome, da solo, identifica un unico dipendente attivo.
+        for bare in {n, c}:
+            if bare and bare_counts.get(bare) == 1:
+                by_nome.setdefault(bare, d)
 
     def risolvi_dipendente(token):
         cf, msg = cerca_cf_in_dati(token)
