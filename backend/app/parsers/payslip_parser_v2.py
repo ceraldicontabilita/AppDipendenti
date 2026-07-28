@@ -152,6 +152,31 @@ class PayslipParserMultiFormat:
     # di importi assurdi come €2,00 o €1,15.
     NETTO_MINIMO_PLAUSIBILE = 50.0
 
+    # Numero in formato italiano (migliaia col punto, decimali con virgola obbligatori),
+    # senza richiedere il simbolo €: approccio ripreso da GestionaleCloud (payroll.py),
+    # più affidabile del semplice "numero seguito da €" perché non dipende da dove/se
+    # pdfplumber ha estratto il simbolo euro.
+    _AMOUNT_IT_RE = re.compile(r'[-+]?(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d{1,2})')
+
+    def _find_amount_near_label(self, text: str, labels, finestra: int = 5) -> Optional[float]:
+        """Cerca un'etichetta (es. 'NETTO BUSTA') riga per riga, poi un importo nelle
+        'finestra' righe successive — invece di pretendere che etichetta e numero siano
+        sulla STESSA porzione di testo (come i pattern regex diretti). Molto più
+        tollerante a impaginazioni PDF dove il valore è su una riga diversa da quella
+        dell'etichetta, senza per questo cercare 'un numero qualsiasi' nell'intero
+        documento."""
+        lines = text.split('\n')
+        etichette = tuple(re.sub(r'[^A-Z]', '', l.upper()) for l in labels)
+        for i, line in enumerate(lines):
+            compact = re.sub(r'[^A-Z]', '', line.upper())
+            if not any(et in compact for et in etichette):
+                continue
+            for candidate in lines[i:i + finestra]:
+                matches = self._AMOUNT_IT_RE.findall(candidate.replace('+', ''))
+                if matches:
+                    return self._parse_amount(matches[-1])
+        return None
+
     def _extract_netto(self, text: str, formato: str) -> float:
         """Estrae il netto in busta."""
         patterns_affidabili = [
@@ -169,10 +194,17 @@ class PayslipParserMultiFormat:
                 if val >= self.NETTO_MINIMO_PLAUSIBILE:
                     return val
 
-        # Fallback generico ("qualunque numero seguito da €" a fine riga): con
-        # re.MULTILINE il '$' è fine RIGA, non fine documento, quindi può agganciare
-        # un numero di pagina, un'aliquota o una trattenuta isolata invece del netto
-        # vero. Usato solo se le etichette esplicite sopra non hanno dato nulla di
+        # I pattern diretti sopra falliscono se etichetta e numero non sono sulla
+        # stessa porzione di testo (impaginazione PDF): prova etichetta+finestra.
+        val = self._find_amount_near_label(
+            text, ("NETTO BUSTA", "NETTO DEL MESE", "TOTALE NETTO", "NETTO A PAGARE", "NETTO DA PAGARE"))
+        if val is not None and val >= self.NETTO_MINIMO_PLAUSIBILE:
+            return val
+
+        # Ultimo fallback, il più generico ("qualunque numero seguito da €" a fine
+        # riga): con re.MULTILINE il '$' è fine RIGA, non fine documento, quindi può
+        # agganciare un numero di pagina, un'aliquota o una trattenuta isolata invece
+        # del netto vero. Usato solo se le etichette sopra non hanno dato nulla di
         # plausibile, e con una soglia più alta proprio perché più a rischio di
         # matchare il campo sbagliato.
         for match in re.finditer(r'([0-9.,]+)\s*€\s*$', text, re.IGNORECASE | re.MULTILINE):
@@ -181,7 +213,7 @@ class PayslipParserMultiFormat:
                 return val
 
         return 0.0
-    
+
     def _extract_lordo(self, text: str) -> float:
         """Estrae il lordo / totale competenze."""
         patterns = [
@@ -190,14 +222,18 @@ class PayslipParserMultiFormat:
             r'IMPONIBILE\s*FISCALE\s*[:\s€]*([0-9.,]+)',
             r'TOTALE\s*LORDO\s*[:\s€]*([0-9.,]+)',
         ]
-        
+
         for pattern in patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 val = self._parse_amount(match.group(1))
                 if val > 0:
                     return val
-        
+
+        val = self._find_amount_near_label(text, ("TOTALE COMPETENZE", "IMPONIBILE FISCALE", "TOTALE LORDO"))
+        if val is not None and val > 0:
+            return val
+
         return 0.0
     
     def _extract_trattenute(self, text: str) -> float:
