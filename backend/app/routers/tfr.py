@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone, timedelta, date
 from uuid import uuid4
+import calendar
 import logging
 import os
 from pathlib import Path
@@ -1701,18 +1702,48 @@ def _oggi_tfr() -> datetime:
     return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
 
 
+def _fine_mese_tfr(anno: int, mese: int) -> datetime:
+    ultimo_giorno = calendar.monthrange(anno, mese)[1]
+    return datetime(anno, mese, ultimo_giorno)
+
+
+def _mese_successivo_tfr(anno: int, mese: int):
+    return (anno + 1, 1) if mese == 12 else (anno, mese + 1)
+
+
+def _mesi_interi_periodo(dal: datetime, al: datetime) -> int:
+    """Conta i mesi di calendario compresi in [dal, al] con la 'regola dei 15 giorni'
+    (art. 2120 c.c. e prassi payroll standard, usata per TFR, tredicesima e
+    quattordicesima): un mese conta per intero se il periodo copre almeno 15 dei suoi
+    giorni di calendario, altrimenti non conta affatto. NON è una frazione continua
+    (giorni/365)."""
+    if al < dal:
+        return 0
+    mesi = 0
+    anno, mese = dal.year, dal.month
+    while datetime(anno, mese, 1) <= al:
+        mese_inizio = max(datetime(anno, mese, 1), dal)
+        mese_fine = min(_fine_mese_tfr(anno, mese), al)
+        if mese_fine >= mese_inizio and (mese_fine - mese_inizio).days + 1 >= 15:
+            mesi += 1
+        anno, mese = _mese_successivo_tfr(anno, mese)
+    return mesi
+
+
 def _calcola_periodo_tfr(data_inizio: datetime, data_fine: datetime, importo_settimanale: float) -> Dict[str, Any]:
     """Quota TFR del periodo = retribuzione annua equivalente / 13,5, riproporzionata
-    sulla frazione d'anno coperta dal periodo (giorni/365,25). Tassazione approssimata
-    con la stessa aliquota usata per le liquidazioni (ALIQUOTA_TFR)."""
-    giorni = (data_fine - data_inizio).days + 1
+    sui mesi interi coperti dal periodo (regola dei 15 giorni: le frazioni di mese
+    pari o superiori a 15 giorni contano come mese intero, altrimenti non contano —
+    NON è una frazione continua di giorni/365). Tassazione approssimata con la stessa
+    aliquota usata per le liquidazioni (ALIQUOTA_TFR)."""
+    mesi = _mesi_interi_periodo(data_inizio, data_fine)
     retribuzione_annua = importo_settimanale * 52
-    lordo = retribuzione_annua / TFR_DIVISORE * (giorni / 365.25)
+    lordo = retribuzione_annua / TFR_DIVISORE * (mesi / 12)
     tassazione = lordo * ALIQUOTA_TFR / 100
     netto = lordo - tassazione
     return {
-        "giorni": giorni,
-        "mesi": round(giorni / 30.4368, 2),
+        "giorni": (data_fine - data_inizio).days + 1,
+        "mesi": mesi,
         "retribuzione_annua_equivalente": round(retribuzione_annua, 2),
         "lordo": round(lordo, 2),
         "tassazione": round(tassazione, 2),
@@ -1760,26 +1791,27 @@ def _periodo_competenza_14(fino_a: datetime):
 def _quota_mensilita_aggiuntiva(periodi_grezzi: List[Dict[str, Any]], data_assunzione: Optional[datetime],
                                 inizio_competenza: datetime, fine_competenza: datetime,
                                 fino_a: datetime) -> Dict[str, Any]:
-    """Quota di tredicesima/quattordicesima maturata nel ciclo di competenza indicato:
-    per ogni periodo di paga settimanale del simulatore, prende i giorni in comune con
-    [inizio_competenza, fine_competenza] (limitato a fino_a) e li valorizza come
-    paga_settimanale*52/12 (mensilità piena) riproporzionata sulla frazione d'anno."""
+    """Rateo di tredicesima/quattordicesima maturato nel ciclo di competenza indicato:
+    1/12 della retribuzione mensile equivalente per ogni mese intero lavorato in quel
+    ciclo (regola dei 15 giorni, come il TFR — non una frazione continua di giorni),
+    usando per ogni mese la paga settimanale in vigore nel periodo del simulatore che
+    lo copre."""
     inizio_eff = max(inizio_competenza, data_assunzione) if data_assunzione else inizio_competenza
     fine_eff = min(fine_competenza, fino_a)
     if fine_eff < inizio_eff:
-        return {"lordo": 0.0, "giorni": 0,
+        return {"lordo": 0.0, "mesi_interi": 0,
                 "dal": inizio_eff.strftime("%Y-%m-%d"), "al": fine_eff.strftime("%Y-%m-%d")}
-    tot, giorni_tot = 0.0, 0
+    tot, mesi_tot = 0.0, 0
     for p in periodi_grezzi:
         p_inizio = _parse_data_tfr(p["data_inizio"])
         p_fine = fino_a if not p.get("data_fine") else _parse_data_tfr(p["data_fine"])
         oi, of = max(p_inizio, inizio_eff), min(p_fine, fine_eff)
         if of < oi:
             continue
-        giorni = (of - oi).days + 1
-        tot += p["importo_settimanale"] * 52 / 12 * (giorni / 365.25)
-        giorni_tot += giorni
-    return {"lordo": round(tot, 2), "giorni": giorni_tot,
+        mesi = _mesi_interi_periodo(oi, of)
+        tot += p["importo_settimanale"] * 52 / 12 * (mesi / 12)
+        mesi_tot += mesi
+    return {"lordo": round(tot, 2), "mesi_interi": mesi_tot,
             "dal": inizio_eff.strftime("%Y-%m-%d"), "al": fine_eff.strftime("%Y-%m-%d")}
 
 
