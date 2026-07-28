@@ -175,6 +175,7 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     { id: "timbrature", label: "Timbrature", icon: Clock, section: "DIPENDENTI" },
     { id: "buste-paga", label: "Buste Paga", icon: Euro, section: "DIPENDENTI" },
     { id: "paghe-bonifici", label: "Cedolini & Bonifici", icon: Link2, section: "DIPENDENTI" },
+    { id: "tfr", label: "TFR", icon: Wallet, section: "DIPENDENTI" },
     { id: "documenti", label: "Documenti", icon: FolderOpen, section: "DIPENDENTI" },
     { id: "assunzione", label: "Assunzione & Contratti", icon: Briefcase, section: "DIPENDENTI" },
     { id: "bonifici-banca", label: "Bonifici effettuati", icon: Euro, section: "PAGAMENTI" },
@@ -190,6 +191,7 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     timbrature: "Timbrature",
     "buste-paga": "Buste Paga",
     "paghe-bonifici": "Cedolini & Bonifici",
+    tfr: "TFR",
     missioni: "Missioni",
     documenti: "Documenti",
     assunzione: "Assunzione & Contratti",
@@ -225,6 +227,8 @@ export default function DipendentiCloudApp({ page: pageProp }) {
         return <BustePagaPage dipendenti={activeDipendenti} reload={loadData} getDipendente={getDipendente} />;
       case "paghe-bonifici":
         return <PagheBonificiPage />;
+      case "tfr":
+        return <TfrPage dipendenti={activeDipendenti} getDipendente={getDipendente} />;
       case "missioni":
         return <MissioniPage dipendenti={activeDipendenti} missioni={missioni} reload={loadData} getDipendente={getDipendente} />;
       case "documenti":
@@ -2902,6 +2906,230 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// TFR — situazione ufficiale (calcolo automatico dai cedolini) + simulatore
+// storico periodo per periodo, per ricostruire il TFR maturato prima dell'app.
+function TfrPage({ dipendenti, getDipendente }) {
+  const API_TFR = "/api/tfr";
+  const eur = (n) => (Number(n) || 0).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const [dipId, setDipId] = useState(dipendenti[0]?.id || "");
+  const [situazione, setSituazione] = useState(null);
+  const [sim, setSim] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [errore, setErrore] = useState("");
+
+  const [formPeriodo, setFormPeriodo] = useState({ data_inizio: "", data_fine: "", importo_settimanale: "" });
+  const [salvandoPeriodo, setSalvandoPeriodo] = useState(false);
+
+  const [numeroRate, setNumeroRate] = useState(3);
+  const [dataPrimaRata, setDataPrimaRata] = useState("");
+  const [rate, setRate] = useState(null);
+
+  const carica = useCallback(async (id) => {
+    if (!id) return;
+    setLoading(true); setErrore(""); setRate(null);
+    try {
+      const [s, sm] = await Promise.all([
+        axios.get(`${API_TFR}/situazione/${id}`),
+        axios.get(`${API_TFR}/simulazione/${id}`),
+      ]);
+      setSituazione(s.data);
+      setSim(sm.data);
+      setFormPeriodo({ data_inizio: sm.data.prossimo_data_inizio || "", data_fine: "", importo_settimanale: "" });
+    } catch (e) {
+      setErrore(e?.response?.data?.detail || "Errore nel caricamento");
+    } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { carica(dipId); }, [dipId, carica]);
+
+  const aggiungiPeriodo = async () => {
+    if (!formPeriodo.data_fine || !formPeriodo.importo_settimanale) return;
+    setSalvandoPeriodo(true); setErrore("");
+    try {
+      await axios.post(`${API_TFR}/simulazione/${dipId}/periodi`, {
+        data_inizio: formPeriodo.data_inizio || undefined,
+        data_fine: formPeriodo.data_fine,
+        importo_settimanale: Number(formPeriodo.importo_settimanale),
+      });
+      await carica(dipId);
+    } catch (e) { setErrore(e?.response?.data?.detail || "Errore nel salvataggio del periodo"); }
+    finally { setSalvandoPeriodo(false); }
+  };
+
+  const eliminaUltimoPeriodo = async (periodoId) => {
+    if (!window.confirm("Eliminare l'ultimo periodo inserito?")) return;
+    try {
+      await axios.delete(`${API_TFR}/simulazione/${dipId}/periodi/${periodoId}`);
+      await carica(dipId);
+    } catch (e) { setErrore(e?.response?.data?.detail || "Errore nell'eliminazione"); }
+  };
+
+  const azzeraSimulazione = async () => {
+    if (!window.confirm("Azzerare l'intera simulazione di questo dipendente? Non è reversibile.")) return;
+    try {
+      await axios.delete(`${API_TFR}/simulazione/${dipId}`);
+      await carica(dipId);
+    } catch (e) { setErrore(e?.response?.data?.detail || "Errore nell'azzeramento"); }
+  };
+
+  const calcolaRate = async () => {
+    try {
+      const r = await axios.post(`${API_TFR}/simulazione/${dipId}/rate`, {
+        numero_rate: Number(numeroRate),
+        data_prima_rata: dataPrimaRata || undefined,
+      });
+      setRate(r.data);
+    } catch (e) { setErrore(e?.response?.data?.detail || "Errore nel calcolo delle rate"); }
+  };
+
+  const inp = { border: "1px solid #d1d5db", borderRadius: 8, padding: "7px 9px", fontSize: 14, width: "100%", boxSizing: "border-box" };
+
+  return (
+    <div className="dc-page">
+      <div className="dc-page-header">
+        <div>
+          <h1>TFR</h1>
+          <p>Situazione ufficiale e simulazione storica periodo per periodo</p>
+        </div>
+        <div className="dc-page-actions">
+          <select className="dc-select" value={dipId} onChange={e => setDipId(e.target.value)}>
+            {dipendenti.map(d => <option key={d.id} value={d.id}>{d.cognome ? `${d.cognome} ${d.nome || ""}`.trim() : d.nome}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {errore && (
+        <div className="dc-card" style={{ marginBottom: 16, borderLeft: "4px solid #d35f4e", color: "#d35f4e", fontWeight: 600 }}>⚠ {errore}</div>
+      )}
+
+      {loading ? <p className="dc-muted">Carico…</p> : (
+        <>
+          {situazione && (
+            <div className="dc-card" style={{ marginBottom: 16 }}>
+              <h3 style={{ marginTop: 0 }}>Situazione ufficiale (calcolo automatico dai cedolini)</h3>
+              <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>TFR accantonato</div><div style={{ fontWeight: 700, fontSize: 20 }}>€ {eur(situazione.tfr_accantonato)}</div></div>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>Già liquidato</div><div style={{ fontWeight: 700, fontSize: 20 }}>€ {eur(situazione.totale_liquidato)}</div></div>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>Disponibile</div><div style={{ fontWeight: 700, fontSize: 20, color: "#3d8168" }}>€ {eur(situazione.tfr_disponibile)}</div></div>
+              </div>
+            </div>
+          )}
+
+          <div className="dc-card" style={{ marginBottom: 16 }}>
+            <h3 style={{ marginTop: 0 }}>Simulazione storica TFR (periodo per periodo)</h3>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
+              Ricostruisci il TFR maturato prima dell'app: inserisci la paga settimanale di ogni periodo, il sistema
+              calcola quanti mesi/frazione copre e somma con i periodi successivi (formula di legge, art. 2120 c.c.).
+              Non tocca il TFR ufficiale qui sopra.
+            </p>
+
+            {sim?.periodi?.length > 0 && (
+              <div style={{ overflowX: "auto", marginBottom: 14 }}>
+                <table className="dc-table" style={{ minWidth: 640, whiteSpace: "nowrap" }}>
+                  <thead>
+                    <tr>
+                      <th>Dal</th><th>Al</th><th style={{ textAlign: "right" }}>€/sett.</th>
+                      <th style={{ textAlign: "right" }}>Mesi</th>
+                      <th style={{ textAlign: "right" }}>Lordo €</th><th style={{ textAlign: "right" }}>Tassaz. €</th>
+                      <th style={{ textAlign: "right" }}>Netto €</th><th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sim.periodi.map((p, i) => (
+                      <tr key={p.id}>
+                        <td>{formatDate(p.data_inizio)}</td>
+                        <td>{formatDate(p.data_fine)}</td>
+                        <td style={{ textAlign: "right" }}>{eur(p.importo_settimanale)}</td>
+                        <td style={{ textAlign: "right" }}>{p.mesi}</td>
+                        <td style={{ textAlign: "right" }}>{eur(p.lordo)}</td>
+                        <td style={{ textAlign: "right" }}>{eur(p.tassazione)}</td>
+                        <td style={{ textAlign: "right", fontWeight: 700 }}>{eur(p.netto)}</td>
+                        <td>
+                          {i === sim.periodi.length - 1 && (
+                            <button className="dc-btn" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => eliminaUltimoPeriodo(p.id)}>✕</button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4" }}>
+                      <td colSpan={4}>Totale</td>
+                      <td style={{ textAlign: "right" }}>{eur(sim.totale_lordo)}</td>
+                      <td style={{ textAlign: "right" }}>{eur(sim.totale_tassazione)}</td>
+                      <td style={{ textAlign: "right" }}>{eur(sim.totale_netto)}</td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Dal</label>
+                <input type="date" style={inp} value={formPeriodo.data_inizio}
+                  onChange={e => setFormPeriodo(f => ({ ...f, data_inizio: e.target.value }))} />
+              </div>
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Al</label>
+                <input type="date" style={inp} value={formPeriodo.data_fine}
+                  onChange={e => setFormPeriodo(f => ({ ...f, data_fine: e.target.value }))} />
+              </div>
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>€ a settimana</label>
+                <input type="number" step="0.01" style={{ ...inp, width: 120 }} value={formPeriodo.importo_settimanale}
+                  onChange={e => setFormPeriodo(f => ({ ...f, importo_settimanale: e.target.value }))} />
+              </div>
+              <button className="dc-btn dc-btn-primary" disabled={salvandoPeriodo} onClick={aggiungiPeriodo}>
+                {salvandoPeriodo ? "Aggiungo…" : "+ Aggiungi periodo"}
+              </button>
+              {sim?.periodi?.length > 0 && (
+                <button className="dc-btn" onClick={azzeraSimulazione} style={{ marginLeft: "auto", color: "#d35f4e" }}>Azzera simulazione</button>
+              )}
+            </div>
+          </div>
+
+          {sim?.periodi?.length > 0 && (
+            <div className="dc-card">
+              <h3 style={{ marginTop: 0 }}>Dividi il netto in rate</h3>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+                <div>
+                  <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Numero rate</label>
+                  <input type="number" min={1} style={{ ...inp, width: 100 }} value={numeroRate} onChange={e => setNumeroRate(e.target.value)} />
+                </div>
+                <div>
+                  <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Data 1ª rata (opzionale)</label>
+                  <input type="date" style={inp} value={dataPrimaRata} onChange={e => setDataPrimaRata(e.target.value)} />
+                </div>
+                <button className="dc-btn dc-btn-primary" onClick={calcolaRate}>Calcola rate</button>
+              </div>
+              {rate && (
+                <div style={{ overflowX: "auto", marginTop: 14 }}>
+                  <table className="dc-table" style={{ minWidth: 320 }}>
+                    <thead><tr><th>Rata</th>{rate.rate[0]?.data && <th>Data</th>}<th style={{ textAlign: "right" }}>Importo €</th></tr></thead>
+                    <tbody>
+                      {rate.rate.map(r => (
+                        <tr key={r.numero}>
+                          <td>{r.numero}/{rate.numero_rate}</td>
+                          {r.data && <td>{formatDate(r.data)}</td>}
+                          <td style={{ textAlign: "right" }}>{eur(r.importo)}</td>
+                        </tr>
+                      ))}
+                      <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4" }}>
+                        <td colSpan={rate.rate[0]?.data ? 2 : 1}>Totale</td>
+                        <td style={{ textAlign: "right" }}>{eur(rate.totale_netto)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

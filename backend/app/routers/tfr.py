@@ -5,7 +5,7 @@ Accantonamento, rivalutazione ISTAT, liquidazione TFR e gestione acconti
 from fastapi import APIRouter, HTTPException, Query, Body
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 import logging
 import os
@@ -1655,4 +1655,215 @@ async def get_storico_tfr(dipendente_id: str) -> Dict[str, Any]:
         "liquidazioni": liquidazioni,
         "acconti": acconti_tfr
     }
+
+
+# ============================================
+# SIMULATORE TFR STORICO (periodo per periodo)
+# ============================================
+# Ricostruisce il TFR maturato PRIMA che l'app calcolasse tutto in automatico
+# dai cedolini. Il titolare inserisce, un periodo alla volta, la paga
+# settimanale in vigore in quel periodo ("ha preso 180€/sett dal... al...");
+# il sistema propone come inizio del periodo successivo il giorno dopo la
+# fine di quello precedente, esattamente come si farebbe a mano.
+# Ogni periodo si calcola con la formula di legge (art. 2120 c.c.:
+# retribuzione annua / 13,5, riproporzionata sui giorni del periodo) — non con
+# l'approssimazione "una mensilità" usata nel vecchio foglio Excel.
+# È un sandbox separato da 'dipendenti.tfr_accantonato' (quello alimentato in
+# automatico dai cedolini): la simulazione non lo tocca, per non mescolare un
+# dato storico ancora da verificare con quello già vivo in produzione.
+
+class PeriodoSimulazioneInput(BaseModel):
+    data_fine: str  # YYYY-MM-DD
+    importo_settimanale: float
+    # Se omessa: giorno dopo la fine dell'ultimo periodo (o data assunzione per il primo)
+    data_inizio: Optional[str] = None
+
+
+class RateSimulazioneInput(BaseModel):
+    numero_rate: int
+    data_prima_rata: Optional[str] = None  # YYYY-MM-DD, opzionale
+
+
+def _parse_data_tfr(s: str) -> datetime:
+    return datetime.strptime(s[:10], "%Y-%m-%d")
+
+
+def _calcola_periodo_tfr(data_inizio: datetime, data_fine: datetime, importo_settimanale: float) -> Dict[str, Any]:
+    """Quota TFR del periodo = retribuzione annua equivalente / 13,5, riproporzionata
+    sulla frazione d'anno coperta dal periodo (giorni/365,25). Tassazione approssimata
+    con la stessa aliquota usata per le liquidazioni (ALIQUOTA_TFR)."""
+    giorni = (data_fine - data_inizio).days + 1
+    retribuzione_annua = importo_settimanale * 52
+    lordo = retribuzione_annua / TFR_DIVISORE * (giorni / 365.25)
+    tassazione = lordo * ALIQUOTA_TFR / 100
+    netto = lordo - tassazione
+    return {
+        "giorni": giorni,
+        "mesi": round(giorni / 30.4368, 2),
+        "retribuzione_annua_equivalente": round(retribuzione_annua, 2),
+        "lordo": round(lordo, 2),
+        "tassazione": round(tassazione, 2),
+        "netto": round(netto, 2),
+    }
+
+
+@router.get("/simulazione/{dipendente_id}")
+@handle_errors
+async def get_simulazione_tfr(dipendente_id: str) -> Dict[str, Any]:
+    """Elenca i periodi della simulazione storica TFR di un dipendente, con i
+    totali (lordo/tassazione/netto) e la data suggerita per il prossimo periodo."""
+    db = Database.get_db()
+    dipendente = await db["dipendenti"].find_one({"id": dipendente_id}, {"_id": 0})
+    if not dipendente:
+        raise HTTPException(status_code=404, detail="Dipendente non trovato")
+
+    periodi = await db["tfr_simulazione_periodi"].find(
+        {"dipendente_id": dipendente_id}, {"_id": 0}
+    ).sort("data_inizio", 1).to_list(500)
+
+    if periodi:
+        ultimo_fine = _parse_data_tfr(periodi[-1]["data_fine"])
+        prossimo_inizio = (ultimo_fine + timedelta(days=1)).strftime("%Y-%m-%d")
+    else:
+        prossimo_inizio = (dipendente.get("data_assunzione") or "")[:10] or None
+
+    return {
+        "dipendente_id": dipendente_id,
+        "dipendente_nome": dipendente.get("nome_completo", ""),
+        "periodi": periodi,
+        "totale_lordo": round(sum(p["lordo"] for p in periodi), 2),
+        "totale_tassazione": round(sum(p["tassazione"] for p in periodi), 2),
+        "totale_netto": round(sum(p["netto"] for p in periodi), 2),
+        "prossimo_data_inizio": prossimo_inizio,
+    }
+
+
+@router.post("/simulazione/{dipendente_id}/periodi")
+@handle_errors
+async def aggiungi_periodo_simulazione(dipendente_id: str, input_data: PeriodoSimulazioneInput) -> Dict[str, Any]:
+    """Aggiunge un periodo alla simulazione storica TFR. Se non indichi la data di
+    inizio, riparte automaticamente dal giorno dopo la fine dell'ultimo periodo
+    inserito (o dalla data di assunzione in anagrafica, per il primo periodo)."""
+    db = Database.get_db()
+    dipendente = await db["dipendenti"].find_one({"id": dipendente_id}, {"_id": 0})
+    if not dipendente:
+        raise HTTPException(status_code=404, detail="Dipendente non trovato")
+
+    if input_data.importo_settimanale <= 0:
+        raise HTTPException(status_code=400, detail="L'importo settimanale deve essere positivo")
+
+    periodi_esistenti = await db["tfr_simulazione_periodi"].find(
+        {"dipendente_id": dipendente_id}, {"_id": 0}
+    ).sort("data_inizio", 1).to_list(500)
+
+    if input_data.data_inizio:
+        data_inizio_str = input_data.data_inizio[:10]
+    elif periodi_esistenti:
+        ultimo_fine = _parse_data_tfr(periodi_esistenti[-1]["data_fine"])
+        data_inizio_str = (ultimo_fine + timedelta(days=1)).strftime("%Y-%m-%d")
+    elif dipendente.get("data_assunzione"):
+        data_inizio_str = dipendente["data_assunzione"][:10]
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Indica la data di inizio del primo periodo (il dipendente non ha "
+                   "una data di assunzione in anagrafica)")
+
+    try:
+        data_inizio = _parse_data_tfr(data_inizio_str)
+        data_fine = _parse_data_tfr(input_data.data_fine)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Date non valide, usa il formato YYYY-MM-DD")
+
+    if data_fine <= data_inizio:
+        raise HTTPException(status_code=400, detail="La data di fine deve essere successiva alla data di inizio")
+
+    if periodi_esistenti:
+        ultimo_fine = _parse_data_tfr(periodi_esistenti[-1]["data_fine"])
+        if data_inizio <= ultimo_fine:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Il periodo si sovrappone: l'ultimo periodo finisce il "
+                       f"{periodi_esistenti[-1]['data_fine']}, questo dovrebbe iniziare dopo")
+
+    calc = _calcola_periodo_tfr(data_inizio, data_fine, input_data.importo_settimanale)
+
+    periodo = {
+        "id": str(uuid4()),
+        "dipendente_id": dipendente_id,
+        "data_inizio": data_inizio_str,
+        "data_fine": input_data.data_fine[:10],
+        "importo_settimanale": round(input_data.importo_settimanale, 2),
+        **calc,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db["tfr_simulazione_periodi"].insert_one(periodo.copy())
+
+    return {"success": True, "periodo": periodo}
+
+
+@router.delete("/simulazione/{dipendente_id}/periodi/{periodo_id}")
+@handle_errors
+async def elimina_periodo_simulazione(dipendente_id: str, periodo_id: str) -> Dict[str, Any]:
+    """Elimina un periodo dalla simulazione. Consentito solo per l'ULTIMO periodo
+    (in ordine di data), per non lasciare buchi nella catena di date."""
+    db = Database.get_db()
+    periodi = await db["tfr_simulazione_periodi"].find(
+        {"dipendente_id": dipendente_id}, {"_id": 0}
+    ).sort("data_inizio", 1).to_list(500)
+    if not periodi:
+        raise HTTPException(status_code=404, detail="Nessun periodo trovato per questo dipendente")
+    if periodi[-1]["id"] != periodo_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Puoi eliminare solo l'ultimo periodo inserito (in ordine di data), per non lasciare buchi")
+    await db["tfr_simulazione_periodi"].delete_one({"id": periodo_id})
+    return {"success": True, "messaggio": "Periodo eliminato"}
+
+
+@router.delete("/simulazione/{dipendente_id}")
+@handle_errors
+async def reset_simulazione_tfr(dipendente_id: str) -> Dict[str, Any]:
+    """Azzera l'intera simulazione storica TFR di un dipendente (si riparte da zero)."""
+    db = Database.get_db()
+    res = await db["tfr_simulazione_periodi"].delete_many({"dipendente_id": dipendente_id})
+    return {"success": True, "periodi_eliminati": res.deleted_count}
+
+
+@router.post("/simulazione/{dipendente_id}/rate")
+@handle_errors
+async def dividi_in_rate_simulazione(dipendente_id: str, input_data: RateSimulazioneInput) -> Dict[str, Any]:
+    """Divide il netto TFR totale della simulazione in N rate (l'ultima assorbe
+    l'arrotondamento). Solo calcolo: non registra nulla, così titolare e dipendente
+    possono valutare la proposta prima di deciderla."""
+    if input_data.numero_rate < 1:
+        raise HTTPException(status_code=400, detail="Il numero di rate deve essere almeno 1")
+
+    db = Database.get_db()
+    periodi = await db["tfr_simulazione_periodi"].find(
+        {"dipendente_id": dipendente_id}, {"_id": 0}).to_list(500)
+    if not periodi:
+        raise HTTPException(status_code=400, detail="Nessun periodo inserito nella simulazione")
+
+    totale_netto = round(sum(p["netto"] for p in periodi), 2)
+    if totale_netto <= 0:
+        raise HTTPException(status_code=400, detail="Il totale netto della simulazione è zero")
+
+    n = input_data.numero_rate
+    rata_base = round(totale_netto / n, 2)
+    data_rata = _parse_data_tfr(input_data.data_prima_rata) if input_data.data_prima_rata else None
+
+    rate = []
+    for i in range(1, n + 1):
+        importo = round(totale_netto - rata_base * (n - 1), 2) if i == n else rata_base
+        voce = {"numero": i, "importo": importo}
+        if data_rata:
+            mese_idx = data_rata.month - 1 + (i - 1)
+            anno_target = data_rata.year + mese_idx // 12
+            mese_target = mese_idx % 12 + 1
+            giorno = min(data_rata.day, 28)  # evita overflow sui mesi corti
+            voce["data"] = f"{anno_target:04d}-{mese_target:02d}-{giorno:02d}"
+        rate.append(voce)
+
+    return {"totale_netto": totale_netto, "numero_rate": n, "rate": rate}
 
