@@ -2423,9 +2423,25 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
   const apriPrimaNota = async (dipId, nome) => {
     setPnDett({ nome, loading: true });
     try {
-      const r = await axios.get(`${API}/paghe/prima-nota?dipendente_id=${dipId}`);
-      setPnDett({ nome, righe: r.data.righe || [], saldo_finale: r.data.saldo_finale });
+      const [r, s] = await Promise.all([
+        axios.get(`${API}/paghe/prima-nota?dipendente_id=${dipId}`),
+        axios.get(`${API}/paghe/storico-pagamenti?dipendente_id=${dipId}`).catch(() => ({ data: { righe: [] } })),
+      ]);
+      setPnDett({ nome, righe: r.data.righe || [], saldo_finale: r.data.saldo_finale, storico: s.data.righe || [] });
     } catch { setPnDett({ nome, righe: [], errore: true }); }
+  };
+  const storicoRef = useRef(null);
+  const [storicoMsg, setStoricoMsg] = useState(null);
+  const handleImportStorico = async (e) => {
+    const fl = (e.target.files || [])[0];
+    if (!fl) return;
+    setImporting(true); setStoricoMsg(null);
+    try {
+      const fd = new FormData(); fd.append("file", fl);
+      const r = await axios.post(`${API}/paghe/importa-storico-pagamenti`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setStoricoMsg(r.data);
+    } catch (err) { setStoricoMsg({ errore: err?.response?.data?.detail || "Errore import archivio storico" }); }
+    finally { setImporting(false); if (storicoRef.current) storicoRef.current.value = ""; }
   };
   const totBuste = dipendenti.reduce((s, d) => s + (parseFloat(get(d.id).importo_busta) || 0), 0);
   const totBonifici = dipendenti.reduce((s, d) => s + (parseFloat(get(d.id).bonifico_importo) || 0), 0);
@@ -2445,18 +2461,20 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
           <input ref={fileRef} type="file" accept=".pdf,.zip,application/pdf,application/zip,application/x-zip-compressed" multiple onChange={handleImportLul} style={{ display: "none" }} />
           <input ref={excelRef} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={handleImportPrimaNota} style={{ display: "none" }} />
           <input ref={csvRef} type="file" accept=".csv,text/csv" onChange={handleImportPagamenti} style={{ display: "none" }} />
+          <input ref={storicoRef} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={handleImportStorico} style={{ display: "none" }} />
           <button onClick={() => setShowImport(s => !s)} disabled={importing}
             style={{ background: "#5b7a6b", color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontWeight: 700, cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
             {importing ? "Importo…" : "⤵ Importa  ▾"}
           </button>
           {showImport && (
-            <div style={{ position: "absolute", top: "100%", left: 0, marginTop: 6, background: "#fffefb", border: "1px solid #e6e0d4", borderRadius: 10, boxShadow: "0 6px 20px rgba(0,0,0,.12)", zIndex: 30, minWidth: 250, overflow: "hidden" }}>
+            <div style={{ position: "absolute", top: "100%", left: 0, marginTop: 6, background: "#fffefb", border: "1px solid #e6e0d4", borderRadius: 10, boxShadow: "0 6px 20px rgba(0,0,0,.12)", zIndex: 30, minWidth: 280, overflow: "hidden" }}>
               {[["Libro Unico (PDF/ZIP)", () => fileRef.current?.click()],
                 ["Buste da email", handleImportEmail],
                 ["Prima Nota (Excel)", () => excelRef.current?.click()],
-                ["Pagamenti banca (CSV)", () => csvRef.current?.click()]].map(([label, fn], i) => (
+                ["Pagamenti banca (CSV)", () => csvRef.current?.click()],
+                ["Archivio storico pagamenti ante-app (Excel)", () => storicoRef.current?.click()]].map(([label, fn], i, arr) => (
                 <button key={i} onClick={() => { setShowImport(false); fn(); }}
-                  style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", borderBottom: i < 3 ? "1px solid #f0ebe0" : "none", padding: "11px 14px", fontSize: 14, cursor: "pointer", color: "#2a3329" }}>{label}</button>
+                  style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", borderBottom: i < arr.length - 1 ? "1px solid #f0ebe0" : "none", padding: "11px 14px", fontSize: 14, cursor: "pointer", color: "#2a3329" }}>{label}</button>
               ))}
             </div>
           )}
@@ -2505,6 +2523,21 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
         </div>
       )}
 
+      {storicoMsg && (
+        <div className="dc-card" style={{ marginBottom: 16, borderLeft: `4px solid ${storicoMsg.errore ? '#d35f4e' : '#3d8168'}` }}>
+          {storicoMsg.errore ? <div style={{ color: "#d35f4e", fontWeight: 600 }}>⚠ {storicoMsg.errore}</div> : (
+            <div style={{ fontSize: 14 }}>
+              <div style={{ fontWeight: 700 }}>✓ Archivio storico: {storicoMsg.importati} righe nuove, {storicoMsg.gia_presenti} già presenti (su {storicoMsg.righe_lette} lette).</div>
+              {storicoMsg.dipendenti_non_in_anagrafica?.length > 0 && (
+                <div style={{ marginTop: 6, fontSize: 13, color: "#7d5526" }}>
+                  ⚠ Nomi non trovati in anagrafica (non importati): {storicoMsg.dipendenti_non_in_anagrafica.map(x => `${x.nome} (${x.righe})`).join(", ")}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {pnDett && (
         <div onClick={() => setPnDett(null)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
           <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 640, width: "100%", marginTop: 20 }}>
@@ -2531,6 +2564,28 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                     </tr>
                   </tbody>
                 </table>
+              </div>
+            )}
+            {pnDett.storico?.length > 0 && (
+              <div style={{ marginTop: 18 }}>
+                <h4 style={{ margin: "0 0 4px" }}>Storico ante-app (da Excel)</h4>
+                <p className="dc-muted" style={{ fontSize: 12.5, margin: "0 0 8px" }}>
+                  Sola consultazione: registro dei pagamenti effettuati prima di questa app, per data del bonifico.
+                </p>
+                <div style={{ overflowX: "auto", maxHeight: 260, overflowY: "auto" }}>
+                  <table className="dc-table" style={{ minWidth: 420, whiteSpace: "nowrap" }}>
+                    <thead><tr><th>Data</th><th style={{ textAlign: "right" }}>Busta €</th><th style={{ textAlign: "right" }}>Pagato €</th></tr></thead>
+                    <tbody>
+                      {pnDett.storico.map((x, i) => (
+                        <tr key={i}>
+                          <td>{formatDate(x.data)}</td>
+                          <td style={{ textAlign: "right" }}>{x.busta ? eur(x.busta) : "—"}</td>
+                          <td style={{ textAlign: "right" }}>{x.pagato ? eur(x.pagato) : "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
           </div>

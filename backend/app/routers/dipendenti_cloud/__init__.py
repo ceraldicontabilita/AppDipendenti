@@ -13,7 +13,7 @@ import zipfile
 import hashlib
 import base64
 import tempfile
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 
 from backend.app.database import Database
 
@@ -2031,6 +2031,108 @@ async def importa_prima_nota(file: UploadFile = File(...)):
             "non_trovati": len(non_trovati),
             "nomi_non_trovati": nomi_non_trovati,
             "discrepanze": sorted(discrepanze, key=lambda x: (x["anno"], x["mese"]))}
+
+
+@router.post("/paghe/importa-storico-pagamenti")
+async def importa_storico_pagamenti(file: UploadFile = File(...)):
+    """Importa l'archivio storico dei pagamenti (un foglio Excel per dipendente: data del
+    pagamento in colonna A, nome in colonna B, importo di busta in colonna C, importo
+    effettivamente pagato in colonna D — le intestazioni di questi fogli sono spesso
+    disallineate rispetto ai dati, quindi il formato si riconosce dal TIPO di dato in
+    colonna A, non dal testo dell'header).
+    Le righe finiscono in 'pagamenti_storico', un registro di SOLA CONSULTAZIONE per il
+    periodo precedente all'app: non tocca 'paghe_mensili' né lo stato di pagamento dei
+    cedolini correnti, perché qui si conosce solo la data del bonifico e non il mese di
+    competenza della busta (attribuirlo al mese del bonifico rischierebbe di sfalsare il
+    saldo di un mese). Import idempotente: le righe già presenti (stesso dipendente, data,
+    busta, pagato) non vengono duplicate."""
+    import io
+    import openpyxl
+    raw = await file.read()
+    if raw[:2] != b"PK":
+        raise HTTPException(400, "Il file deve essere un .xlsx")
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(raw), data_only=True, read_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"Excel non valido: {e}")
+
+    def norm(s):
+        return re.sub(r"\s+", " ", str(s or "").strip()).lower()
+
+    def fnum(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    righe = []
+    for ws in wb.worksheets:
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            continue
+        start = 0 if (rows[0] and isinstance(rows[0][0], (datetime, date))) else 1
+        for r in rows[start:]:
+            if not r or not isinstance(r[0], (datetime, date)):
+                continue
+            nome = r[1] if len(r) > 1 else None
+            busta = fnum(r[2]) if len(r) > 2 else 0.0
+            pagato = fnum(r[3]) if len(r) > 3 else 0.0
+            if not nome or (busta <= 0 and pagato <= 0):
+                continue
+            d = r[0]
+            data_iso = d.date().isoformat() if isinstance(d, datetime) else d.isoformat()
+            righe.append({"nome": str(nome).strip(), "data": data_iso,
+                          "busta": round(busta, 2), "pagato": round(pagato, 2)})
+
+    if not righe:
+        raise HTTPException(400, "Nessuna riga riconosciuta: attesa una data in colonna A per ogni pagamento")
+
+    db = get_db()
+    dips = await db.dipendenti.find({"merged_into": {"$exists": False}},
+                                    {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "nome_completo": 1}).to_list(1000)
+    by_nome = {}
+    for dd in dips:
+        n, c = norm(dd.get("nome")), norm(dd.get("cognome"))
+        for v in {norm(dd.get("nome_completo")), f"{c} {n}".strip(), f"{n} {c}".strip()}:
+            if v:
+                by_nome[v] = dd
+
+    try:
+        await db.pagamenti_storico.create_index(
+            [("dipendente_id", 1), ("data", 1), ("busta", 1), ("pagato", 1)],
+            unique=True, name="uniq_storico_riga")
+    except Exception:
+        pass
+
+    importati, gia_presenti, non_trovati = 0, 0, {}
+    for r in righe:
+        dip = by_nome.get(norm(r["nome"]))
+        if not dip:
+            non_trovati[r["nome"]] = non_trovati.get(r["nome"], 0) + 1
+            continue
+        doc = {"id": generate_id(), "dipendente_id": dip["id"], "data": r["data"],
+               "busta": r["busta"], "pagato": r["pagato"], "fonte": "excel_storico", "created_at": now_iso()}
+        res = await db.pagamenti_storico.update_one(
+            {"dipendente_id": dip["id"], "data": r["data"], "busta": r["busta"], "pagato": r["pagato"]},
+            {"$setOnInsert": doc}, upsert=True)
+        if res.upserted_id:
+            importati += 1
+        else:
+            gia_presenti += 1
+
+    return {"righe_lette": len(righe), "importati": importati, "gia_presenti": gia_presenti,
+            "dipendenti_non_in_anagrafica": [{"nome": k, "righe": v} for k, v in sorted(non_trovati.items())]}
+
+
+@router.get("/paghe/storico-pagamenti")
+async def storico_pagamenti(dipendente_id: str):
+    """Registro storico dei pagamenti ante-app (da Excel), in sola lettura, per data."""
+    db = get_db()
+    righe = await db.pagamenti_storico.find(
+        {"dipendente_id": dipendente_id}, {"_id": 0}).sort("data", 1).to_list(2000)
+    return {"righe": righe,
+            "totale_busta": round(sum(r.get("busta", 0) for r in righe), 2),
+            "totale_pagato": round(sum(r.get("pagato", 0) for r in righe), 2)}
 
 
 _MESI_IT = {"gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
