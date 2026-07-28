@@ -1720,13 +1720,67 @@ def _calcola_periodo_tfr(data_inizio: datetime, data_fine: datetime, importo_set
     }
 
 
-def _periodo_con_calcolo_live(p: Dict[str, Any]) -> Dict[str, Any]:
-    """Se il periodo è aperto (senza data_fine), ricalcola il maturato al volo
-    fino a oggi, senza scrivere nulla sul DB: il valore resta sempre aggiornato."""
+def _fino_a_calcolo(dipendente: Dict[str, Any]) -> datetime:
+    """Limite temporale per ogni maturato: se il dipendente è cessato, la data di
+    cessazione (il rapporto non matura più nulla dopo); altrimenti oggi."""
+    if dipendente.get("stato") == "cessato":
+        data_cess = dipendente.get("data_dimissione") or dipendente.get("data_cessazione")
+        if data_cess:
+            try:
+                return _parse_data_tfr(data_cess)
+            except ValueError:
+                pass
+    return _oggi_tfr()
+
+
+def _periodo_con_calcolo_live(p: Dict[str, Any], fino_a: Optional[datetime] = None) -> Dict[str, Any]:
+    """Se il periodo è aperto (senza data_fine), ricalcola il maturato al volo fino a
+    'fino_a' (oggi, o la cessazione se il dipendente ha lasciato), senza scrivere nulla
+    sul DB: il valore resta sempre aggiornato finché il rapporto è in corso."""
     if p.get("data_fine"):
         return {**p, "aperto": False}
-    calc = _calcola_periodo_tfr(_parse_data_tfr(p["data_inizio"]), _oggi_tfr(), p["importo_settimanale"])
+    limite = fino_a or _oggi_tfr()
+    calc = _calcola_periodo_tfr(_parse_data_tfr(p["data_inizio"]), limite, p["importo_settimanale"])
     return {**p, **calc, "data_fine": None, "aperto": True}
+
+
+def _periodo_competenza_13(fino_a: datetime):
+    """Tredicesima: competenza anno solare (gennaio-dicembre), corrisposta a dicembre."""
+    anno = fino_a.year
+    return datetime(anno, 1, 1), datetime(anno, 12, 31)
+
+
+def _periodo_competenza_14(fino_a: datetime):
+    """Quattordicesima: competenza 1° luglio - 30 giugno, corrisposta a luglio."""
+    if fino_a.month >= 7:
+        return datetime(fino_a.year, 7, 1), datetime(fino_a.year + 1, 6, 30)
+    return datetime(fino_a.year - 1, 7, 1), datetime(fino_a.year, 6, 30)
+
+
+def _quota_mensilita_aggiuntiva(periodi_grezzi: List[Dict[str, Any]], data_assunzione: Optional[datetime],
+                                inizio_competenza: datetime, fine_competenza: datetime,
+                                fino_a: datetime) -> Dict[str, Any]:
+    """Quota di tredicesima/quattordicesima maturata nel ciclo di competenza indicato:
+    per ogni periodo di paga settimanale del simulatore, prende i giorni in comune con
+    [inizio_competenza, fine_competenza] (limitato a fino_a) e li valorizza come
+    paga_settimanale*52/12 (mensilità piena) riproporzionata sulla frazione d'anno."""
+    inizio_eff = max(inizio_competenza, data_assunzione) if data_assunzione else inizio_competenza
+    fine_eff = min(fine_competenza, fino_a)
+    if fine_eff < inizio_eff:
+        return {"lordo": 0.0, "giorni": 0,
+                "dal": inizio_eff.strftime("%Y-%m-%d"), "al": fine_eff.strftime("%Y-%m-%d")}
+    tot, giorni_tot = 0.0, 0
+    for p in periodi_grezzi:
+        p_inizio = _parse_data_tfr(p["data_inizio"])
+        p_fine = fino_a if not p.get("data_fine") else _parse_data_tfr(p["data_fine"])
+        oi, of = max(p_inizio, inizio_eff), min(p_fine, fine_eff)
+        if of < oi:
+            continue
+        giorni = (of - oi).days + 1
+        tot += p["importo_settimanale"] * 52 / 12 * (giorni / 365.25)
+        giorni_tot += giorni
+    return {"lordo": round(tot, 2), "giorni": giorni_tot,
+            "dal": inizio_eff.strftime("%Y-%m-%d"), "al": fine_eff.strftime("%Y-%m-%d")}
 
 
 @router.get("/simulazione/{dipendente_id}")
@@ -1740,10 +1794,11 @@ async def get_simulazione_tfr(dipendente_id: str) -> Dict[str, Any]:
     if not dipendente:
         raise HTTPException(status_code=404, detail="Dipendente non trovato")
 
+    fino_a = _fino_a_calcolo(dipendente)
     grezzi = await db["tfr_simulazione_periodi"].find(
         {"dipendente_id": dipendente_id}, {"_id": 0}
     ).sort("data_inizio", 1).to_list(500)
-    periodi = [_periodo_con_calcolo_live(p) for p in grezzi]
+    periodi = [_periodo_con_calcolo_live(p, fino_a) for p in grezzi]
 
     periodo_aperto = periodi[-1] if periodi and periodi[-1]["aperto"] else None
     if not periodi:
@@ -1764,6 +1819,8 @@ async def get_simulazione_tfr(dipendente_id: str) -> Dict[str, Any]:
         "prossimo_data_inizio": prossimo_inizio,
         "paga_attuale": periodo_aperto["importo_settimanale"] if periodo_aperto else None,
         "paga_attuale_dal": periodo_aperto["data_inizio"] if periodo_aperto else None,
+        "cessato": dipendente.get("stato") == "cessato",
+        "data_cessazione": (dipendente.get("data_dimissione") or dipendente.get("data_cessazione") or None),
     }
 
 
@@ -1903,11 +1960,12 @@ async def dividi_in_rate_simulazione(dipendente_id: str, input_data: RateSimulaz
         raise HTTPException(status_code=400, detail="Il numero di rate deve essere almeno 1")
 
     db = Database.get_db()
+    dipendente = await db["dipendenti"].find_one({"id": dipendente_id}, {"_id": 0}) or {}
     grezzi = await db["tfr_simulazione_periodi"].find(
         {"dipendente_id": dipendente_id}, {"_id": 0}).to_list(500)
     if not grezzi:
         raise HTTPException(status_code=400, detail="Nessun periodo inserito nella simulazione")
-    periodi = [_periodo_con_calcolo_live(p) for p in grezzi]
+    periodi = [_periodo_con_calcolo_live(p, _fino_a_calcolo(dipendente)) for p in grezzi]
 
     totale_netto = round(sum(p["netto"] for p in periodi), 2)
     if totale_netto <= 0:
@@ -1930,6 +1988,72 @@ async def dividi_in_rate_simulazione(dipendente_id: str, input_data: RateSimulaz
         rate.append(voce)
 
     return {"totale_netto": totale_netto, "numero_rate": n, "rate": rate}
+
+
+@router.get("/simulazione/{dipendente_id}/liquidazione")
+@handle_errors
+async def liquidazione_finale_simulazione(dipendente_id: str) -> Dict[str, Any]:
+    """Stima di liquidazione finale con la stessa scaletta di periodi del simulatore
+    TFR: rateo di tredicesima e quattordicesima maturati (competenza gennaio-dicembre
+    per la 13ª, 1° luglio-30 giugno per la 14ª) e controvalore delle ferie residue.
+    Se il dipendente è cessato, tutto si ferma alla data di cessazione anziché a oggi
+    — stessa logica del periodo aperto che si chiude su un aumento.
+    Tredicesima e quattordicesima sono mostrate solo LORDE: la tassazione è quella
+    ordinaria IRPEF (dipende dal reddito annuo complessivo), non approssimabile con
+    un'aliquota fissa come per il TFR. Le ferie residue riusano il dato già tracciato
+    dall'app dai cedolini (dipendenti.ferie_residue), non un calcolo parallelo."""
+    db = Database.get_db()
+    dipendente = await db["dipendenti"].find_one({"id": dipendente_id}, {"_id": 0})
+    if not dipendente:
+        raise HTTPException(status_code=404, detail="Dipendente non trovato")
+
+    cessato = dipendente.get("stato") == "cessato"
+    data_cessazione = (dipendente.get("data_dimissione") or dipendente.get("data_cessazione") or "")[:10]
+    fino_a = _fino_a_calcolo(dipendente)
+
+    periodi = await db["tfr_simulazione_periodi"].find(
+        {"dipendente_id": dipendente_id}, {"_id": 0}).sort("data_inizio", 1).to_list(500)
+    if not periodi:
+        raise HTTPException(
+            status_code=400,
+            detail="Nessun periodo nella simulazione: inserisci prima la paga settimanale in corso")
+
+    data_assunzione = None
+    if dipendente.get("data_assunzione"):
+        try:
+            data_assunzione = _parse_data_tfr(dipendente["data_assunzione"])
+        except ValueError:
+            data_assunzione = None
+
+    inizio_13, fine_13 = _periodo_competenza_13(fino_a)
+    inizio_14, fine_14 = _periodo_competenza_14(fino_a)
+    tredicesima = _quota_mensilita_aggiuntiva(periodi, data_assunzione, inizio_13, fine_13, fino_a)
+    quattordicesima = _quota_mensilita_aggiuntiva(periodi, data_assunzione, inizio_14, fine_14, fino_a)
+
+    # Ferie: riusa il residuo già tracciato dall'app (da cedolino) — un solo sistema, non un doppione.
+    ferie_residue_giorni = dipendente.get("ferie_residue")
+    paga_settimanale_attuale = periodi[-1]["importo_settimanale"]
+    paga_giornaliera = round(paga_settimanale_attuale / 6, 2)  # CCNL: settimana lavorativa di 6 giorni
+    ferie = None
+    if ferie_residue_giorni is not None:
+        giorni = round(float(ferie_residue_giorni), 2)
+        ferie = {
+            "giorni_residui": giorni,
+            "paga_giornaliera": paga_giornaliera,
+            "controvalore": round(giorni * paga_giornaliera, 2),
+            "fonte": "residuo tracciato dall'app (da cedolino)",
+        }
+
+    return {
+        "dipendente_id": dipendente_id,
+        "dipendente_nome": dipendente.get("nome_completo", ""),
+        "cessato": cessato,
+        "data_cessazione": data_cessazione or None,
+        "calcolato_fino_a": fino_a.strftime("%Y-%m-%d"),
+        "tredicesima": tredicesima,
+        "quattordicesima": quattordicesima,
+        "ferie": ferie,
+    }
 
 
 @router.post("/simulazione/importa-da-excel")

@@ -2934,6 +2934,8 @@ function TfrPage({ dipendenti, getDipendente }) {
   const [sostituisci, setSostituisci] = useState(false);
   const [importoEsito, setImportoEsito] = useState(null);
 
+  const [liquidazione, setLiquidazione] = useState(null);
+
   const carica = useCallback(async (id) => {
     if (!id) return;
     setLoading(true); setErrore(""); setRate(null);
@@ -2946,6 +2948,10 @@ function TfrPage({ dipendenti, getDipendente }) {
       setSim(sm.data);
       setFormPeriodo({ data_inizio: sm.data.prossimo_data_inizio || "", data_fine: "", importo_settimanale: "" });
       setComeChiuso(false);
+      try {
+        const l = await axios.get(`${API_TFR}/simulazione/${id}/liquidazione`);
+        setLiquidazione(l.data);
+      } catch { setLiquidazione(null); }
     } catch (e) {
       setErrore(e?.response?.data?.detail || "Errore nel caricamento");
     } finally { setLoading(false); }
@@ -3164,6 +3170,42 @@ function TfrPage({ dipendenti, getDipendente }) {
               )}
             </div>
           </div>
+
+          {liquidazione && (
+            <div className="dc-card" style={{ marginBottom: 16 }}>
+              <h3 style={{ marginTop: 0 }}>
+                Liquidazione finale{liquidazione.cessato ? " — rapporto cessato" : " (simulata ad oggi)"}
+              </h3>
+              <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
+                {liquidazione.cessato
+                  ? `Calcolata fino alla data di cessazione (${formatDate(liquidazione.data_cessazione)}): il rapporto non matura più nulla dopo.`
+                  : `Il dipendente è ancora in forza: questa è una simulazione "se finisse oggi" (${formatDate(liquidazione.calcolato_fino_a)}).`}
+                {" "}Tredicesima e quattordicesima sono al lordo: la tassazione ordinaria dipende dal reddito
+                annuo complessivo e non è approssimabile con un'aliquota fissa come per il TFR.
+              </p>
+              <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+                <div>
+                  <div className="dc-muted" style={{ fontSize: 12.5 }}>Tredicesima maturata (lordo)</div>
+                  <div style={{ fontWeight: 700, fontSize: 18 }}>€ {eur(liquidazione.tredicesima.lordo)}</div>
+                  <div className="dc-muted" style={{ fontSize: 11.5 }}>{formatDate(liquidazione.tredicesima.dal)} → {formatDate(liquidazione.tredicesima.al)}</div>
+                </div>
+                <div>
+                  <div className="dc-muted" style={{ fontSize: 12.5 }}>Quattordicesima maturata (lordo)</div>
+                  <div style={{ fontWeight: 700, fontSize: 18 }}>€ {eur(liquidazione.quattordicesima.lordo)}</div>
+                  <div className="dc-muted" style={{ fontSize: 11.5 }}>{formatDate(liquidazione.quattordicesima.dal)} → {formatDate(liquidazione.quattordicesima.al)}</div>
+                </div>
+                <div>
+                  <div className="dc-muted" style={{ fontSize: 12.5 }}>Ferie residue</div>
+                  {liquidazione.ferie ? (
+                    <>
+                      <div style={{ fontWeight: 700, fontSize: 18 }}>{liquidazione.ferie.giorni_residui} gg — € {eur(liquidazione.ferie.controvalore)}</div>
+                      <div className="dc-muted" style={{ fontSize: 11.5 }}>€ {eur(liquidazione.ferie.paga_giornaliera)}/giorno · {liquidazione.ferie.fonte}</div>
+                    </>
+                  ) : <div className="dc-muted" style={{ fontSize: 13 }}>Dato non disponibile in anagrafica</div>}
+                </div>
+              </div>
+            </div>
+          )}
 
           {sim?.periodi?.length > 0 && (
             <div className="dc-card">
