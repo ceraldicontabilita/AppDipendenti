@@ -131,3 +131,19 @@ dipendente), `onomastici`.
   I payload eSignature/marca temporale/PEC vanno validati contro console.openapi.com.
 - docx→PDF firma automatica: serve `CONVERTAPI_TOKEN` nelle env di Render (ConvertAPI);
   senza token l'endpoint risponde 503. LibreOffice resta solo come fallback locale.
+- **[FIX 29/07/2026, branch `claude/audit-altri-errori`]** `bonifici_stipendi.py::associa_bonifici_a_dipendenti`:
+  il match parziale per cognome sceglieva il primo dipendente trovato nell'indice
+  anche con più omonimi (es. 'CAPEZZUTO' Vincenzo e Valerio, caso reale già
+  documentato nell'import Excel storico) — un bonifico poteva finire associato al
+  dipendente sbagliato. Ora un match parziale viene accettato solo se univoco;
+  se ambiguo il bonifico resta non associato e finisce nel nuovo campo
+  `risultati["ambigui"]` della risposta (nessuna UI lo mostra ancora — solo API).
+  **Non ancora corretto (stesso rischio, non toccato per non rischiare di rompere
+  un match legittimo senza poter verificare i dati reali)**: subito dopo, la
+  ricerca della riga `prima_nota_salari` da aggiornare (riga ~397-400) ha un
+  fallback che rifà lo stesso confronto debole per singola parola del nome se
+  `dipendente_id` non trova nulla — stesso rischio di omonimia, da rivedere.
+  Anche `riconcilia_con_estratto_conto` (riga ~415) conferma "definitivo" un
+  bonifico solo controllando che UNA parola del nome compaia nella descrizione
+  del movimento bancario, senza altra verifica sull'identità — da rafforzare
+  se emergono altri casi di omonimia.

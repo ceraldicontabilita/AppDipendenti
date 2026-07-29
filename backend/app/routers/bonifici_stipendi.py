@@ -291,6 +291,7 @@ async def associa_bonifici_a_dipendenti() -> Dict[str, Any]:
         "dipendenti_associati": 0,
         "salari_aggiornati": 0,
         "non_trovati": [],
+        "ambigui": [],
         "errori": []
     }
     
@@ -336,22 +337,38 @@ async def associa_bonifici_a_dipendenti() -> Dict[str, Any]:
     
     for bonifico in bonifici:
         ben_norm = bonifico.get("beneficiario_normalizzato", "")
-        
+
         # Cerca match esatto
         dipendente = dip_idx.get(ben_norm)
-        
-        # Se non trovato, cerca match parziale
+
+        # Se non trovato, cerca match parziale — MA solo se univoco. Due
+        # dipendenti possono condividere lo stesso cognome (caso reale in
+        # questa azienda: nell'import Excel storico 'VINCENZO' e 'VALERIO'
+        # avevano entrambi cognome 'CAPEZZUTO'): scegliere il primo trovato
+        # nell'indice associava il bonifico al dipendente sbagliato in modo
+        # silenzioso. Ora si raccolgono TUTTI i candidati (deduplicati per
+        # persona, non per voce d'indice — un dipendente compare due volte
+        # nell'indice per le due forme "cognome nome"/"nome cognome") e si
+        # associa solo se ce n'è esattamente uno; altrimenti resta segnalato
+        # come ambiguo, mai indovinato.
         if not dipendente:
-            for nome_dip, d in dip_idx.items():
-                # Match se contiene cognome
-                parti_ben = ben_norm.split()
-                parti_dip = nome_dip.split()
-                if len(parti_ben) >= 1 and len(parti_dip) >= 1:
-                    # Confronta cognome (primo elemento)
+            parti_ben = ben_norm.split()
+            if parti_ben:
+                candidati = {}
+                for nome_dip, d in dip_idx.items():
+                    parti_dip = nome_dip.split()
+                    if not parti_dip:
+                        continue
                     if parti_ben[0] == parti_dip[0] or parti_ben[-1] == parti_dip[0]:
-                        dipendente = d
-                        break
-        
+                        chiave_persona = d.get("id") or d.get("_id") or nome_dip
+                        candidati[chiave_persona] = d
+                if len(candidati) == 1:
+                    dipendente = next(iter(candidati.values()))
+                elif len(candidati) > 1:
+                    if bonifico.get("beneficiario") not in risultati["ambigui"]:
+                        risultati["ambigui"].append(bonifico.get("beneficiario"))
+                    continue
+
         if dipendente:
             try:
                 dip_id = dipendente.get("id") or dipendente.get("_id") or str(uuid.uuid4())
