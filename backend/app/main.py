@@ -27,6 +27,11 @@ async def lifespan(app: FastAPI):
         await seed_tfr_periodi()
     except Exception as e:
         logger.warning(f"Seed TFR non avviato: {e}")
+    try:
+        from .services.startup_fixes import applica_fix_avvio
+        await applica_fix_avvio()
+    except Exception as e:
+        logger.warning(f"Fix avvio non eseguiti: {e}")
     yield
     try:
         from .services.scadenze_scheduler import stop_scheduler
