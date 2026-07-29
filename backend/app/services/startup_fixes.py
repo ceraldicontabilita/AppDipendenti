@@ -14,6 +14,12 @@ logger = logging.getLogger(__name__)
 
 
 async def applica_fix_avvio():
+    """Fix una-tantum in ordine di richiesta (ognuno col suo marcatore)."""
+    await _fix_lubrano_cessato()
+    await _fix_nome_carotenuto()
+
+
+async def _fix_lubrano_cessato():
     """29/07/2026 — Lubrano Di Diego Cristian non è più in carico: va cessato
     (sparisce da Turni e da tutte le liste dei dipendenti attivi), con lo stesso
     iter del pulsante 'Cessa' in Anagrafica (evento DIPENDENTE_CESSATO)."""
@@ -57,3 +63,36 @@ async def applica_fix_avvio():
             logger.info("Fix avvio: nessun Lubrano attivo trovato, marcato come applicato")
     except Exception as e:
         logger.warning(f"Fix avvio non riuscito (non blocca l'avvio): {e}")
+
+
+async def _fix_nome_carotenuto():
+    """29/07/2026 — refuso in anagrafica: 'CARATENUTO' va corretto in
+    'CAROTENUTO ANTONELLA' (cognome CAROTENUTO, nome ANTONELLA)."""
+    try:
+        db = Database.get_db()
+        fix_id = "startup_fix_nome_carotenuto"
+        if await db.impostazioni.find_one({"id": fix_id}):
+            return
+        adesso = datetime.now(timezone.utc).isoformat()
+        corretti = []
+        async for d in db.dipendenti.find(
+                {"merged_into": {"$exists": False},
+                 "$or": [{"cognome": {"$regex": "caratenuto", "$options": "i"}},
+                         {"nome": {"$regex": "caratenuto", "$options": "i"}},
+                         {"nome_completo": {"$regex": "caratenuto", "$options": "i"}}]},
+                {"_id": 0}):
+            await db.dipendenti.update_one({"id": d["id"]}, {"$set": {
+                "cognome": "CAROTENUTO", "nome": "ANTONELLA",
+                "nome_completo": "CAROTENUTO ANTONELLA",
+            }})
+            corretti.append(d.get("nome_completo") or f"{d.get('cognome', '')} {d.get('nome', '')}".strip())
+        await db.impostazioni.update_one(
+            {"id": fix_id},
+            {"$set": {"id": fix_id, "done": True, "applicato_il": adesso, "corretti": corretti}},
+            upsert=True)
+        if corretti:
+            logger.info(f"Fix avvio: corretti in CAROTENUTO ANTONELLA: {corretti}")
+        else:
+            logger.info("Fix avvio: nessun 'Caratenuto' trovato, marcato come applicato")
+    except Exception as e:
+        logger.warning(f"Fix nome Carotenuto non riuscito (non blocca l'avvio): {e}")

@@ -2020,7 +2020,7 @@ function TurniPage({ dipendenti, turni, reload }) {
               <tbody>
                 {cfgRows.map((r, i) => (
                   <tr key={r.dipendente_id}>
-                    <td>{r.nome}{r.straniero ? <span className="dc-muted"> · straniero</span> : ""}</td>
+                    <td>{r.nome}</td>
                     <td style={{ textAlign: "center" }}>
                       <input type="checkbox" checked={!!r.sala} title="Cameriere: rotazione automatica 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo" onChange={e => setCfgRow(i, "sala", e.target.checked)} />
                     </td>
