@@ -131,4 +131,9 @@ if os.path.exists(STATIC_DIR):
         if full_path.startswith("api/"):
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Endpoint non trovato")
-        return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+        # index.html mai in cache: il browser deve sempre scaricare la versione
+        # nuova dopo ogni deploy (i bundle in /assets hanno l'hash nel nome,
+        # quindi cambiano da soli). Senza questo header Chrome riusava una copia
+        # vecchia e le voci nuove del menu "sparivano".
+        return FileResponse(os.path.join(STATIC_DIR, "index.html"),
+                            headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
