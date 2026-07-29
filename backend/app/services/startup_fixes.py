@@ -15,17 +15,19 @@ logger = logging.getLogger(__name__)
 
 async def applica_fix_avvio():
     """Fix una-tantum in ordine di richiesta (ognuno col suo marcatore)."""
-    await _fix_lubrano_cessato()
+    # 29/07/2026 — Lubrano Di Diego Cristian non più in carico
+    await _cessa_per_nome("startup_fix_lubrano_cessato", "lubrano")
     await _fix_nome_carotenuto()
+    # 29/07/2026 — Dias Mahathelge Kris non più in forza
+    await _cessa_per_nome("startup_fix_dias_cessato", "dias")
 
 
-async def _fix_lubrano_cessato():
-    """29/07/2026 — Lubrano Di Diego Cristian non è più in carico: va cessato
-    (sparisce da Turni e da tutte le liste dei dipendenti attivi), con lo stesso
-    iter del pulsante 'Cessa' in Anagrafica (evento DIPENDENTE_CESSATO)."""
+async def _cessa_per_nome(fix_id: str, pattern: str):
+    """Cessa i dipendenti ancora attivi il cui nome contiene 'pattern' (sparisce
+    da Turni e da tutte le liste attive), con lo stesso iter del pulsante 'Cessa'
+    in Anagrafica (evento DIPENDENTE_CESSATO). Una volta sola per fix_id."""
     try:
         db = Database.get_db()
-        fix_id = "startup_fix_lubrano_cessato"
         if await db.impostazioni.find_one({"id": fix_id}):
             return
         oggi = datetime.now(timezone.utc).date().isoformat()
@@ -33,8 +35,9 @@ async def _fix_lubrano_cessato():
         cessati = []
         async for d in db.dipendenti.find(
                 {"merged_into": {"$exists": False},
-                 "$or": [{"cognome": {"$regex": "lubrano", "$options": "i"}},
-                         {"nome_completo": {"$regex": "lubrano", "$options": "i"}}]},
+                 "$or": [{"cognome": {"$regex": pattern, "$options": "i"}},
+                         {"nome": {"$regex": pattern, "$options": "i"}},
+                         {"nome_completo": {"$regex": pattern, "$options": "i"}}]},
                 {"_id": 0}):
             if (d.get("stato") or "") == "cessato":
                 continue
@@ -51,18 +54,16 @@ async def _fix_lubrano_cessato():
                     "data_cessazione": oggi,
                 }, db, source_module="startup_fix", user="system")
             except Exception as e:
-                logger.warning(f"Fix Lubrano: evento cessazione non propagato per {nome}: {e}")
+                logger.warning(f"Fix {fix_id}: evento cessazione non propagato per {nome}: {e}")
             cessati.append(nome)
         await db.impostazioni.update_one(
             {"id": fix_id},
             {"$set": {"id": fix_id, "done": True, "applicato_il": adesso, "cessati": cessati}},
             upsert=True)
-        if cessati:
-            logger.info(f"Fix avvio: cessati {cessati}")
-        else:
-            logger.info("Fix avvio: nessun Lubrano attivo trovato, marcato come applicato")
+        logger.info(f"Fix {fix_id}: cessati {cessati}" if cessati
+                    else f"Fix {fix_id}: nessun dipendente attivo trovato, marcato come applicato")
     except Exception as e:
-        logger.warning(f"Fix avvio non riuscito (non blocca l'avvio): {e}")
+        logger.warning(f"Fix {fix_id} non riuscito (non blocca l'avvio): {e}")
 
 
 async def _fix_nome_carotenuto():

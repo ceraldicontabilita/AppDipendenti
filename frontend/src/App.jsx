@@ -1669,11 +1669,13 @@ function TurniPage({ dipendenti, turni, reload }) {
   const TEAM = ["luigi", "angela", "giuliano", "liliana", "carmine", "mario"];
   const isTeam = (dip) => TEAM.includes((dip.nome || "").trim().toLowerCase());
   const UNICI = ["Lunga", "Riposo"]; // un solo turno di questo tipo per giorno
-  // Dipendenti da NON mostrare nei turni (richiesta titolare)
-  const NASCOSTI = [["antonella","ceraldi"],["marina","liuzza"],["vincenzo","ceraldi"],["valerio","ceraldi"]];
-  const isNascosto = (d) => { const f = `${d.nome||""} ${d.cognome||""}`.toLowerCase(); return NASCOSTI.some(([a,b]) => f.includes(a) && f.includes(b)); };
+  // Dipendenti da NON mostrare nei turni (richiesta titolare: Ceraldi Vincenzo,
+  // Valerio e Antonella non fanno turni). Il confronto include anche nome_completo,
+  // così vale pure per i record anagrafici con solo quel campo compilato.
+  const NASCOSTI = [["antonella","ceraldi"],["vincenzo","ceraldi"],["valerio","ceraldi"]];
+  const isNascosto = (d) => { const f = `${d.nome||""} ${d.cognome||""} ${d.nome_completo||""}`.toLowerCase(); return NASCOSTI.some(([a,b]) => f.includes(a) && f.includes(b)); };
   // Sempre presente tutti i giorni (amministratrice)
-  const isSemprePresente = (d) => { const f = `${d.nome||""} ${d.cognome||""}`.toLowerCase(); return f.includes("antonietta") && f.includes("ceraldi"); };
+  const isSemprePresente = (d) => { const f = `${d.nome||""} ${d.cognome||""} ${d.nome_completo||""}`.toLowerCase(); return f.includes("antonietta") && f.includes("ceraldi"); };
   const dipTurni = dipendenti.filter(d => !isNascosto(d));
 
   const salva = async (updates) => {

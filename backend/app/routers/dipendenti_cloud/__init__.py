@@ -1740,21 +1740,63 @@ async def create_or_update_assegnazione(data: dict):
 # ============ CONFIG TURNI PER DIPENDENTE ============
 # Per ogni dipendente: turno abituale (turno_id) + giorno di riposo fisso
 # settimanale (riposo_giorno, nome italiano). Usati da "Genera settimana".
+def _nome_norm_cfg(s) -> str:
+    return re.sub(r"[^a-z]", "", str(s or "").lower())
+
+
 @router.get("/turni-config")
 async def get_turni_config():
-    return await get_db().turni_config.find({}, {"_id": 0}).to_list(1000)
+    """Config turni per dipendente. Ripara le relazioni ORFANE: se una config punta
+    a un dipendente_id che non esiste più (dipendente reimportato/ricreato con un
+    nuovo id), la riaggancia per nome al dipendente attivo corrispondente — era la
+    causa dei dipendenti che 'non generano turni' senza nessun errore visibile."""
+    db = get_db()
+    configs = await db.turni_config.find({}, {"_id": 0}).to_list(1000)
+    dips = await db.dipendenti.find({"merged_into": {"$exists": False}},
+                                    {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "nome_completo": 1,
+                                     "stato": 1, "attivo": 1}).to_list(1000)
+    ids_validi = {d["id"] for d in dips}
+    con_config = {c["dipendente_id"] for c in configs}
+    per_nome = {}
+    for d in dips:
+        if d.get("attivo") is False or (d.get("stato") or "attivo") in ("cessato", "dimesso", "archiviato"):
+            continue
+        for k in {_nome_norm_cfg(f"{d.get('cognome','')}{d.get('nome','')}"),
+                  _nome_norm_cfg(f"{d.get('nome','')}{d.get('cognome','')}"),
+                  _nome_norm_cfg(d.get("nome_completo"))}:
+            if k:
+                per_nome.setdefault(k, d)
+    for c in configs:
+        if c["dipendente_id"] in ids_validi:
+            continue
+        k = _nome_norm_cfg(c.get("nome_riferimento"))
+        d = per_nome.get(k) if k else None
+        if d and d["id"] not in con_config:
+            await db.turni_config.update_one(
+                {"dipendente_id": c["dipendente_id"]},
+                {"$set": {"dipendente_id": d["id"], "updated_at": now_iso()}})
+            con_config.add(d["id"])
+            c["dipendente_id"] = d["id"]
+    return configs
 
 
 @router.post("/turni-config")
 async def save_turni_config(data: dict = Body(...)):
-    """Body: {voci: [{dipendente_id, turno_id, riposo_giorno}]}."""
+    """Body: {voci: [{dipendente_id, turno_id, riposo_giorno}]}. Salva anche il nome
+    del dipendente (nome_riferimento) per poter riparare la relazione se in futuro
+    l'anagrafica venisse reimportata con id nuovi."""
     db = get_db()
+    dips = await db.dipendenti.find({}, {"_id": 0, "id": 1, "nome": 1, "cognome": 1,
+                                         "nome_completo": 1}).to_list(1000)
+    nomi = {d["id"]: (d.get("nome_completo") or f"{d.get('cognome', '')} {d.get('nome', '')}".strip())
+            for d in dips}
     for v in (data.get("voci") or []):
         if not v.get("dipendente_id"):
             continue
         await db.turni_config.update_one(
             {"dipendente_id": v["dipendente_id"]},
             {"$set": {"dipendente_id": v["dipendente_id"],
+                      "nome_riferimento": nomi.get(v["dipendente_id"]) or None,
                       "turno_id": v.get("turno_id") or None,
                       "riposo_giorno": v.get("riposo_giorno") or None,
                       "lunga_giorni": v.get("lunga_giorni") or [],
