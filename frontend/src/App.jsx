@@ -3071,7 +3071,7 @@ function TfrPage({ dipendenti, getDipendente }) {
       await axios.put(`${API_TFR}/simulazione/${dipId}/periodi/${modificaPeriodo.id}`, {
         importo_settimanale: Number(modificaPeriodo.importo_settimanale),
         data_inizio: modificaPeriodo.data_inizio || undefined,
-        data_fine: modificaPeriodo.aperto ? undefined : (modificaPeriodo.data_fine || undefined),
+        data_fine: modificaPeriodo.data_fine || undefined,
       });
       setModificaPeriodo(null);
       await carica(dipId);
@@ -3190,9 +3190,9 @@ function TfrPage({ dipendenti, getDipendente }) {
             <h3 style={{ marginTop: 0 }}>Simulazione storica TFR</h3>
             <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
               Formula: importo settimanale × settimane = retribuzione utile → ÷ divisore = quota lorda → meno
-              INPS 0,50% sulla retribuzione utile → meno IRPEF {parametri.irpef_percento}% sul lordo = netto.
-              L'ultimo periodo è sempre "in corso" e matura fino ad oggi da solo. Non modifica il TFR ufficiale
-              qui sopra.
+              INPS 0,50% sulla retribuzione utile → meno IRPEF sul lordo (% globale {parametri.irpef_percento}%,
+              modificabile riga per riga nella colonna IRPEF) = netto. L'ultimo periodo è sempre "in corso" e
+              matura fino ad oggi da solo. Non modifica il TFR ufficiale qui sopra.
             </p>
 
             {sim?.paga_attuale != null && (
@@ -3214,7 +3214,7 @@ function TfrPage({ dipendenti, getDipendente }) {
                       <th style={{ textAlign: "right" }}>Retrib. utile €</th>
                       <th style={{ textAlign: "right" }}>Lordo €</th>
                       <th style={{ textAlign: "right" }}>INPS 0,50% €</th>
-                      <th style={{ textAlign: "right" }}>IRPEF {parametri.irpef_percento}% €</th>
+                      <th style={{ textAlign: "right" }}>IRPEF % · €</th>
                       <th style={{ textAlign: "right" }}>Netto €</th><th></th>
                     </tr>
                   </thead>
@@ -3235,7 +3235,14 @@ function TfrPage({ dipendenti, getDipendente }) {
                         <td style={{ textAlign: "right" }}>{eur(p.retribuzione_utile)}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.lordo)}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.inps)}</td>
-                        <td style={{ textAlign: "right" }}>{eur(p.imposte)}</td>
+                        <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                          <input type="number" step="0.01" style={{ ...cellaInput, width: 58 }} key={`irp-${p.id}-${p.irpef_percento}`}
+                            defaultValue={p.irpef_percento}
+                            title="% IRPEF solo di questo periodo: modifica e premi Invio per salvare"
+                            onBlur={e => salvaCella(p.id, "irpef_percento", e.target.value, p.irpef_percento)}
+                            onKeyDown={e => e.key === "Enter" && e.target.blur()} />
+                          <span style={{ marginLeft: 6 }}>{eur(p.imposte)}</span>
+                        </td>
                         <td style={{ textAlign: "right", fontWeight: 700 }}>{eur(p.netto)}</td>
                         <td style={{ display: "flex", gap: 4 }}>
                           <button className="dc-btn" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => apriModificaPeriodo(p)} title="Correggi le date">✎</button>
@@ -3414,15 +3421,12 @@ function TfrPage({ dipendenti, getDipendente }) {
                 <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Dal</label>
                 <MiniCalendario value={modificaPeriodo.data_inizio} onChange={v => setModificaPeriodo(m => ({ ...m, data_inizio: v }))} />
               </div>
-              {!modificaPeriodo.aperto && (
-                <div>
-                  <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Al</label>
-                  <MiniCalendario value={modificaPeriodo.data_fine} onChange={v => setModificaPeriodo(m => ({ ...m, data_fine: v }))} />
-                </div>
-              )}
-              {modificaPeriodo.aperto && (
-                <p className="dc-muted" style={{ fontSize: 12.5, margin: 0 }}>Periodo in corso: resta senza data di fine.</p>
-              )}
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>
+                  Al{modificaPeriodo.aperto ? " (vuoto = resta in corso; scegli una data per chiuderlo)" : ""}
+                </label>
+                <MiniCalendario value={modificaPeriodo.data_fine} onChange={v => setModificaPeriodo(m => ({ ...m, data_fine: v }))} />
+              </div>
               <div>
                 <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>€ a settimana</label>
                 <input type="number" step="0.01" style={inp} value={modificaPeriodo.importo_settimanale}

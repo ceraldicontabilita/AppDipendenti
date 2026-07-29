@@ -1711,6 +1711,8 @@ class PeriodoSimulazioneInput(BaseModel):
     data_inizio: Optional[str] = None
     # Se omessa: periodo APERTO (tuttora in corso). Se valorizzata: periodo storico chiuso.
     data_fine: Optional[str] = None
+    # % IRPEF SOLO per questo periodo (se omessa vale quella globale dei parametri).
+    irpef_percento: Optional[float] = None
 
 
 class RateSimulazioneInput(BaseModel):
@@ -1778,10 +1780,14 @@ def _periodo_con_calcolo_live(p: Dict[str, Any], fino_a: Optional[datetime] = No
     Sul DB restano solo date e importo: così qualsiasi correzione di formula o
     parametri si riflette subito su tutto lo storico."""
     prm = parametri or PARAMETRI_TFR_DEFAULT
+    # % IRPEF: quella del singolo periodo se impostata, altrimenti la globale.
+    irpef = p.get("irpef_percento")
+    irpef = prm["irpef_percento"] if irpef is None else float(irpef)
     fine = _parse_data_tfr(p["data_fine"]) if p.get("data_fine") else (fino_a or _oggi_tfr())
     calc = _calcola_periodo_tfr(_parse_data_tfr(p["data_inizio"]), fine, p["importo_settimanale"],
-                                prm["divisore"], prm["irpef_percento"])
-    return {**p, **calc, "data_fine": p.get("data_fine"), "aperto": not p.get("data_fine")}
+                                prm["divisore"], irpef)
+    return {**p, **calc, "irpef_percento": round(irpef, 2),
+            "data_fine": p.get("data_fine"), "aperto": not p.get("data_fine")}
 
 
 def _periodo_competenza_13(fino_a: datetime):
@@ -1961,6 +1967,9 @@ async def aggiungi_periodo_simulazione(dipendente_id: str, input_data: PeriodoSi
                 detail=f"Il periodo si sovrappone: l'ultimo periodo finisce il "
                        f"{ultimo['data_fine']}, questo dovrebbe iniziare dopo")
 
+    if input_data.irpef_percento is not None and not (0 <= input_data.irpef_percento < 100):
+        raise HTTPException(status_code=400, detail="La % IRPEF deve essere tra 0 e 100")
+
     periodo = {
         "id": str(uuid4()),
         "dipendente_id": dipendente_id,
@@ -1970,6 +1979,8 @@ async def aggiungi_periodo_simulazione(dipendente_id: str, input_data: PeriodoSi
         "chiuso_automaticamente": False,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if input_data.irpef_percento is not None:
+        periodo["irpef_percento"] = round(input_data.irpef_percento, 2)
     await db["tfr_simulazione_periodi"].insert_one(periodo.copy())
 
     return {"success": True, "periodo": _periodo_con_calcolo_live(periodo, None, await _parametri_tfr(db))}
@@ -1979,6 +1990,7 @@ class ModificaPeriodoInput(BaseModel):
     importo_settimanale: Optional[float] = None
     data_inizio: Optional[str] = None
     data_fine: Optional[str] = None  # ha effetto solo se il periodo era già chiuso
+    irpef_percento: Optional[float] = None  # % IRPEF solo di questo periodo
 
 
 @router.put("/simulazione/{dipendente_id}/periodi/{periodo_id}")
@@ -1987,10 +1999,9 @@ async def modifica_periodo_simulazione(dipendente_id: str, periodo_id: str,
                                        input_data: ModificaPeriodoInput) -> Dict[str, Any]:
     """Corregge un periodo esistente — QUALSIASI, non solo l'ultimo — utile se hai
     sbagliato l'importo settimanale o una data. Ricalcola solo quel periodo, senza
-    toccare gli altri. Non cambia se il periodo è aperto o chiuso: se era aperto
-    resta aperto (torna a maturare al volo), se era chiuso puoi correggerne anche la
-    data di fine. Controlla che non si sovrapponga ai periodi immediatamente
-    precedente/successivo."""
+    toccare gli altri. Impostare una data di fine su un periodo "in corso" lo
+    CHIUDE a quella data (smette di maturare); senza data di fine resta com'era.
+    Controlla che non si sovrapponga ai periodi immediatamente precedente/successivo."""
     db = Database.get_db()
     tutti = await db["tfr_simulazione_periodi"].find(
         {"dipendente_id": dipendente_id}, {"_id": 0}).sort("data_inizio", 1).to_list(500)
@@ -1998,7 +2009,6 @@ async def modifica_periodo_simulazione(dipendente_id: str, periodo_id: str,
     if idx is None:
         raise HTTPException(status_code=404, detail="Periodo non trovato")
     periodo = tutti[idx]
-    era_aperto = not periodo.get("data_fine")
 
     nuovo_importo = (input_data.importo_settimanale if input_data.importo_settimanale is not None
                      else periodo["importo_settimanale"])
@@ -2006,9 +2016,9 @@ async def modifica_periodo_simulazione(dipendente_id: str, periodo_id: str,
         raise HTTPException(status_code=400, detail="L'importo settimanale deve essere positivo")
 
     nuova_inizio_str = input_data.data_inizio[:10] if input_data.data_inizio else periodo["data_inizio"]
-    nuova_fine_str = periodo.get("data_fine")
-    if not era_aperto and input_data.data_fine:
-        nuova_fine_str = input_data.data_fine[:10]
+    # Una data di fine fornita vale sempre: su un periodo chiuso la corregge,
+    # su un periodo in corso lo chiude a quella data.
+    nuova_fine_str = input_data.data_fine[:10] if input_data.data_fine else periodo.get("data_fine")
 
     try:
         nuova_inizio = _parse_data_tfr(nuova_inizio_str)
@@ -2032,6 +2042,10 @@ async def modifica_periodo_simulazione(dipendente_id: str, periodo_id: str,
 
     aggiornamento: Dict[str, Any] = {"data_inizio": nuova_inizio_str,
                                      "importo_settimanale": round(nuovo_importo, 2)}
+    if input_data.irpef_percento is not None:
+        if not (0 <= input_data.irpef_percento < 100):
+            raise HTTPException(status_code=400, detail="La % IRPEF deve essere tra 0 e 100")
+        aggiornamento["irpef_percento"] = round(input_data.irpef_percento, 2)
     if nuova_fine:
         aggiornamento["data_fine"] = nuova_fine_str
     # I valori calcolati non si salvano: ogni lettura ricalcola con la formula corrente.
