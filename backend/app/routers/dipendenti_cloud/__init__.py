@@ -1805,6 +1805,26 @@ async def save_turni_config(data: dict = Body(...)):
                       "updated_at": now_iso()}}, upsert=True)
     return {"ok": True, "salvati": len(data.get("voci") or [])}
 
+@router.get("/turni-chiusura-pomeridiana")
+async def get_chiusura_pomeridiana():
+    """Periodo in cui il bar resta chiuso di pomeriggio (impostato nel modale
+    Configura turni): in quelle settimane tutti i baristi in rotazione fanno la
+    mattina e riposano la domenica, come il resto della squadra."""
+    doc = await get_db().impostazioni.find_one({"id": "chiusura_pomeridiana"}, {"_id": 0}) or {}
+    return {"attiva": bool(doc.get("attiva")), "dal": doc.get("dal"), "al": doc.get("al")}
+
+
+@router.post("/turni-chiusura-pomeridiana")
+async def save_chiusura_pomeridiana(data: dict = Body(...)):
+    """Body: {attiva: bool, dal: YYYY-MM-DD, al: YYYY-MM-DD}."""
+    await get_db().impostazioni.update_one(
+        {"id": "chiusura_pomeridiana"},
+        {"$set": {"id": "chiusura_pomeridiana", "attiva": bool(data.get("attiva")),
+                  "dal": data.get("dal") or None, "al": data.get("al") or None,
+                  "updated_at": now_iso()}}, upsert=True)
+    return {"ok": True}
+
+
 # ============ ONOMASTICI (riposo per onomastico nei turni) ============
 # Date standard italiane (mese, giorno) per nome proprio. Prefillate e
 # MODIFICABILI in gestione. I nomi non presenti sono "stranieri" → esclusi.

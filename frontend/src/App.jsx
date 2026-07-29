@@ -1715,7 +1715,15 @@ function TurniPage({ dipendenti, turni, reload }) {
   const [cfgRows, setCfgRows] = useState([]);
   const isoT = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const caricaCfg = () => axios.get(`${API}/turni-config`).then(r => setTurniCfg(r.data || [])).catch(() => {});
-  useEffect(() => { caricaCfg(); axios.get(`${API}/ferie`).then(r => setFerieTurni(r.data || [])).catch(() => {}); }, []);
+  // Periodo di chiusura pomeridiana del bar (es. estate): impostato nel modale Configura turni.
+  const [chiusuraPom, setChiusuraPom] = useState({ attiva: false, dal: "", al: "" });
+  useEffect(() => {
+    caricaCfg();
+    axios.get(`${API}/ferie`).then(r => setFerieTurni(r.data || [])).catch(() => {});
+    axios.get(`${API}/turni-chiusura-pomeridiana`)
+      .then(r => setChiusuraPom({ attiva: !!r.data.attiva, dal: r.data.dal || "", al: r.data.al || "" }))
+      .catch(() => {});
+  }, []);
   const cfgDi = (dipId) => turniCfg.find(c => c.dipendente_id === dipId) || {};
   const ferieDataT = (dipId, dStr) => ferieTurni.find(f => f.dipendente_id === dipId
     && (f.stato === 'approvata' || !f.stato)
@@ -1748,6 +1756,7 @@ function TurniPage({ dipendenti, turni, reload }) {
   const salvaCfg = async () => {
     await axios.post(`${API}/turni-config`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, turno_id: r.turno_id || null, riposo_giorno: r.riposo_giorno || null, lunga_giorni: lungaGiorniDi(r), rotazione: r.rotazione || null, sala: !!r.sala })) });
     await axios.post(`${API}/onomastici`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, mese: r.onom_mese ? Number(r.onom_mese) : null, giorno: r.onom_giorno ? Number(r.onom_giorno) : null, attivo: r.onom_attivo })) });
+    await axios.post(`${API}/turni-chiusura-pomeridiana`, chiusuraPom).catch(() => {});
     await caricaCfg();
     axios.get(`${API}/onomastici/settimana?settimana=${settimana}`).then(r => setOnomSett(r.data || []));
     setShowCfg(false);
@@ -1788,6 +1797,14 @@ function TurniPage({ dipendenti, turni, reload }) {
     // Turni "sala" per la rotazione camerieri
     const idSalaMatt = idTurno("Mattina 8-16") || idTurno("Mattina 7-15");
     const idSalaPom = idTurno("Pomeriggio");
+    // Chiusura pomeridiana del bar (periodo impostato nel modale Configura turni)
+    const chiusuraAttiva = chiusuraPom.attiva && chiusuraPom.dal && chiusuraPom.al;
+    const inChiusuraPom = (dStr) => chiusuraAttiva && dStr >= chiusuraPom.dal && dStr <= chiusuraPom.al;
+    const lun7 = new Date(lunedi); lun7.setDate(lunedi.getDate() + 7);
+    const lun14 = new Date(lunedi); lun14.setDate(lunedi.getDate() + 14);
+    // La settimana che stiamo generando è quella immediatamente precedente all'inizio
+    // della chiusura se la data di inizio cade nella settimana successiva.
+    const settimanaPreChiusura = chiusuraAttiva && chiusuraPom.dal >= isoT(lun7) && chiusuraPom.dal < isoT(lun14);
     // Camerieri in rotazione bilanciata: 2 Lunga, 2 Mattina, 2 Pomeriggio, 1 Riposo.
     // Riposo nei giorni feriali (Lun-Gio) → ven/sab/dom restano pieni (più copertura weekend).
     const camerieri = dipTurni.filter(d => cfgDi(d.id).sala).map(d => d.id);
@@ -1829,6 +1846,14 @@ function TurniPage({ dipendenti, turni, reload }) {
         const mattinaQuestaSett = settimanaPari ? iniziaMattina : !iniziaMattina;
         turnoLavoro = mattinaQuestaSett ? idBarMattina : idBarPom;
       }
+      // Regole baristi legate alla chiusura pomeridiana (vedi modale Configura turni):
+      // - la domenica il bar è chiuso di pomeriggio → il gruppo di pomeriggio riposa
+      //   la domenica (1 gruppo lavora 7 giorni, l'altro 6);
+      // - nel periodo di chiusura pomeridiana tutti i baristi fanno la mattina e
+      //   riposano la domenica come il resto della squadra;
+      // - la settimana precedente all'inizio della chiusura salta il riposo
+      //   infrasettimanale (il riposo arriva con la domenica di chiusura).
+      const saltaRiposoInfra = c.rotazione && settimanaPreChiusura;
       for (let gi = 0; gi < 7; gi++) {
         const date = new Date(lunedi); date.setDate(lunedi.getDate() + gi);
         const dStr = isoT(date);
@@ -1836,10 +1861,12 @@ function TurniPage({ dipendenti, turni, reload }) {
         let target;  // undefined = nessuna opinione (lascio la cella com'è)
         if (ferieIn(dip.id, dStr)) target = idFerie || idRiposo;                       // ferie approvata (vale per TUTTI)
         else if (onomSett.some(o => o.dipendente_id === dip.id && o.giorno_nome === giorno)) target = idRiposo; // onomastico
+        else if (c.rotazione && inChiusuraPom(dStr)) target = gi === 6 ? idRiposo : (idBarMattina || null); // chiusura pom.: tutti mattina + riposo domenica
+        else if (c.rotazione && gi === 6 && idBarPom && turnoLavoro === idBarPom) target = idRiposo; // domenica pomeriggio chiusi: il gruppo pomeriggio riposa
         else if (configurato) {
-          if (c.riposo_giorno && c.riposo_giorno === giorno) target = idRiposo;        // riposo fisso settimanale
+          if (c.riposo_giorno && c.riposo_giorno === giorno && !saltaRiposoInfra) target = idRiposo; // riposo fisso settimanale
           else if ((c.lunga_giorni || []).includes(giorno)) target = idLunga || turnoLavoro || null; // Lunga (ven/sab/dom)
-          else target = turnoLavoro || null;                                            // turno abituale / rotazione bar
+          else target = turnoLavoro || null;                                            // turno abituale / rotazione bar (o giorno di riposo saltato pre-chiusura)
         }
         if (target !== undefined) {
           updates.push({ dipendente_id: dip.id, giorno, turno_id: target || null }); tocco++;
@@ -2016,6 +2043,30 @@ function TurniPage({ dipendenti, turni, reload }) {
           <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 920, width: "100%", marginTop: 20 }}>
             <h3 style={{ marginTop: 0 }}>⚙️ Configura turni dipendenti</h3>
             <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Punto unico dei turni. Per ognuno scegli UNA modalità: <b>Sala</b> (cameriere → rotazione automatica 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo, riposi nei feriali per coprire il weekend), oppure <b>turno abituale</b>, oppure <b>rotazione bar</b> (mattina ↔ pomeriggio ogni settimana). In più: <b>riposo fisso</b>, la <b>Lunga</b> (1 a settimana, Ven/Sab/Dom; spunta <b>doppia</b> per chi la fa due volte) e l’<b>onomastico</b>. “Genera settimana” mette sempre Ferie nei giorni approvati e Riposo nell’onomastico. Le celle restano modificabili a mano. Salva su database (MongoDB Atlas).</p>
+            <div style={{ background: "#eef1ea", border: "1px solid #d7e0d3", borderRadius: 10, padding: "10px 14px", marginBottom: 12 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 14 }}>
+                <input type="checkbox" checked={chiusuraPom.attiva} onChange={e => setChiusuraPom(cp => ({ ...cp, attiva: e.target.checked }))} />
+                🌙 Bar chiuso di pomeriggio nel periodo
+              </label>
+              <p className="dc-muted" style={{ fontSize: 12.5, margin: "4px 0 8px" }}>
+                Nel periodo scelto tutti i baristi in rotazione fanno la mattina e riposano la domenica;
+                la settimana precedente all'inizio salta il riposo infrasettimanale (il riposo arriva con
+                la domenica di chiusura). Fuori dal periodo vale la regola normale: il gruppo di pomeriggio
+                riposa la domenica (un gruppo lavora 7 giorni, l'altro 6).
+              </p>
+              {chiusuraPom.attiva && (
+                <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+                  <div style={{ minWidth: 150 }}>
+                    <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Dal</label>
+                    <MiniCalendario value={chiusuraPom.dal} onChange={v => setChiusuraPom(cp => ({ ...cp, dal: v }))} />
+                  </div>
+                  <div style={{ minWidth: 150 }}>
+                    <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Al</label>
+                    <MiniCalendario value={chiusuraPom.al} onChange={v => setChiusuraPom(cp => ({ ...cp, al: v }))} />
+                  </div>
+                </div>
+              )}
+            </div>
             <div style={{ maxHeight: "60vh", overflow: "auto" }}>
             <table className="dc-table">
               <thead><tr><th>Dipendente</th><th>Sala<br/><span style={{fontWeight:400,fontSize:11}}>cameriere</span></th><th>Turno abituale</th><th>Rotazione bar<br/><span style={{fontWeight:400,fontSize:11}}>mattina ↔ pom</span></th><th>Riposo fisso</th><th>Lunga<br/><span style={{fontWeight:400,fontSize:11}}>1/sett · doppia</span></th><th>Onomastico<br/><span style={{fontWeight:400,fontSize:11}}>gg / mm · attivo</span></th></tr></thead>
