@@ -1849,8 +1849,8 @@ function TurniPage({ dipendenti, turni, reload }) {
       // Regole baristi legate alla chiusura pomeridiana (vedi modale Configura turni):
       // - la domenica il bar è chiuso di pomeriggio → il gruppo di pomeriggio riposa
       //   la domenica (1 gruppo lavora 7 giorni, l'altro 6);
-      // - nel periodo di chiusura pomeridiana tutti i baristi fanno la mattina e
-      //   riposano la domenica come il resto della squadra;
+      // - nel periodo di chiusura pomeridiana la rotazione resta regolare
+      //   (2 di mattina, 2 di pomeriggio) ma la domenica riposano tutti;
       // - la settimana precedente all'inizio della chiusura salta il riposo
       //   infrasettimanale (il riposo arriva con la domenica di chiusura).
       const saltaRiposoInfra = c.rotazione && settimanaPreChiusura;
@@ -1861,7 +1861,7 @@ function TurniPage({ dipendenti, turni, reload }) {
         let target;  // undefined = nessuna opinione (lascio la cella com'è)
         if (ferieIn(dip.id, dStr)) target = idFerie || idRiposo;                       // ferie approvata (vale per TUTTI)
         else if (onomSett.some(o => o.dipendente_id === dip.id && o.giorno_nome === giorno)) target = idRiposo; // onomastico
-        else if (c.rotazione && inChiusuraPom(dStr)) target = gi === 6 ? idRiposo : (idBarMattina || null); // chiusura pom.: tutti mattina + riposo domenica
+        else if (c.rotazione && inChiusuraPom(dStr)) target = gi === 6 ? idRiposo : (turnoLavoro || null); // chiusura pom.: rotazione regolare + riposo domenica per tutti
         else if (c.rotazione && gi === 6 && idBarPom && turnoLavoro === idBarPom) target = idRiposo; // domenica pomeriggio chiusi: il gruppo pomeriggio riposa
         else if (configurato) {
           if (c.riposo_giorno && c.riposo_giorno === giorno && !saltaRiposoInfra) target = idRiposo; // riposo fisso settimanale
@@ -2049,7 +2049,8 @@ function TurniPage({ dipendenti, turni, reload }) {
                 🌙 Bar chiuso di pomeriggio nel periodo
               </label>
               <p className="dc-muted" style={{ fontSize: 12.5, margin: "4px 0 8px" }}>
-                Nel periodo scelto tutti i baristi in rotazione fanno la mattina e riposano la domenica;
+                Nel periodo scelto i baristi in rotazione mantengono i turni regolari (2 di mattina
+                Bar 6:30-15 e 2 di pomeriggio Bar 15-21) ma la domenica riposano tutti;
                 la settimana precedente all'inizio salta il riposo infrasettimanale (il riposo arriva con
                 la domenica di chiusura). Fuori dal periodo vale la regola normale: il gruppo di pomeriggio
                 riposa la domenica (un gruppo lavora 7 giorni, l'altro 6).
