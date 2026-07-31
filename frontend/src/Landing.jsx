@@ -18,31 +18,37 @@ const FEATURES = [
     icon: Palmtree,
     title: "Ferie & permessi",
     text: "Residui calcolati in automatico per ogni dipendente, aggiornati mese per mese — niente più tabelle da ricontrollare a mano.",
+    to: "/dipendenti/ferie-permessi",
   },
   {
     icon: PiggyBank,
     title: "TFR progressivo",
     text: "Accantonamento anno per anno tenuto in automatico dal sistema, sempre allineato a cedolini e 13ª/14ª.",
+    to: "/dipendenti/tfr",
   },
   {
     icon: Clock,
     title: "Timbrature geolocalizzate",
     text: "Entrata e uscita dal telefono, solo dalla sede. Atteso (da turno) e ore effettive a confronto in un colpo d'occhio.",
+    to: "/dipendenti/timbrature",
   },
   {
     icon: CalendarClock,
     title: "Turni automatici",
     text: "Rotazioni, giorno di riposo, Lunga e onomastici generati in un clic, sempre modificabili a mano.",
+    to: "/dipendenti/turni",
   },
   {
     icon: Wallet,
     title: "Buste paga & Prima Nota",
     text: "Cedolini, voci di busta e saldo progressivo per dipendente, con ricerca su qualsiasi codice.",
+    to: "/dipendenti/buste-paga",
   },
   {
     icon: FolderOpen,
     title: "Documenti & contratti",
     text: "Fascicolo digitale, firma dei contratti e archivio documenti classificato automaticamente.",
+    to: "/dipendenti/documenti",
   },
 ];
 
@@ -141,10 +147,18 @@ export default function Landing() {
         <div style={sectionTitle}>Tutto quello che oggi è sparso tra più fogli</div>
         <div style={sectionSub}>Un solo posto per ogni calcolo, sempre coerente tra i moduli</div>
         <div style={grid}>
-          {FEATURES.map(({ icon: Icon, title, text }) => (
-            <div style={featCard} key={title}>
+          {FEATURES.map(({ icon: Icon, title, text, to }) => (
+            <div
+              style={{ ...featCard, cursor: "pointer" }}
+              key={title}
+              onClick={() => nav(to)}
+              role="link"
+              title={`Apri ${title}`}
+            >
               <div style={featIcon}><Icon size={20} /></div>
-              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>{title}</div>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                {title} <ChevronRight size={15} color={MUTED} />
+              </div>
               <div style={{ color: MUTED, fontSize: 13.5, lineHeight: 1.5 }}>{text}</div>
             </div>
           ))}
