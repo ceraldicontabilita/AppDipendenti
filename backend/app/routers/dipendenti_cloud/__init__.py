@@ -3182,6 +3182,46 @@ async def get_dashboard_stats():
 # Moduli di competenza HR (gli altri appartengono all'ERP contabile OpenClaw).
 MODULI_HR = ["dipendenti", "cedolini"]
 
+# ID interni (UUID) dentro i messaggi degli alert: vanno tradotti in testo
+# leggibile per il titolare (data, importo e descrizione del movimento banca).
+_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def _data_it(iso: str) -> str:
+    try:
+        return datetime.strptime(iso[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        return iso or "?"
+
+
+async def _uuid_in_testo_leggibile(mov_id: str) -> Optional[str]:
+    """Se l'UUID corrisponde a un movimento bancario, ritorna «descrizione»
+    con data e importo; altrimenti None (l'ID resta com'è)."""
+    for coll, campo_desc in (("estratto_conto_movimenti", "descrizione_originale"),
+                             ("prima_nota_banca", "descrizione")):
+        m = await get_db()[coll].find_one({"id": mov_id}, {"_id": 0})
+        if m:
+            desc = (m.get(campo_desc) or m.get("descrizione") or "").strip()
+            importo = m.get("importo")
+            pezzi = [f"bancario del {_data_it(m.get('data', ''))}"]
+            if importo is not None:
+                pezzi.append(f"di € {abs(float(importo)):.2f}")
+            if desc:
+                pezzi.append(f"«{desc[:120]}»")
+            return " ".join(pezzi)
+    return None
+
+
+async def _messaggio_leggibile(messaggio: str) -> str:
+    """Sostituisce gli UUID nel messaggio con i dati veri del movimento banca."""
+    if not messaggio:
+        return messaggio
+    for mov_id in set(_UUID_RE.findall(messaggio)):
+        leggibile = await _uuid_in_testo_leggibile(mov_id)
+        if leggibile:
+            messaggio = messaggio.replace(mov_id, leggibile)
+    return messaggio
+
 
 @router.get("/alerts")
 async def lista_alert(modulo: str = "", severita: str = "", stato: str = "aperto"):
@@ -3202,6 +3242,13 @@ async def lista_alert(modulo: str = "", severita: str = "", stato: str = "aperto
         q["severita"] = severita
     sort_field = "resolved_at" if stato == "risolto" else "created_at"
     alerts = await get_db().alerts.find(q, {"_id": 0}).sort(sort_field, -1).to_list(500)
+    # Traduzione a lettura: anche gli alert vecchi già salvati con l'ID interno
+    # diventano leggibili, senza toccare il dato in archivio.
+    for a in alerts:
+        try:
+            a["messaggio"] = await _messaggio_leggibile(a.get("messaggio", ""))
+        except Exception:
+            pass
     return {"totale": len(alerts), "alerts": alerts}
 
 
