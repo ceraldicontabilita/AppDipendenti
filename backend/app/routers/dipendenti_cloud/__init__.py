@@ -14,6 +14,7 @@ import hashlib
 import base64
 import tempfile
 from datetime import datetime, timezone, timedelta, date
+from decimal import Decimal, InvalidOperation
 
 from backend.app.database import Database
 
@@ -278,6 +279,42 @@ async def delete_pagha(dipendente_id: str, anno: int, mese: int):
     return {"ok": True, "eliminati": res.deleted_count}
 
 
+_MESI_IMPORT_SALARI = {
+    "gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
+    "luglio": 7, "agosto": 8, "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12,
+}
+
+
+def _mese_import_salari(value):
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        numeric = Decimal(str(value))
+        return int(numeric) if numeric == numeric.to_integral_value() and 1 <= numeric <= 12 else None
+    text = str(value).strip().lower()
+    if text in _MESI_IMPORT_SALARI:
+        return _MESI_IMPORT_SALARI[text]
+    try:
+        numeric = Decimal(text)
+    except InvalidOperation:
+        return None
+    return int(numeric) if numeric == numeric.to_integral_value() and 1 <= numeric <= 12 else None
+
+
+def _importo_import_salari(value):
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        return Decimal(str(value))
+    text = str(value).strip().replace(" ", "")
+    if "," in text:
+        text = text.replace(".", "").replace(",", ".")
+    try:
+        return Decimal(text)
+    except InvalidOperation:
+        return None
+
+
 @router.post("/paghe/importa-excel-salari")
 async def importa_excel_salari(file: UploadFile = File(...)):
     """Importa l'Excel 'prima nota salari' (colonne: DIPENDENTE, MESE, ANNO,
@@ -289,19 +326,6 @@ async def importa_excel_salari(file: UploadFile = File(...)):
     nome_file = (file.filename or "").lower()
     if not nome_file.endswith((".xlsx", ".xlsm")):
         raise HTTPException(status_code=400, detail="Serve un file Excel (.xlsx)")
-
-    _MESI_IT = {"gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
-                "luglio": 7, "agosto": 8, "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12}
-
-    def _num(x):
-        if x in (None, ""):
-            return None
-        if isinstance(x, (int, float)):
-            return float(x)
-        try:
-            return float(str(x).strip().replace(".", "").replace(",", "."))
-        except Exception:
-            return None
 
     data = await file.read()
     try:
@@ -325,20 +349,22 @@ async def importa_excel_salari(file: UploadFile = File(...)):
     except Exception:
         pass
 
-    anno_corrente = datetime.now(timezone.utc).year
-    importati, mesi_set = 0, set()
+    importati, mesi_set, righe_lette = 0, set(), 0
     non_trovati, scartati = {}, []
+    aggregati = {}
     for row in ws.iter_rows(min_row=2, values_only=True):
         if not row or not row[0]:
             continue
+        righe_lette += 1
         nome = str(row[0]).strip()
-        mese = _MESI_IT.get(str(row[1]).strip().lower()) if len(row) > 1 and row[1] else None
+        mese = _mese_import_salari(row[1]) if len(row) > 1 else None
         try:
-            anno = int(row[2]) if len(row) > 2 and row[2] else None
+            anno_value = Decimal(str(row[2])) if len(row) > 2 and row[2] not in (None, "") else None
+            anno = int(anno_value) if anno_value is not None and anno_value == anno_value.to_integral_value() else None
         except Exception:
             anno = None
-        netto = _num(row[3]) if len(row) > 3 else None
-        erogato = _num(row[4]) if len(row) > 4 else None
+        netto = _importo_import_salari(row[3]) if len(row) > 3 else None
+        erogato = _importo_import_salari(row[4]) if len(row) > 4 else None
 
         dip = anag.get(nome.upper())
         if not dip:
@@ -348,24 +374,54 @@ async def importa_excel_salari(file: UploadFile = File(...)):
             scartati.append({"nome": nome, "motivo": f"periodo non valido ({row[1]} {row[2]})"})
             continue
 
-        set_doc = {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
-                   "fonte_excel": True, "updated_at": now_iso()}
+        key = (dip["id"], anno, mese)
+        aggregato = aggregati.setdefault(key, {
+            "netto": None,
+            "erogato": Decimal("0"),
+            "erogato_presente": False,
+        })
         if netto is not None:
-            set_doc["importo_busta"] = netto
-            set_doc["netto_atteso"] = netto
+            if aggregato["netto"] is None:
+                aggregato["netto"] = netto
+            elif aggregato["netto"] != netto:
+                scartati.append({
+                    "nome": nome,
+                    "motivo": f"stipendio netto incoerente nello stesso periodo ({aggregato['netto']} / {netto})",
+                })
         if erogato is not None:
-            set_doc["bonifico_importo"] = erogato
-            set_doc["erogato_atteso"] = erogato
+            aggregato["erogato"] += erogato
+            aggregato["erogato_presente"] = True
+
+    for (dipendente_id, anno, mese), aggregato in aggregati.items():
+        netto = aggregato["netto"]
+        erogato = aggregato["erogato"]
+        set_doc = {
+            "dipendente_id": dipendente_id,
+            "anno": anno,
+            "mese": mese,
+            "fonte_excel": True,
+            "updated_at": now_iso(),
+        }
+        if netto is not None:
+            set_doc["importo_busta"] = float(netto)
+            set_doc["netto_atteso"] = float(netto)
+        if aggregato["erogato_presente"]:
+            set_doc["bonifico_importo"] = float(erogato)
+            set_doc["erogato_atteso"] = float(erogato)
+            set_doc["bonifico_da_prima_nota"] = erogato > 0
         await get_db().paghe_mensili.update_one(
-            {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
+            {"dipendente_id": dipendente_id, "anno": anno, "mese": mese},
             {"$set": set_doc,
              "$setOnInsert": {"busta_riconciliata": False, "bonifico_riconciliato": False}},
             upsert=True)
+        await _ricalcola_stato_paga(get_db(), dipendente_id, anno, mese)
         importati += 1
         mesi_set.add((anno, mese))
 
     mesi = sorted([{"anno": y, "mese": m} for (y, m) in mesi_set], key=lambda x: (x["anno"], x["mese"]))
     return {"importati": importati,
+            "righe_lette": righe_lette,
+            "righe_aggregate": len(aggregati),
             "mesi": mesi,
             "dipendenti_non_in_anagrafica": [{"nome": k, "righe": v} for k, v in sorted(non_trovati.items())],
             "scartati": scartati}
@@ -466,7 +522,9 @@ def _parse_lul(pdf_path):
     può ritagliare il PDF reale del suo cedolino."""
     import pdfplumber
     ced = {}
+    page_count = 0
     with pdfplumber.open(pdf_path) as pdf:
+        page_count = len(pdf.pages)
         cur = None
         for idx, page in enumerate(pdf.pages):
             t = page.extract_text() or ""
@@ -495,9 +553,36 @@ def _parse_lul(pdf_path):
                 # Dati chiave della busta (rateo 13/14, indennità L.207/24, tratt. integ. L.21, giorni)
                 for k, v in _lul_dati_busta(t).items():
                     ced[cur][k] = v
+    if len(ced) <= 1 and (not ced or not next(iter(ced.values())).get("netto")):
+        try:
+            from backend.app.parsers.busta_paga_multi_template import parse_busta_paga_multi
+            parsed = parse_busta_paga_multi(pdf_path)
+            dipendente = parsed.get("dipendente") or {}
+            periodo = parsed.get("periodo") or {}
+            totali = parsed.get("totali") or {}
+            tax_code = (dipendente.get("codice_fiscale") or "").upper()
+            if ced:
+                record = next(iter(ced.values()))
+            elif tax_code:
+                record = ced.setdefault(tax_code, {
+                    "nome": None, "netto": None, "mese": None, "anno": None,
+                    "pagine": list(range(page_count)),
+                })
+            else:
+                record = None
+            if record is not None and parsed.get("parse_success"):
+                if totali.get("netto") is not None:
+                    record["netto"] = f"{float(totali['netto']):.2f}".replace(".", ",")
+                record["nome"] = record.get("nome") or dipendente.get("nome_completo")
+                record["mese"] = record.get("mese") or periodo.get("mese")
+                record["anno"] = record.get("anno") or periodo.get("anno")
+        except Exception:
+            pass
     return ced
 
 def _to_float(s):
+    if isinstance(s, (int, float)):
+        return float(s)
     return float(s.replace(".", "").replace(",", ".")) if s else None
 
 
