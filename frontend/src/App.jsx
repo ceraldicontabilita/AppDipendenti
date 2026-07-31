@@ -1621,6 +1621,7 @@ function TurniPage({ dipendenti, turni, reload }) {
   const [sost, setSost] = useState({ assente: "", giorno: "", motivo: "malattia", sostituto: "", turnoSost: "", protocollo: "", dal: "", al: "" });
   const [paint, setPaint] = useState(false);     // modalità pennello turni
   const [penTurno, setPenTurno] = useState("");  // turno selezionato per il pennello ("" = vuoto)
+  const [vista, setVista] = useState("semplice"); // "semplice" (bollini con sponde) | "tabella" (griglia completa)
   const tbodyRef = useRef(null);
   const giorni = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"];
   const lunOggi = (() => { const o = new Date(); const off = (o.getDay() + 6) % 7; const m = new Date(o); m.setDate(o.getDate() - off); m.setHours(0, 0, 0, 0); return m; })();
@@ -1631,24 +1632,10 @@ function TurniPage({ dipendenti, turni, reload }) {
   const meseLabel = (() => { const f = new Date(lunedi); const l = new Date(lunedi); l.setDate(l.getDate() + 6); return `${f.getDate()} ${f.toLocaleDateString('it-IT', { month: 'short' })} – ${l.getDate()} ${l.toLocaleDateString('it-IT', { month: 'short' })}`; })();
   const BASE_BAR = new Date(2026, 5, 15);
   const settimanaPari = ((Math.round((lunedi - BASE_BAR) / (7 * 86400000)) % 2) + 2) % 2 === 0;
-  const [barChiusoDomPom, setBarChiusoDomPom] = useState(true);
-  const [periodoInizio, setPeriodoInizio] = useState("2026-06-01");
-  const [periodoFine, setPeriodoFine] = useState("2026-08-31");
-  useEffect(() => { axios.get(`${API}/impostazioni-turni`).then(r => {
-    setBarChiusoDomPom(r.data?.bar_chiuso_domenica_pomeriggio !== false);
-    if (r.data?.periodo_inizio) setPeriodoInizio(r.data.periodo_inizio);
-    if (r.data?.periodo_fine) setPeriodoFine(r.data.periodo_fine);
-  }).catch(() => {}); }, []);
-  const salvaImpostazione = (patch) => {
-    const next = { bar_chiuso_domenica_pomeriggio: barChiusoDomPom, periodo_inizio: periodoInizio, periodo_fine: periodoFine, ...patch };
-    setBarChiusoDomPom(next.bar_chiuso_domenica_pomeriggio);
-    setPeriodoInizio(next.periodo_inizio); setPeriodoFine(next.periodo_fine);
-    axios.post(`${API}/impostazioni-turni`, next).catch(() => {});
-  };
-
   const caricaSettimana = (s) => axios.get(`${API}/assegnazioni-turni?settimana=${s}`).then(res => setAssegnazioni(res.data || [])).catch(() => {});
   useEffect(() => { caricaSettimana(settimana); }, [settimana]);
   useEffect(() => {
+    // Il riordino a trascinamento esiste solo nella vista griglia.
     if (!tbodyRef.current) return;
     const s = Sortable.create(tbodyRef.current, {
       handle: ".dc-drag-handle", animation: 150,
@@ -1658,7 +1645,7 @@ function TurniPage({ dipendenti, turni, reload }) {
       },
     });
     return () => s.destroy();
-  }, []);
+  }, [vista]);
 
   const getAssegnazione = (dipId, giorno) => assegnazioni.find(a => a.dipendente_id === dipId && a.giorno === giorno);
   const getTurno = (turnoId) => turni.find(t => t.id === turnoId);
@@ -1775,6 +1762,52 @@ function TurniPage({ dipendenti, turni, reload }) {
       if (altro) updates.push({ dipendente_id: altro.id, giorno, turno_id: vecchioId });
     }
     await salva(updates);
+  };
+
+  // ===== VISTA SEMPLICE — "sponde" per dipendente =====
+  // Ogni dipendente può fare solo i SUOI turni (dalla sua configurazione): un click
+  // sulla casella passa al turno successivo tra quelli, poi Riposo, Ferie e vuoto.
+  const spondeDi = (dip) => {
+    const c = cfgDi(dip.id);
+    const ids = [];
+    const add = (id) => { if (id && !ids.includes(id)) ids.push(id); };
+    if (c.sala) { add(idTurno("Lunga")); add(idTurno("Mattina 8-16") || idTurno("Mattina 7-15")); add(idTurno("Pomeriggio")); }
+    else if (c.rotazione) { add(idTurno("Bar 6:30-15")); add(idTurno("Bar 15-21")); }
+    else if (c.turno_id) { add(c.turno_id); if ((c.lunga_giorni || []).length) add(idTurno("Lunga")); }
+    else turni.forEach(t => { if (!/riposo|ferie/i.test(t.nome || "")) add(t.id); });
+    add(idTurno("Riposo")); add(idTurno("Ferie"));
+    return ids;
+  };
+  const ciclaTurno = async (dip, giorno) => {
+    const cur = (getAssegnazione(dip.id, giorno) || {}).turno_id || null;
+    const opzioni = [...spondeDi(dip), null];   // dopo l'ultima sponda si torna a vuoto
+    const next = opzioni[(opzioni.indexOf(cur) + 1) % opzioni.length];
+    const updates = [{ dipendente_id: dip.id, giorno, turno_id: next }];
+    // stessa regola della griglia: Lunga/Riposo unici nella squadra sala → scambio col collega
+    if (isTeam(dip) && UNICI.includes(nomeTurno(next))) {
+      const altro = dipendenti.find(d => d.id !== dip.id && isTeam(d)
+        && (getAssegnazione(d.id, giorno) || {}).turno_id === next);
+      if (altro) updates.push({ dipendente_id: altro.id, giorno, turno_id: cur });
+    }
+    // aggiornamento ottimistico: il bollino cambia subito, il salvataggio parte dietro
+    setAssegnazioni(prev => {
+      const resto = prev.filter(a => !(a.giorno === giorno && updates.some(u => a.dipendente_id === u.dipendente_id)));
+      return [...resto, ...updates.map(u => ({ ...u, settimana }))];
+    });
+    try { for (const u of updates) await axios.post(`${API}/assegnazioni-turni`, { ...u, settimana }); }
+    catch { caricaSettimana(settimana); toast("Salvataggio non riuscito, riprova", "err"); }
+  };
+  // Copertura del giorno: persone al mattino e al pomeriggio (la Lunga conta per entrambi)
+  const coperturaDi = (giorno) => {
+    let mattina = 0, pomeriggio = 0;
+    dipTurni.forEach(d => {
+      const n = (nomeTurno((getAssegnazione(d.id, giorno) || {}).turno_id) || "").toLowerCase();
+      if (!n || /riposo|ferie/.test(n)) return;
+      if (/lunga/.test(n)) { mattina++; pomeriggio++; }
+      else if (/pomerig|15-21|sera/.test(n)) pomeriggio++;
+      else mattina++;
+    });
+    return { mattina, pomeriggio };
   };
 
   // Genera la settimana della squadra produzione secondo le regole.
@@ -1993,36 +2026,33 @@ function TurniPage({ dipendenti, turni, reload }) {
         <strong style={{ minWidth: 150, textAlign: "center" }}>{meseLabel}{settimanaPari ? "" : " · bar invertito"}</strong>
         <button onClick={() => setLunedi(d => { const n = new Date(d); n.setDate(d.getDate() + 7); return n; })} className="dc-btn">›</button>
         <button onClick={() => setLunedi(lunOggi)} className="dc-btn" style={{ fontSize: 12 }}>Oggi</button>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#3b4a40", cursor: "pointer" }}>
-          <input type="checkbox" checked={barChiusoDomPom} onChange={(e) => salvaImpostazione({ bar_chiuso_domenica_pomeriggio: e.target.checked })} />
-          Bar chiuso la domenica pomeriggio
-        </label>
-        {barChiusoDomPom && (
-          <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "#3b4a40" }}>
-            dal <input type="date" value={periodoInizio} onChange={(e) => salvaImpostazione({ periodo_inizio: e.target.value })} style={{ border: "1px solid #cdd8d0", borderRadius: 6, padding: "3px 6px", fontSize: 12 }} />
-            al <input type="date" value={periodoFine} onChange={(e) => salvaImpostazione({ periodo_fine: e.target.value })} style={{ border: "1px solid #cdd8d0", borderRadius: 6, padding: "3px 6px", fontSize: 12 }} />
-          </span>
-        )}
+        <button onClick={() => setVista(v => (v === "semplice" ? "tabella" : "semplice"))} className="dc-btn"
+          style={{ marginLeft: "auto", padding: "10px 16px", borderRadius: 10, fontWeight: 600 }}
+          title="Passa tra la vista semplice a caselle e la griglia completa con i menu">
+          {vista === "semplice" ? "📋 Vista griglia" : "✨ Vista semplice"}
+        </button>
         <button onClick={apriCfg} className="dc-btn"
-          style={{ marginLeft: "auto", padding: "10px 16px", borderRadius: 10, fontWeight: 600 }}>
+          style={{ padding: "10px 16px", borderRadius: 10, fontWeight: 600 }}>
           ⚙️ Configura turni
         </button>
         <button onClick={apriSost} disabled={busy} className="dc-btn"
           style={{ padding: "10px 16px", borderRadius: 10, fontWeight: 600 }} title="Sostituzione d'emergenza: malattia/assenza e chi copre">
           🚨 Sostituzione
         </button>
+        {vista === "tabella" && (
         <button onClick={() => { setPaint(p => !p); if (!paint && !penTurno && turni[0]) setPenTurno(turni[0].id); }} className="dc-btn"
           style={{ padding: "10px 16px", borderRadius: 10, fontWeight: 600, background: paint ? "#5b7a6b" : undefined, color: paint ? "#fff" : undefined }}
           title="Pennello: scegli un turno e clicca le celle per compilarle veloce">
           🖌 Pennello {paint ? "ON" : ""}
         </button>
+        )}
         <button onClick={generaProduzione} disabled={busy}
           style={{ background: "#5b7a6b", color: "#fff", border: "none", padding: "10px 18px", borderRadius: 10, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
           {busy ? "Attendi…" : "Genera settimana"}
         </button>
       </div>
 
-      {paint && (
+      {vista === "tabella" && paint && (
         <div className="dc-card" style={{ marginBottom: 12, padding: 12, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <span style={{ fontSize: 13, color: "#6b7669", fontWeight: 600 }}>Pennello — scegli il turno, poi clicca le celle:</span>
           <button type="button" onClick={() => setPenTurno("")}
@@ -2233,6 +2263,50 @@ function TurniPage({ dipendenti, turni, reload }) {
         <p className="dc-muted" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>Il riposo è impostato automaticamente nel giorno dell'onomastico (marcato 🎂 nella griglia). Se ti serve copertura, basta riassegnare un turno in quella cella: la tua scelta ha la precedenza.</p>
       </div>
 
+      {vista === "semplice" ? (
+      <div className="dc-card dc-scroll-x" style={{ paddingBottom: 8 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "180px repeat(7, minmax(88px, 1fr))", gap: 6, minWidth: 860, alignItems: "stretch" }}>
+          <div style={{ alignSelf: "end", fontSize: 12, color: "#6b7669", fontWeight: 700, padding: "0 4px 6px" }}>Copertura ☀️ / 🌆 →</div>
+          {giorni.map((g, i) => { const c = coperturaDi(g); return (
+            <div key={g} style={{ textAlign: "center", paddingBottom: 6 }}>
+              <div style={{ fontWeight: 700, fontSize: 13 }}>{g.slice(0, 3)} {dataDi(i)}</div>
+              <div style={{ fontSize: 12, display: "flex", gap: 8, justifyContent: "center" }}>
+                <span style={{ fontWeight: 700, color: c.mattina ? "#3f5a4e" : "#b3261e" }}>☀️ {c.mattina}</span>
+                <span style={{ fontWeight: 700, color: c.pomeriggio ? "#8a6d3b" : "#b3261e" }}>🌆 {c.pomeriggio}</span>
+              </div>
+            </div>); })}
+          {dipTurni.map(dip => (
+            <Fragment key={dip.id}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 4px 0", borderTop: "1px solid #f0ece1" }}>
+                <Avatar nome={dip.nome} cognome={dip.cognome} size="sm" />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {dip.cognome ? `${dip.cognome} ${dip.nome?.[0] || ""}.` : dip.nome}
+                  </div>
+                  <div style={{ fontSize: 10.5, color: "#6b7669", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                    title={`Sponde: ${spondeDi(dip).map(id => nomeTurno(id)).join(" · ")}`}>
+                    {(() => { const c = cfgDi(dip.id); return c.sala ? "Sala (rotazione)" : c.rotazione ? "Bar (rotazione)" : nomeTurno(c.turno_id) || "senza sponde"; })()}
+                  </div>
+                </div>
+              </div>
+              {giorni.map(g => { const ass = getAssegnazione(dip.id, g); const t = ass ? getTurno(ass.turno_id) : null; return (
+                <button key={g} type="button" onClick={() => ciclaTurno(dip, g)}
+                  title={`${dip.cognome || dip.nome} · ${g}: clicca per il turno successivo (${spondeDi(dip).map(id => nomeTurno(id)).join(" · ")} · vuoto)`}
+                  style={{ position: "relative", border: `2px solid ${t ? t.colore : "#e6e0d4"}`,
+                    background: t ? t.colore + "30" : "#fffefb", color: "#2a3329", borderRadius: 10,
+                    fontWeight: 700, fontSize: 12, padding: "10px 2px", cursor: "pointer", minHeight: 46 }}>
+                  {ass?.motivo === "onomastico" && <span style={{ position: "absolute", top: 0, right: 3, fontSize: 10 }}>🎂</span>}
+                  {t ? t.nome : "—"}
+                </button>); })}
+            </Fragment>
+          ))}
+        </div>
+        <p className="dc-muted" style={{ fontSize: 12, margin: "10px 4px 0" }}>
+          Un click sulla casella = turno successivo tra le <b>sponde</b> del dipendente (i suoi turni possibili, poi Riposo, Ferie, vuoto) — impostale in "⚙️ Configura turni".
+          In alto la <b>copertura</b>: persone al mattino ☀️ e al pomeriggio 🌆 (la Lunga conta per entrambi); rosso = fascia scoperta.
+        </p>
+      </div>
+      ) : (
       <div className="dc-card dc-scroll-x">
         <table className="dc-table dc-turni-table">
           <thead>
@@ -2290,6 +2364,7 @@ function TurniPage({ dipendenti, turni, reload }) {
           </tbody>
         </table>
       </div>
+      )}
     </div>
   );
 }
