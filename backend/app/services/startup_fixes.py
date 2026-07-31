@@ -20,6 +20,8 @@ async def applica_fix_avvio():
     await _fix_nome_carotenuto()
     # 29/07/2026 — Dias Mahathelge Kris non più in forza
     await _cessa_per_nome("startup_fix_dias_cessato", "dias")
+    # 31/07/2026 — Moscato Emanuele sparito dalle liste (pagina TFR): va rimesso attivo
+    await _riattiva_per_nome("startup_fix_moscato_attivo", "moscato", "MSCMNL88R26F839C")
 
 
 async def _cessa_per_nome(fix_id: str, pattern: str):
@@ -62,6 +64,54 @@ async def _cessa_per_nome(fix_id: str, pattern: str):
             upsert=True)
         logger.info(f"Fix {fix_id}: cessati {cessati}" if cessati
                     else f"Fix {fix_id}: nessun dipendente attivo trovato, marcato come applicato")
+    except Exception as e:
+        logger.warning(f"Fix {fix_id} non riuscito (non blocca l'avvio): {e}")
+
+
+async def _riattiva_per_nome(fix_id: str, pattern: str, codice_fiscale: str = ""):
+    """Rimette 'attivo' un dipendente sparito dalle liste (le pagine di gestione
+    mostrano solo stato == 'attivo'). Cerca prima per codice fiscale, poi per nome;
+    se il record risulta accorpato per errore a un altro (merged_into), lo sgancia.
+    Una volta sola per fix_id, così una futura cessazione fatta apposta non viene annullata."""
+    try:
+        db = Database.get_db()
+        if await db.impostazioni.find_one({"id": fix_id}):
+            return
+        adesso = datetime.now(timezone.utc).isoformat()
+        doc = None
+        if codice_fiscale:
+            doc = await db.dipendenti.find_one(
+                {"codice_fiscale": codice_fiscale, "merged_into": {"$exists": False}}, {"_id": 0})
+        if not doc:
+            doc = await db.dipendenti.find_one(
+                {"merged_into": {"$exists": False},
+                 "$or": [{"cognome": {"$regex": pattern, "$options": "i"}},
+                         {"nome_completo": {"$regex": pattern, "$options": "i"}}]},
+                {"_id": 0})
+        sganciato = False
+        if not doc and codice_fiscale:
+            # Ultimo tentativo: record accorpato per errore a un duplicato.
+            doc = await db.dipendenti.find_one({"codice_fiscale": codice_fiscale}, {"_id": 0})
+            sganciato = doc is not None
+        esito = "non trovato"
+        if doc:
+            nome = doc.get("nome_completo") or f"{doc.get('cognome', '')} {doc.get('nome', '')}".strip()
+            if doc.get("stato") == "attivo" and not sganciato:
+                esito = f"{nome}: già attivo (stato invariato)"
+            else:
+                update = {"$set": {"stato": "attivo", "attivo": True},
+                          "$unset": {"data_dimissione": "", "cessato_il": "",
+                                     "motivo_cessazione": ""}}
+                if sganciato:
+                    update["$unset"]["merged_into"] = ""
+                await db.dipendenti.update_one({"id": doc["id"]}, update)
+                esito = f"{nome}: riattivato (stato precedente: {doc.get('stato') or '—'}" \
+                        + (", sganciato da accorpamento)" if sganciato else ")")
+        await db.impostazioni.update_one(
+            {"id": fix_id},
+            {"$set": {"id": fix_id, "done": True, "applicato_il": adesso, "esito": esito}},
+            upsert=True)
+        logger.info(f"Fix {fix_id}: {esito}")
     except Exception as e:
         logger.warning(f"Fix {fix_id} non riuscito (non blocca l'avvio): {e}")
 
