@@ -71,6 +71,14 @@ Fondo EST (sanitario), Fon.Te. (previdenza compl.).
   (`generaProduzione` in App.jsx) assegna: turno abituale, Lunga nei giorni spuntati,
   Riposo nel giorno fisso e nell'onomastico, Ferie nei giorni di ferie APPROVATE.
   Niente più nomi cablati. Celle sempre modificabili a mano.
+- **Turni — Vista semplice** (predefinita in pagina Turni, toggle "📋 Vista griglia"):
+  una riga per dipendente, 7 caselle colorate; un click = turno successivo tra le
+  "sponde" del dipendente (i soli turni che può fare dalla sua `turni_config`, poi
+  Riposo, Ferie, vuoto). Intestazione con copertura giornaliera ☀️ mattina / 🌆
+  pomeriggio (Lunga conta per entrambi, rosso = scoperto). Salvataggio ottimistico
+  immediato. Pennello e riordino a trascinamento restano solo nella vista griglia.
+  (Eliminato il vecchio doppione `impostazioni-turni` / checkbox "Bar chiuso la
+  domenica pomeriggio": il sistema unico è `turni-chiusura-pomeridiana` nel modale.)
 - **Onomastici** (`dipendenti_cloud`: ONOMASTICI_DEFAULT + collezione `onomastici`):
   gestiti nel modale "Configura turni"; nella pagina Turni un pannello mostra gli
   onomastici della settimana (solo giorni lavorativi, esclusi stranieri/disattivati e
