@@ -1797,10 +1797,14 @@ def _periodo_competenza_13(fino_a: datetime):
 
 
 def _periodo_competenza_14(fino_a: datetime):
-    """Quattordicesima: competenza 1° luglio - 30 giugno, corrisposta a luglio."""
-    if fino_a.month >= 7:
-        return datetime(fino_a.year, 7, 1), datetime(fino_a.year + 1, 6, 30)
-    return datetime(fino_a.year - 1, 7, 1), datetime(fino_a.year, 6, 30)
+    """Quattordicesima: ciclo di competenza dal 1° luglio, pagata con la busta di
+    luglio. Regola del titolare: finché la busta di luglio non è chiusa (cioè per
+    tutto luglio) il ciclo da liquidare è ancora quello partito il 1° luglio
+    dell'ANNO PRIMA e matura fino alla data di calcolo; solo da agosto riparte
+    il ciclo nuovo. Chi è assunto dopo l'inizio del ciclo matura dalla data di
+    assunzione (il max è applicato in _quota_mensilita_aggiuntiva)."""
+    inizio = datetime(fino_a.year, 7, 1) if fino_a.month >= 8 else datetime(fino_a.year - 1, 7, 1)
+    return inizio, fino_a
 
 
 def _quota_mensilita_aggiuntiva(periodi_grezzi: List[Dict[str, Any]], data_assunzione: Optional[datetime],
@@ -2137,7 +2141,8 @@ async def dividi_in_rate_simulazione(dipendente_id: str, input_data: RateSimulaz
 async def liquidazione_finale_simulazione(dipendente_id: str) -> Dict[str, Any]:
     """Stima di liquidazione finale con la stessa scaletta di periodi del simulatore
     TFR: rateo di tredicesima e quattordicesima maturati (competenza gennaio-dicembre
-    per la 13ª, 1° luglio-30 giugno per la 14ª) e controvalore delle ferie residue.
+    per la 13ª; per la 14ª dal 1° luglio dell'anno prima fino a oggi finché la busta
+    di luglio non è chiusa, da agosto dal 1° luglio corrente) e ferie residue.
     Se il dipendente è cessato, tutto si ferma alla data di cessazione anziché a oggi
     — stessa logica del periodo aperto che si chiude su un aumento.
     Tredicesima e quattordicesima = importo settimanale × settimane del ciclo ÷ 12
