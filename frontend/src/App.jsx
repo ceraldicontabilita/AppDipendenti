@@ -1727,9 +1727,16 @@ function TurniPage({ dipendenti, turni, reload }) {
     let onom = [];
     try { onom = (await axios.get(`${API}/onomastici`)).data || []; } catch {}
     const om = {}; onom.forEach(o => { om[o.dipendente_id] = o; });
+    // Etichetta senza doppioni (alcuni record hanno lo stesso valore in nome e cognome)
+    const etich = (d) => {
+      const cg = (d.cognome || '').trim(), nm = (d.nome || '').trim();
+      if (cg && nm && cg.toLowerCase() === nm.toLowerCase()) return cg;
+      return `${cg} ${nm}`.trim() || d.nome_completo || d.nome || '';
+    };
     setCfgRows(dipTurni.map(d => { const c = cfgDi(d.id); const o = om[d.id] || {}; const lg = c.lunga_giorni || []; return {
-      dipendente_id: d.id, nome: `${d.cognome || ''} ${d.nome || ''}`.trim() || d.nome,
+      dipendente_id: d.id, nome: etich(d),
       turno_id: c.turno_id || '', riposo_giorno: c.riposo_giorno || '', rotazione: c.rotazione || '', sala: !!c.sala,
+      rotazione_ancora: c.rotazione_ancora || '',
       lunga1: lg[0] || '', lunga2: lg[1] || '', doppia: lg.length > 1,
       onom_mese: o.mese ?? '', onom_giorno: o.giorno ?? '', onom_attivo: o.attivo ?? false, straniero: o.straniero || false }; }));
     setShowCfg(true);
@@ -1755,7 +1762,7 @@ function TurniPage({ dipendenti, turni, reload }) {
     return out;
   };
   const salvaCfg = async () => {
-    await axios.post(`${API}/turni-config`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, turno_id: r.turno_id || null, riposo_giorno: r.riposo_giorno || null, lunga_giorni: lungaGiorniDi(r), rotazione: r.rotazione || null, sala: !!r.sala })) });
+    await axios.post(`${API}/turni-config`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, turno_id: r.turno_id || null, riposo_giorno: r.riposo_giorno || null, lunga_giorni: lungaGiorniDi(r), rotazione: r.rotazione || null, rotazione_ancora: (r.rotazione && r.rotazione_ancora) || null, sala: !!r.sala })) });
     await axios.post(`${API}/onomastici`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, mese: r.onom_mese ? Number(r.onom_mese) : null, giorno: r.onom_giorno ? Number(r.onom_giorno) : null, attivo: r.onom_attivo })) });
     await axios.post(`${API}/turni-chiusura-pomeridiana`, chiusuraPom).catch(() => {});
     await caricaCfg();
@@ -1894,7 +1901,18 @@ function TurniPage({ dipendenti, turni, reload }) {
       let turnoLavoro = c.turno_id || null;
       if (c.rotazione) {
         const iniziaMattina = c.rotazione === "mattina";
-        const mattinaQuestaSett = settimanaPari ? iniziaMattina : !iniziaMattina;
+        let mattinaQuestaSett;
+        if (c.rotazione_ancora) {
+          // Fase ancorata alla settimana in cui è stata impostata: "ora mattina"
+          // = mattina in QUELLA settimana, poi inversione automatica ogni lunedì.
+          const ancora = new Date(c.rotazione_ancora + "T00:00:00");
+          const diffSett = Math.round((lunedi - ancora) / (7 * 86400000));
+          const stessaParita = ((diffSett % 2) + 2) % 2 === 0;
+          mattinaQuestaSett = stessaParita ? iniziaMattina : !iniziaMattina;
+        } else {
+          // configurazioni vecchie senza ancora: parità globale come prima
+          mattinaQuestaSett = settimanaPari ? iniziaMattina : !iniziaMattina;
+        }
         turnoLavoro = mattinaQuestaSett ? idBarMattina : idBarPom;
       }
       // Regole baristi legate alla chiusura pomeridiana (vedi modale Configura turni):
@@ -2049,7 +2067,8 @@ function TurniPage({ dipendenti, turni, reload }) {
           <p style={{ margin: "0 0 8px" }}><b>⚙️ Configura turni</b>: le sponde di ogni dipendente — modalità (Sala / Bar in rotazione / turno fisso),
             riposo fisso, giorni di Lunga, onomastico e il periodo di chiusura pomeridiana del bar.</p>
           <p style={{ margin: "0 0 8px" }}><b>Genera settimana</b> compila tutto da solo: Ferie nei giorni approvati, Riposo per onomastici e
-            preferenze 💤 (vincono sul riposo fisso), rotazione baristi mattina↔pomeriggio con riposo domenicale del gruppo di pomeriggio,
+            preferenze 💤 (vincono sul riposo fisso), rotazione baristi mattina↔pomeriggio ("☀️ ora mattina" vale per la settimana in cui
+            la imposti, poi si inverte da sola ogni lunedì) con riposo domenicale del gruppo di pomeriggio,
             rotazione sala 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo. Ogni casella resta modificabile a mano dopo.</p>
           <p style={{ margin: 0 }}><b>📋 Vista griglia</b>: menu a tendina con tutti i turni, 🖌 pennello per compilare veloce e trascinamento ⠿ per riordinare le righe.
             I dipendenti vedono questa stessa settimana dal portale (sola lettura) e da lì mandano le preferenze di riposo.</p>
@@ -2058,7 +2077,7 @@ function TurniPage({ dipendenti, turni, reload }) {
 
       <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <button onClick={() => setLunedi(d => { const n = new Date(d); n.setDate(d.getDate() - 7); return n; })} className="dc-btn">‹</button>
-        <strong style={{ minWidth: 150, textAlign: "center" }}>{meseLabel}{settimanaPari ? "" : " · bar invertito"}</strong>
+        <strong style={{ minWidth: 150, textAlign: "center" }}>{meseLabel}</strong>
         <button onClick={() => setLunedi(d => { const n = new Date(d); n.setDate(d.getDate() + 7); return n; })} className="dc-btn">›</button>
         <button onClick={() => setLunedi(lunOggi)} className="dc-btn" style={{ fontSize: 12 }}>Oggi</button>
         <button onClick={() => setVista(v => (v === "semplice" ? "tabella" : "semplice"))} className="dc-btn"
@@ -2157,14 +2176,22 @@ function TurniPage({ dipendenti, turni, reload }) {
                         <button type="button" style={pill(modo === "sala")} title="Cameriere: rotazione automatica 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo"
                           onClick={() => patchCfgRow(i, { sala: true, rotazione: "" })}>🍽 Sala</button>
                         <button type="button" style={pill(modo === "rot")} title="Barista: alterna ogni settimana mattina e pomeriggio"
-                          onClick={() => patchCfgRow(i, { sala: false, rotazione: r.rotazione || "mattina", turno_id: "" })}>☕ Bar mattina↔pom</button>
+                          onClick={() => patchCfgRow(i, { sala: false, rotazione: r.rotazione || "mattina", turno_id: "", rotazione_ancora: r.rotazione_ancora || settimana })}>☕ Bar mattina↔pom</button>
                         <button type="button" style={pill(modo === "fisso")} title="Sempre lo stesso turno"
                           onClick={() => patchCfgRow(i, { sala: false, rotazione: "" })}>🕐 Turno fisso</button>
                       </div>
                       {modo === "rot" && (
-                        <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-                          <button type="button" style={chipG(r.rotazione === "mattina")} onClick={() => setCfgRow(i, "rotazione", "mattina")}>inizia mattina</button>
-                          <button type="button" style={chipG(r.rotazione === "pomeriggio")} onClick={() => setCfgRow(i, "rotazione", "pomeriggio")}>inizia pomeriggio</button>
+                        <div style={{ marginTop: 8 }}>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <button type="button" style={chipG(r.rotazione === "mattina")}
+                              onClick={() => patchCfgRow(i, { rotazione: "mattina", rotazione_ancora: settimana })}>☀️ ora mattina</button>
+                            <button type="button" style={chipG(r.rotazione === "pomeriggio")}
+                              onClick={() => patchCfgRow(i, { rotazione: "pomeriggio", rotazione_ancora: settimana })}>🌆 ora pomeriggio</button>
+                          </div>
+                          <div className="dc-muted" style={{ fontSize: 11, marginTop: 4 }}>
+                            Vale per la settimana che stai guardando ({settimana.split("-").reverse().join("/")}):
+                            dal lunedì dopo il sistema inverte da solo, ogni settimana.
+                          </div>
                         </div>
                       )}
                       {modo === "fisso" && (
