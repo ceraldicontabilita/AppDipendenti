@@ -1877,8 +1877,27 @@ async def save_turni_config(data: dict = Body(...)):
                       # inverte ogni lunedì (ancora per-dipendente, niente base globale)
                       "rotazione_ancora": v.get("rotazione_ancora") or None,
                       "sala": bool(v.get("sala")),
+                      # abilitato a coprire il bar nelle sostituzioni (es. Taiano, Russo)
+                      "sostituto_bar": bool(v.get("sostituto_bar")),
                       "updated_at": now_iso()}}, upsert=True)
     return {"ok": True, "salvati": len(data.get("voci") or [])}
+
+@router.get("/turni-disponibilita-bar")
+async def get_turni_disponibilita_bar(settimana: Optional[str] = None):
+    """Disponibilità a coprire il bar (dal portale) che toccano la settimana
+    indicata: 'Genera settimana' le applica (sostituto al bar nella sua fascia,
+    sala coperta con una Lunga)."""
+    q = {}
+    if settimana:
+        try:
+            lun = datetime.strptime(settimana, "%Y-%m-%d").date()
+            q = {"dal": {"$lte": (lun + timedelta(days=6)).isoformat()},
+                 "al": {"$gte": settimana}}
+        except ValueError:
+            pass
+    return await get_db().turni_disponibilita_bar.find(
+        q, {"_id": 0}).sort("dal", 1).to_list(200)
+
 
 @router.get("/turni-preferenze")
 async def get_turni_preferenze(settimana: Optional[str] = None):

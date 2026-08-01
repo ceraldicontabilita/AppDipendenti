@@ -106,10 +106,15 @@ function Turni() {
   const [tutti, setTutti] = useState(false);
   const [pref, setPref] = useState(null);       // {settimana, giorno} — preferenza riposo prossima settimana
   const [prefMsg, setPrefMsg] = useState("");
+  const [mieDisp, setMieDisp] = useState([]);   // mie disponibilità a coprire il bar
+  const [nd, setNd] = useState({ dal: "", al: "", fascia: "mattina" });
+  const [dispMsg, setDispMsg] = useState("");
   const mioId = mioIdDaToken();
+  const caricaDisp = () => api.get("/turni/disponibilita-bar").then((r)=>setMieDisp(r.data||[])).catch(()=>{});
   useEffect(() => {
     api.get("/turni/azienda/settimana").then((r)=>setDati(r.data)).catch(()=>setDati({assegnazioni:[],turni:[],dipendenti:[]}));
     api.get("/turni/preferenza-riposo").then((r)=>setPref(r.data)).catch(()=>{});
+    caricaDisp();
   }, []);
   if (!dati) return <div className="spin">Caricamento…</div>;
   const date = dati.settimana ? settimanaDate(dati.settimana) : [];
@@ -172,6 +177,41 @@ function Turni() {
         </div>
         {prefMsg && <div className="muted" style={{marginTop:8}}>{prefMsg}</div>}
       </div>
+      {(dati.sostituti_bar||[]).includes(mioId) && (
+        <div className="card">
+          <h3>🆘 Copro il bar</h3>
+          <div className="muted" style={{fontSize:12.5, marginBottom:8}}>
+            Se manca un barista e vuoi coprirlo tu, scegli i giorni e la fascia: chi fa i turni
+            riceve subito la tua disponibilità e riorganizza la sala.
+          </div>
+          <div className="row" style={{gap:8}}>
+            <div style={{flex:1}}><label>Dal</label><input className="input" type="date" value={nd.dal} onChange={(e)=>setNd({...nd, dal:e.target.value})}/></div>
+            <div style={{flex:1}}><label>Al</label><input className="input" type="date" value={nd.al} onChange={(e)=>setNd({...nd, al:e.target.value})}/></div>
+          </div>
+          <div style={{display:"flex", gap:6, marginTop:8}}>
+            {[["mattina","☀️ Mattina"],["pomeriggio","🌆 Pomeriggio"]].map(([v,l])=>(
+              <button key={v} className="btn sm" onClick={()=>setNd({...nd, fascia:v})}
+                style={nd.fascia===v?{background:"#3f5a4e",color:"#fff",borderRadius:8}:{background:"#eef1ea",color:"#2a3329",borderRadius:8}}>{l}</button>
+            ))}
+          </div>
+          <button className="btn" style={{marginTop:10}} disabled={!nd.dal}
+            onClick={async ()=>{
+              try {
+                await api.post("/turni/disponibilita-bar", { dal: nd.dal, al: nd.al || nd.dal, fascia: nd.fascia });
+                setNd({ dal:"", al:"", fascia:"mattina" }); setDispMsg("Disponibilità inviata ✓"); caricaDisp();
+              } catch (e) { setDispMsg(e.response?.data?.detail || "Errore, riprova"); }
+              setTimeout(()=>setDispMsg(""), 3000);
+            }}>Invia disponibilità</button>
+          {dispMsg && <div className="muted" style={{marginTop:8}}>{dispMsg}</div>}
+          {mieDisp.map((d)=>(
+            <div className="daycard" key={d.id}>
+              <div><b>bar {d.fascia==="pomeriggio"?"🌆 pomeriggio":"☀️ mattina"}</b>
+                <div className="muted">dal {fmt(d.dal)} al {fmt(d.al)}</div></div>
+              <button className="btn gh sm" onClick={async ()=>{ try{ await api.delete(`/turni/disponibilita-bar/${d.id}`);}catch{} caricaDisp(); }}>Annulla</button>
+            </div>
+          ))}
+        </div>
+      )}
       {!tutti ? (
         <button className="btn sec" onClick={()=>setTutti(true)}><Users size={16}/> Vedi i turni di tutti</button>
       ) : (

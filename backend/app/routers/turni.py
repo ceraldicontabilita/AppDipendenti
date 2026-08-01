@@ -5,6 +5,7 @@ rivalidazione, pubblicazione con notifica al dipendente.
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
+from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Body, Depends
 
 from backend.app.database import Database, Collections
@@ -253,8 +254,79 @@ async def turni_azienda(settimana: str = "", identity: Dict[str, Any] = Depends(
     dipendenti = await db[Collections.EMPLOYEES].find(
         {"stato": "attivo", "merged_into": {"$exists": False}},
         {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "nome_completo": 1}).to_list(500)
+    # Chi può coprire il bar nelle sostituzioni (flag in turni_config, niente nomi cablati)
+    sostituti = await db.turni_config.find(
+        {"sostituto_bar": True}, {"_id": 0, "dipendente_id": 1}).to_list(100)
     return {"settimana": settimana, "assegnazioni": assegnazioni,
-            "turni": turni, "dipendenti": dipendenti}
+            "turni": turni, "dipendenti": dipendenti,
+            "sostituti_bar": [s["dipendente_id"] for s in sostituti]}
+
+
+COLL_DISP_BAR = "turni_disponibilita_bar"
+
+
+@router.get("/disponibilita-bar", summary="Le mie disponibilità a coprire il bar")
+async def mie_disponibilita_bar(identity: Dict[str, Any] = Depends(get_identity)):
+    db = Database.get_db()
+    oggi = datetime.now(timezone.utc).date().isoformat()
+    return await db[COLL_DISP_BAR].find(
+        {"dipendente_id": identity["id"], "al": {"$gte": oggi}},
+        {"_id": 0}).sort("dal", 1).to_list(50)
+
+
+@router.post("/disponibilita-bar", summary="Offro copertura al bar (dal-al + fascia)")
+async def crea_disponibilita_bar(payload: Dict[str, Any] = Body(...),
+                                 identity: Dict[str, Any] = Depends(get_identity)):
+    """Un cameriere abilitato ('🆘 può coprire il bar' in Configura turni) offre
+    la copertura del bar per un periodo, scegliendo la fascia (mattina/pomeriggio).
+    'Genera settimana' lo mette al bar in quei giorni e riorganizza la sala."""
+    db = Database.get_db()
+    cfg = await db.turni_config.find_one(
+        {"dipendente_id": identity["id"]}, {"_id": 0, "sostituto_bar": 1})
+    if not (cfg or {}).get("sostituto_bar"):
+        raise HTTPException(403, "Non sei abilitato alle sostituzioni bar (chiedilo in gestione)")
+    dal = str(payload.get("dal") or "")[:10]
+    al = str(payload.get("al") or "")[:10] or dal
+    fascia = payload.get("fascia")
+    try:
+        d1 = datetime.strptime(dal, "%Y-%m-%d").date()
+        d2 = datetime.strptime(al, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "Date non valide (aaaa-mm-gg)")
+    if d2 < d1:
+        raise HTTPException(400, "'Al' è prima di 'Dal'")
+    if fascia not in ("mattina", "pomeriggio"):
+        raise HTTPException(400, "fascia: mattina o pomeriggio")
+    dip = await db[Collections.EMPLOYEES].find_one(
+        {"id": identity["id"]}, {"_id": 0, "nome": 1, "cognome": 1, "nome_completo": 1})
+    nome = ((dip or {}).get("nome_completo")
+            or f"{(dip or {}).get('cognome', '')} {(dip or {}).get('nome', '')}".strip()
+            or identity.get("name") or "Dipendente")
+    doc = {"id": f"db_{uuid4().hex[:12]}", "dipendente_id": identity["id"], "nome": nome,
+           "dal": dal, "al": al, "fascia": fascia, "creata_il": _now()}
+    await db[COLL_DISP_BAR].insert_one(dict(doc))
+    try:
+        async for r in db[Collections.EMPLOYEES].find(
+                {"ruolo_app": "responsabile_turni", "merged_into": {"$exists": False}},
+                {"_id": 0, "id": 1}):
+            if r["id"] != identity["id"]:
+                await crea_notifica(
+                    db, dipendente_id=r["id"], tipo="turni",
+                    titolo="Disponibilità copertura bar",
+                    messaggio=f"{nome} copre il bar ({fascia}) dal {dal} al {al}: "
+                              "rigenera la settimana in pagina Turni per applicarla.")
+    except Exception:
+        logger.warning("Notifica disponibilità bar non inviata")
+    return doc
+
+
+@router.delete("/disponibilita-bar/{disp_id}", summary="Annulla una mia disponibilità")
+async def annulla_disponibilita_bar(disp_id: str, identity: Dict[str, Any] = Depends(get_identity)):
+    db = Database.get_db()
+    r = await db[COLL_DISP_BAR].delete_one({"id": disp_id, "dipendente_id": identity["id"]})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Disponibilità non trovata")
+    return {"ok": True}
 
 
 @router.get("/preferenza-riposo", summary="La mia preferenza di riposo per la settimana")

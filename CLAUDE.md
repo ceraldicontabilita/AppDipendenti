@@ -92,6 +92,18 @@ Fondo EST (sanitario), Fon.Te. (previdenza compl.).
   le vede in pagina Turni (pannello 💤 + marcatore sulle caselle, GET staff
   `/api/dipendenti-cloud/turni-preferenze?settimana=`). "Genera settimana" usa la
   preferenza come giorno di riposo (vince sul riposo fisso per quella settimana).
+- **Sostituzioni bar**: flag `sostituto_bar` in `turni_config` (spunta "🆘 può coprire
+  il bar" nel modale, pensata per Taiano e Russo ma senza nomi cablati). Chi ha il
+  flag vede nel portale il riquadro "🆘 Copro il bar" (dal/al + fascia mattina o
+  pomeriggio → POST `/api/turni/disponibilita-bar`, collezione
+  `turni_disponibilita_bar`, notifica al responsabile). In gestione: pannello 🆘 in
+  pagina Turni (GET staff `/turni-disponibilita-bar?settimana=`) e "Genera settimana"
+  mette il sostituto al bar nella fascia scelta; se era in squadra sala copre il buco
+  con una Lunga al cameriere con meno Lunghe (conferma via window.confirm prima di
+  annullare un riposo). Card del modale per ruolo: barista (rotazione) senza
+  Lunga/flag; la rotazione bar è ancorata (`rotazione_ancora` = lunedì della
+  settimana in cui si imposta "ora mattina/pomeriggio", inversione automatica ogni
+  lunedì, per dipendente).
 - **Onomastici** (`dipendenti_cloud`: ONOMASTICI_DEFAULT + collezione `onomastici`):
   gestiti nel modale "Configura turni"; nella pagina Turni un pannello mostra gli
   onomastici della settimana (solo giorni lavorativi, esclusi stranieri/disattivati e

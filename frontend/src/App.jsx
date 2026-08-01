@@ -1719,6 +1719,12 @@ function TurniPage({ dipendenti, turni, reload }) {
       .then(r => setPrefRiposo(r.data || [])).catch(() => setPrefRiposo([]));
   }, [settimana]);
   const prefDi = (dipId) => (prefRiposo.find(p => p.dipendente_id === dipId) || {}).giorno || null;
+  // Disponibilità a coprire il bar (dal portale, per chi ha il flag 🆘 in Configura turni)
+  const [dispBar, setDispBar] = useState([]);
+  useEffect(() => {
+    axios.get(`${API}/turni-disponibilita-bar?settimana=${settimana}`)
+      .then(r => setDispBar(r.data || [])).catch(() => setDispBar([]));
+  }, [settimana]);
   const ferieDataT = (dipId, dStr) => ferieTurni.find(f => f.dipendente_id === dipId
     && (f.stato === 'approvata' || !f.stato)
     && f.data_inizio <= dStr && (f.data_fine || f.data_inizio) >= dStr);
@@ -1736,7 +1742,7 @@ function TurniPage({ dipendenti, turni, reload }) {
     setCfgRows(dipTurni.map(d => { const c = cfgDi(d.id); const o = om[d.id] || {}; const lg = c.lunga_giorni || []; return {
       dipendente_id: d.id, nome: etich(d),
       turno_id: c.turno_id || '', riposo_giorno: c.riposo_giorno || '', rotazione: c.rotazione || '', sala: !!c.sala,
-      rotazione_ancora: c.rotazione_ancora || '',
+      rotazione_ancora: c.rotazione_ancora || '', sostituto_bar: !!c.sostituto_bar,
       lunga1: lg[0] || '', lunga2: lg[1] || '', doppia: lg.length > 1,
       onom_mese: o.mese ?? '', onom_giorno: o.giorno ?? '', onom_attivo: o.attivo ?? false, straniero: o.straniero || false }; }));
     setShowCfg(true);
@@ -1762,7 +1768,7 @@ function TurniPage({ dipendenti, turni, reload }) {
     return out;
   };
   const salvaCfg = async () => {
-    await axios.post(`${API}/turni-config`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, turno_id: r.turno_id || null, riposo_giorno: r.riposo_giorno || null, lunga_giorni: lungaGiorniDi(r), rotazione: r.rotazione || null, rotazione_ancora: (r.rotazione && r.rotazione_ancora) || null, sala: !!r.sala })) });
+    await axios.post(`${API}/turni-config`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, turno_id: r.turno_id || null, riposo_giorno: r.riposo_giorno || null, lunga_giorni: lungaGiorniDi(r), rotazione: r.rotazione || null, rotazione_ancora: (r.rotazione && r.rotazione_ancora) || null, sala: !!r.sala, sostituto_bar: !!r.sostituto_bar })) });
     await axios.post(`${API}/onomastici`, { voci: cfgRows.map(r => ({ dipendente_id: r.dipendente_id, mese: r.onom_mese ? Number(r.onom_mese) : null, giorno: r.onom_giorno ? Number(r.onom_giorno) : null, attivo: r.onom_attivo })) });
     await axios.post(`${API}/turni-chiusura-pomeridiana`, chiusuraPom).catch(() => {});
     await caricaCfg();
@@ -1947,6 +1953,53 @@ function TurniPage({ dipendenti, turni, reload }) {
         }
       }
     });
+    // === SOSTITUZIONE BAR (disponibilità dal portale) ===
+    // Chi si è offerto va al bar nella fascia che ha scelto, nei giorni coperti;
+    // se era in squadra sala, il suo posto è coperto da una Lunga (giornata doppia)
+    // assegnata al cameriere con meno Lunghe in settimana. Se l'unico disponibile
+    // è a riposo, si chiede conferma prima di annullarglielo.
+    const pianoDi = (dipId, gi) => {
+      const u = [...updates].reverse().find(x => x.dipendente_id === dipId && x.giorno === giorni[gi]);
+      if (u) return u.turno_id;
+      return (getAssegnazione(dipId, giorni[gi]) || {}).turno_id || null;
+    };
+    const setPiano = (dipId, gi, turnoId) => {
+      const idx = updates.findIndex(x => x.dipendente_id === dipId && x.giorno === giorni[gi]);
+      if (idx >= 0) updates[idx] = { dipendente_id: dipId, giorno: giorni[gi], turno_id: turnoId };
+      else { updates.push({ dipendente_id: dipId, giorno: giorni[gi], turno_id: turnoId }); tocco++; }
+    };
+    const salaIds = dipTurni.filter(d => cfgDi(d.id).sala).map(d => d.id);
+    const cognomeDip = (id) => { const d = dipendenti.find(x => x.id === id) || {}; return d.cognome || d.nome_completo || d.nome || "?"; };
+    for (let gi = 0; gi < 7; gi++) {
+      const dt = new Date(lunedi); dt.setDate(lunedi.getDate() + gi);
+      const dStr = isoT(dt);
+      for (const disp of dispBar) {
+        if (!(disp.dal <= dStr && dStr <= disp.al)) continue;
+        const S = dipTurni.find(d => d.id === disp.dipendente_id);
+        if (!S || cfgDi(S.id).rotazione) continue;   // un barista non sostituisce sé stesso
+        const turnoBar = disp.fascia === "pomeriggio" ? idBarPom : idBarMattina;
+        if (!turnoBar) continue;
+        const copriSala = salaIds.includes(S.id);
+        setPiano(S.id, gi, turnoBar);
+        if (!copriSala) continue;
+        // sala: candidato alla doppia = cameriere (non S) non in Ferie e non già Lunga
+        const cand = salaIds.filter(id => id !== S.id)
+          .map(id => ({ id, turno: pianoDi(id, gi) }))
+          .filter(c => { const n = nomeTurno(c.turno) || ""; return n !== "Ferie" && n !== "Lunga"; });
+        const lungheDi = (id) => { let n = 0; for (let g2 = 0; g2 < 7; g2++) if (nomeTurno(pianoDi(id, g2)) === "Lunga") n++; return n; };
+        const lavorano = cand.filter(c => c.turno && nomeTurno(c.turno) !== "Riposo").sort((a, b) => lungheDi(a.id) - lungheDi(b.id));
+        const aRiposo = cand.filter(c => nomeTurno(c.turno) === "Riposo").sort((a, b) => lungheDi(a.id) - lungheDi(b.id));
+        let scelto = lavorano[0] || null;
+        if (!scelto && aRiposo.length) {
+          const c0 = aRiposo[0];
+          if (window.confirm(`${giorni[gi]}: ${cognomeDip(S.id)} copre il bar e in sala manca una persona. `
+            + `L'unico disponibile è ${cognomeDip(c0.id)}, che però è a riposo. Annullo il suo riposo e gli do la Lunga?`)) scelto = c0;
+        }
+        if (scelto && idLunga) setPiano(scelto.id, gi, idLunga);
+        else if (!scelto) toast(`⚠️ ${giorni[gi]}: sala scoperta (nessun cameriere disponibile per la doppia)`, "err");
+      }
+    }
+
     // === REGOLA: chi fa la sera non fa la mattina successiva (forzata) ===
     // Ricostruisco l'orario effettivo della settimana (esistente + modifiche appena calcolate)
     // e, se trovo "mattina" subito dopo una "sera/pomeriggio", sposto la mattina al pomeriggio.
@@ -2070,6 +2123,9 @@ function TurniPage({ dipendenti, turni, reload }) {
             preferenze 💤 (vincono sul riposo fisso), rotazione baristi mattina↔pomeriggio ("☀️ ora mattina" vale per la settimana in cui
             la imposti, poi si inverte da sola ogni lunedì) con riposo domenicale del gruppo di pomeriggio,
             rotazione sala 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo. Ogni casella resta modificabile a mano dopo.</p>
+          <p style={{ margin: "0 0 8px" }}><b>🆘 Sostituzioni bar</b>: se manca un barista, chi ha la spunta "può coprire il bar" (in Configura turni)
+            manda la disponibilità dal portale scegliendo giorni e fascia; "Genera settimana" lo mette al bar e copre il suo posto in sala
+            con una Lunga a chi ne ha meno (se serve annullare un riposo, te lo chiede prima).</p>
           <p style={{ margin: 0 }}><b>📋 Vista griglia</b>: menu a tendina con tutti i turni, 🖌 pennello per compilare veloce e trascinamento ⠿ per riordinare le righe.
             I dipendenti vedono questa stessa settimana dal portale (sola lettura) e da lì mandano le preferenze di riposo.</p>
         </div>
@@ -2207,13 +2263,20 @@ function TurniPage({ dipendenti, turni, reload }) {
                             onClick={() => setCfgRow(i, "riposo_giorno", r.riposo_giorno === g ? "" : g)}>{g.slice(0, 3)}</button>
                         ))}
                       </div>
-                      <div style={cap}>Lunga <span style={{ fontWeight: 400, textTransform: "none" }}>(fino a 2 giorni tra Ven/Sab/Dom)</span></div>
-                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                        {LUNGA_GIORNI.map(g => {
-                          const on = r.lunga1 === g || (r.doppia && r.lunga2 === g);
-                          return <button key={g} type="button" style={chipG(on)} onClick={() => toggleLungaCfg(i, g)}>{g.slice(0, 3)}</button>;
-                        })}
-                      </div>
+                      {modo !== "rot" && (<>
+                        <div style={cap}>Lunga <span style={{ fontWeight: 400, textTransform: "none" }}>(fino a 2 giorni tra Ven/Sab/Dom)</span></div>
+                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                          {LUNGA_GIORNI.map(g => {
+                            const on = r.lunga1 === g || (r.doppia && r.lunga2 === g);
+                            return <button key={g} type="button" style={chipG(on)} onClick={() => toggleLungaCfg(i, g)}>{g.slice(0, 3)}</button>;
+                          })}
+                        </div>
+                        <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, fontSize: 12.5, fontWeight: 600 }}
+                          title="Se assente un barista, questo dipendente può offrirsi dal portale per coprire il bar (dal-al + fascia)">
+                          <input type="checkbox" checked={!!r.sostituto_bar} onChange={e => setCfgRow(i, "sostituto_bar", e.target.checked)} />
+                          🆘 Può coprire il bar (sostituzioni)
+                        </label>
+                      </>)}
                       <div style={cap}>Onomastico 🎂</div>
                       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                         <input className="dc-input" style={{ width: 52, display: "inline-block" }} type="number" min="1" max="31" placeholder="gg" value={r.onom_giorno ?? ""} onChange={e => setCfgRow(i, "onom_giorno", e.target.value)} />
@@ -2350,6 +2413,23 @@ function TurniPage({ dipendenti, turni, reload }) {
           </div>
           <p className="dc-muted" style={{ fontSize: 12, margin: "8px 0 0" }}>
             "Genera settimana" mette il Riposo nel giorno preferito (segnato 💤 nelle caselle); la tua modifica a mano ha sempre la precedenza.
+          </p>
+        </div>
+      )}
+
+      {dispBar.length > 0 && (
+        <div className="dc-card" style={{ marginBottom: 12 }}>
+          <h3 style={{ marginTop: 0 }}>🆘 Disponibili a coprire il bar</h3>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {dispBar.map((d, i) => (
+              <span key={i} style={{ background: "#f6efe2", border: "1px solid #e6d9bd", borderRadius: 999, padding: "5px 12px", fontSize: 13, fontWeight: 600 }}>
+                {d.nome || "Dipendente"} → bar {d.fascia === "pomeriggio" ? "🌆 pomeriggio" : "☀️ mattina"} · dal {d.dal.split("-").reverse().join("/")} al {d.al.split("-").reverse().join("/")}
+              </span>
+            ))}
+          </div>
+          <p className="dc-muted" style={{ fontSize: 12, margin: "8px 0 0" }}>
+            "Genera settimana" li mette al bar nella fascia scelta e copre il loro posto in sala con una
+            Lunga (a chi ne ha meno); se serve annullare un riposo te lo chiede prima.
           </p>
         </div>
       )}
