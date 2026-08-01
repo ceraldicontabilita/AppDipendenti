@@ -95,8 +95,12 @@ Fondo EST (sanitario), Fon.Te. (previdenza compl.).
 - **Sostituzioni bar**: flag `sostituto_bar` in `turni_config` (spunta "🆘 può coprire
   il bar" nel modale, pensata per Taiano e Russo ma senza nomi cablati). Chi ha il
   flag vede nel portale il riquadro "🆘 Copro il bar" (dal/al + fascia mattina o
-  pomeriggio → POST `/api/turni/disponibilita-bar`, collezione
-  `turni_disponibilita_bar`, notifica al responsabile). In gestione: pannello 🆘 in
+  pomeriggio + "al posto di" = barista assente → POST `/api/turni/disponibilita-bar`,
+  collezione `turni_disponibilita_bar`, notifica al responsabile; se indicato,
+  "Genera settimana" svuota le celle dell'assente nei giorni coperti → la coppia
+  diventa es. Vespa+Taiano). Modale a card RAGGRUPPATE per ruolo (sezioni ☕ Baristi /
+  🍽 Camerieri / 🕐 Turno fisso, badge ruolo in card, pillole modalità dentro
+  "cambia modalità"). In gestione: pannello 🆘 in
   pagina Turni (GET staff `/turni-disponibilita-bar?settimana=`) e "Genera settimana"
   mette il sostituto al bar nella fascia scelta; se era in squadra sala copre il buco
   con una Lunga al cameriere con meno Lunghe (conferma via window.confirm prima di

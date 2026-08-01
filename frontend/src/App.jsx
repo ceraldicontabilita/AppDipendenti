@@ -1981,6 +1981,11 @@ function TurniPage({ dipendenti, turni, reload }) {
         if (!turnoBar) continue;
         const copriSala = salaIds.includes(S.id);
         setPiano(S.id, gi, turnoBar);
+        // Il barista assente esce dal calendario nei giorni coperti: la coppia
+        // diventa es. Vespa+Taiano, non più Vespa+Capezzuto.
+        if (disp.sostituisce_id && dipTurni.some(d => d.id === disp.sostituisce_id)) {
+          setPiano(disp.sostituisce_id, gi, null);
+        }
         if (!copriSala) continue;
         // sala: candidato alla doppia = cameriere (non S) non in Ferie e non già Lunga
         const cand = salaIds.filter(id => id !== S.id)
@@ -2213,8 +2218,15 @@ function TurniPage({ dipendenti, turni, reload }) {
               )}
             </div>
             <div style={{ maxHeight: "58vh", overflow: "auto", padding: 2 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(310px, 1fr))", gap: 12 }}>
-                {cfgRows.map((r, i) => {
+              {[["rot", "☕ Baristi — rotazione mattina↔pomeriggio"], ["sala", "🍽 Camerieri — sala"], ["fisso", "🕐 Turno fisso / altro"]].map(([gruppoModo, titoloGruppo]) => {
+                const gruppo = cfgRows.map((r, i) => ({ r, i }))
+                  .filter(({ r }) => (r.sala ? "sala" : (r.rotazione ? "rot" : "fisso")) === gruppoModo);
+                if (!gruppo.length) return null;
+                return (
+              <div key={gruppoModo}>
+                <div style={{ fontWeight: 800, fontSize: 13, color: "#3f5a4e", margin: "14px 2px 8px", textTransform: "uppercase", letterSpacing: ".5px" }}>{titoloGruppo}</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(310px, 1fr))", gap: 12 }}>
+                {gruppo.map(({ r, i }) => {
                   const modo = r.sala ? "sala" : (r.rotazione ? "rot" : "fisso");
                   const pill = (on) => ({ border: on ? "2px solid #3f5a4e" : "1px solid #e6e0d4", background: on ? "#3f5a4e" : "#fff",
                     color: on ? "#fff" : "#2a3329", borderRadius: 999, padding: "5px 11px", fontSize: 12, fontWeight: 700, cursor: "pointer" });
@@ -2225,17 +2237,22 @@ function TurniPage({ dipendenti, turni, reload }) {
                     <div key={r.dipendente_id} style={{ border: "1px solid #e6e0d4", background: "#fffefb", borderRadius: 14, padding: 12, boxShadow: "0 2px 8px rgba(63,90,78,.06)" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                         <Avatar nome={r.nome} size="sm" />
-                        <b style={{ fontSize: 14 }}>{r.nome}</b>
+                        <b style={{ fontSize: 14, flex: 1 }}>{r.nome}</b>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: "#3f5a4e", background: "#eef1ea", border: "1px solid #d7e0d3", borderRadius: 999, padding: "3px 9px" }}>
+                          {modo === "sala" ? "🍽 Sala" : modo === "rot" ? "☕ Barista" : "🕐 Fisso"}
+                        </span>
                       </div>
-                      <div style={cap}>Modalità</div>
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        <button type="button" style={pill(modo === "sala")} title="Cameriere: rotazione automatica 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo"
-                          onClick={() => patchCfgRow(i, { sala: true, rotazione: "" })}>🍽 Sala</button>
-                        <button type="button" style={pill(modo === "rot")} title="Barista: alterna ogni settimana mattina e pomeriggio"
-                          onClick={() => patchCfgRow(i, { sala: false, rotazione: r.rotazione || "mattina", turno_id: "", rotazione_ancora: r.rotazione_ancora || settimana })}>☕ Bar mattina↔pom</button>
-                        <button type="button" style={pill(modo === "fisso")} title="Sempre lo stesso turno"
-                          onClick={() => patchCfgRow(i, { sala: false, rotazione: "" })}>🕐 Turno fisso</button>
-                      </div>
+                      <details style={{ marginTop: 8 }}>
+                        <summary className="dc-muted" style={{ cursor: "pointer", fontSize: 12 }}>cambia modalità</summary>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                          <button type="button" style={pill(modo === "sala")} title="Cameriere: rotazione automatica 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo"
+                            onClick={() => patchCfgRow(i, { sala: true, rotazione: "" })}>🍽 Sala</button>
+                          <button type="button" style={pill(modo === "rot")} title="Barista: alterna ogni settimana mattina e pomeriggio"
+                            onClick={() => patchCfgRow(i, { sala: false, rotazione: r.rotazione || "mattina", turno_id: "", rotazione_ancora: r.rotazione_ancora || settimana })}>☕ Bar mattina↔pom</button>
+                          <button type="button" style={pill(modo === "fisso")} title="Sempre lo stesso turno"
+                            onClick={() => patchCfgRow(i, { sala: false, rotazione: "" })}>🕐 Turno fisso</button>
+                        </div>
+                      </details>
                       {modo === "rot" && (
                         <div style={{ marginTop: 8 }}>
                           <div style={{ display: "flex", gap: 6 }}>
@@ -2289,7 +2306,10 @@ function TurniPage({ dipendenti, turni, reload }) {
                     </div>
                   );
                 })}
+                </div>
               </div>
+                );
+              })}
             </div>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
               <button className="dc-btn" onClick={() => setShowCfg(false)}>Chiudi</button>
@@ -2423,7 +2443,7 @@ function TurniPage({ dipendenti, turni, reload }) {
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {dispBar.map((d, i) => (
               <span key={i} style={{ background: "#f6efe2", border: "1px solid #e6d9bd", borderRadius: 999, padding: "5px 12px", fontSize: 13, fontWeight: 600 }}>
-                {d.nome || "Dipendente"} → bar {d.fascia === "pomeriggio" ? "🌆 pomeriggio" : "☀️ mattina"} · dal {d.dal.split("-").reverse().join("/")} al {d.al.split("-").reverse().join("/")}
+                {d.nome || "Dipendente"} → bar {d.fascia === "pomeriggio" ? "🌆 pomeriggio" : "☀️ mattina"}{d.sostituisce_nome ? ` · al posto di ${d.sostituisce_nome}` : ""} · dal {d.dal.split("-").reverse().join("/")} al {d.al.split("-").reverse().join("/")}
               </span>
             ))}
           </div>

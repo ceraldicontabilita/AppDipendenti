@@ -254,12 +254,16 @@ async def turni_azienda(settimana: str = "", identity: Dict[str, Any] = Depends(
     dipendenti = await db[Collections.EMPLOYEES].find(
         {"stato": "attivo", "merged_into": {"$exists": False}},
         {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "nome_completo": 1}).to_list(500)
-    # Chi può coprire il bar nelle sostituzioni (flag in turni_config, niente nomi cablati)
+    # Chi può coprire il bar nelle sostituzioni (flag in turni_config, niente nomi
+    # cablati) e chi sono i baristi in rotazione (per il campo "al posto di").
     sostituti = await db.turni_config.find(
         {"sostituto_bar": True}, {"_id": 0, "dipendente_id": 1}).to_list(100)
+    baristi = await db.turni_config.find(
+        {"rotazione": {"$nin": [None, ""]}}, {"_id": 0, "dipendente_id": 1}).to_list(100)
     return {"settimana": settimana, "assegnazioni": assegnazioni,
             "turni": turni, "dipendenti": dipendenti,
-            "sostituti_bar": [s["dipendente_id"] for s in sostituti]}
+            "sostituti_bar": [s["dipendente_id"] for s in sostituti],
+            "baristi_rotazione": [b["dipendente_id"] for b in baristi]}
 
 
 COLL_DISP_BAR = "turni_disponibilita_bar"
@@ -302,10 +306,24 @@ async def crea_disponibilita_bar(payload: Dict[str, Any] = Body(...),
     nome = ((dip or {}).get("nome_completo")
             or f"{(dip or {}).get('cognome', '')} {(dip or {}).get('nome', '')}".strip()
             or identity.get("name") or "Dipendente")
+    # "Al posto di": il barista assente che si sta coprendo (facoltativo ma
+    # consigliato — così Genera settimana lo toglie dal calendario in quei giorni)
+    sostituisce_id = payload.get("sostituisce_id") or None
+    sostituisce_nome = None
+    if sostituisce_id:
+        ass = await db[Collections.EMPLOYEES].find_one(
+            {"id": sostituisce_id}, {"_id": 0, "nome": 1, "cognome": 1, "nome_completo": 1})
+        if not ass:
+            raise HTTPException(400, "Dipendente da sostituire non trovato")
+        sostituisce_nome = (ass.get("nome_completo")
+                            or f"{ass.get('cognome', '')} {ass.get('nome', '')}".strip())
     doc = {"id": f"db_{uuid4().hex[:12]}", "dipendente_id": identity["id"], "nome": nome,
-           "dal": dal, "al": al, "fascia": fascia, "creata_il": _now()}
+           "dal": dal, "al": al, "fascia": fascia,
+           "sostituisce_id": sostituisce_id, "sostituisce_nome": sostituisce_nome,
+           "creata_il": _now()}
     await db[COLL_DISP_BAR].insert_one(dict(doc))
     try:
+        al_posto = f" al posto di {sostituisce_nome}" if sostituisce_nome else ""
         async for r in db[Collections.EMPLOYEES].find(
                 {"ruolo_app": "responsabile_turni", "merged_into": {"$exists": False}},
                 {"_id": 0, "id": 1}):
@@ -313,10 +331,11 @@ async def crea_disponibilita_bar(payload: Dict[str, Any] = Body(...),
                 await crea_notifica(
                     db, dipendente_id=r["id"], tipo="turni",
                     titolo="Disponibilità copertura bar",
-                    messaggio=f"{nome} copre il bar ({fascia}) dal {dal} al {al}: "
+                    messaggio=f"{nome} copre il bar ({fascia}){al_posto} dal {dal} al {al}: "
                               "rigenera la settimana in pagina Turni per applicarla.")
     except Exception:
         logger.warning("Notifica disponibilità bar non inviata")
+    doc.pop("_id", None)
     return doc
 
 
