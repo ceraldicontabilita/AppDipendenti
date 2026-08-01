@@ -23,7 +23,7 @@ from jose import jwt
 from backend.app.config import settings
 from backend.app.database import Database, Collections
 from backend.app.repositories import UserRepository
-from backend.app.services.auth_dipendenti import login_dipendente, lista_login, operatore_amministratore
+from backend.app.services.auth_dipendenti import login_dipendente, login_dipendente_per_nome, operatore_amministratore
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -93,8 +93,31 @@ async def pin_login(
 
     pin = str(payload.get("pin", "")).strip()
     dipendente_id = payload.get("dipendente_id")
+    nome = str(payload.get("nome", "")).strip()
 
-    # --- Ramo dipendente: dipendente_id + PIN personale ---
+    # --- Ramo dipendente: cognome (o nome e cognome) + PIN personale.
+    # Nessun elenco di nomi viene mai esposto prima dell'autenticazione. ---
+    if nome and not dipendente_id:
+        result = await login_dipendente_per_nome(nome, pin)
+        if not result:
+            _register_failure(ip)
+            logger.warning(f"PIN-login per nome fallito da IP {ip}")
+            raise HTTPException(401, "Nome o PIN non validi")
+        _clear_failures(ip)
+        try:
+            from backend.app.services.audit_logger import log_evento
+            await log_evento(
+                modulo="accesso", azione="login",
+                entita_id=result["user_id"], entita_collection="dipendenti",
+                db=Database.get_db(), fonte="portale", utente=result["user_id"],
+                dettaglio="Accesso al portale via nome+PIN", extra={"ip": ip},
+            )
+        except Exception:
+            pass
+        logger.info(f"PIN-login per nome OK · IP {ip} · {result['user_id']} · {result['role']}")
+        return result
+
+    # --- Ramo dipendente (legacy): dipendente_id + PIN personale ---
     if dipendente_id:
         result = await login_dipendente(str(dipendente_id), pin)
         if not result:
@@ -196,12 +219,6 @@ async def pin_login(
         "role": user.get("role", "admin"),
         "auth_method": "pin",
     }
-
-
-@router.get("/dipendenti-login", summary="Elenco dipendenti per schermata login mobile")
-async def dipendenti_login_list():
-    """Lista dipendenti attivi (id, nome, mansione, ruolo, pin_impostato). Nessun dato sensibile."""
-    return await lista_login()
 
 
 @router.get("/pin-login/health", summary="Health check PIN login")

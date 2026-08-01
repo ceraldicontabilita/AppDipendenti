@@ -40,6 +40,10 @@ Fondo EST (sanitario), Fon.Te. (previdenza compl.).
 ## Autenticazione
 - Ingresso da `/portale` con **PIN** → JWT in `localStorage.pt_token` (+ `pt_role`,
   `pt_name`). Header `Authorization: Bearer`.
+- **Login dipendente = cognome + PIN** (POST `/api/auth/pin-login` con `{nome, pin}`):
+  NESSUN elenco di nomi esposto prima dell'autenticazione (rimosso il vecchio
+  GET `/auth/dipendenti-login`); tra gli omonimi passa solo chi verifica il PIN,
+  se ambiguo l'accesso è negato. I nomi di tutti restano solo in Gestione (admin).
 - Login admin: dalla schermata PIN → **"Accesso amministratore"** (PIN = env `PIN_CODE`),
   NON dalla scheda di un dipendente.
 - Sessione admin **2 ore** (`ADMIN_TOKEN_EXPIRE_MINUTES`).

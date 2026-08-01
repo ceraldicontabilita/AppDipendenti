@@ -1734,6 +1734,13 @@ function TurniPage({ dipendenti, turni, reload }) {
       onom_mese: o.mese ?? '', onom_giorno: o.giorno ?? '', onom_attivo: o.attivo ?? false, straniero: o.straniero || false }; }));
     setShowCfg(true);
   };
+  const patchCfgRow = (i, patch) => setCfgRows(rows => rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const toggleLungaCfg = (i, g) => setCfgRows(rows => rows.map((r, j) => {
+    if (j !== i) return r;
+    const sel = [r.lunga1, r.doppia ? r.lunga2 : ""].filter(Boolean);
+    const next = sel.includes(g) ? sel.filter(x => x !== g) : [...sel, g].slice(-2);
+    return { ...r, lunga1: next[0] || "", lunga2: next[1] || "", doppia: next.length === 2 };
+  }));
   const setCfgRow = (i, k, v) => setCfgRows(rows => rows.map((r, j) => {
     if (j !== i) return r;
     const nr = { ...r, [k]: v };
@@ -2032,6 +2039,23 @@ function TurniPage({ dipendenti, turni, reload }) {
         </div>
       </div>
 
+      <details className="dc-card" style={{ marginBottom: 12, padding: "12px 16px" }}>
+        <summary style={{ cursor: "pointer", fontWeight: 700, fontSize: 14 }}>📖 Guida — come funziona questa pagina</summary>
+        <div style={{ fontSize: 13, lineHeight: 1.65, marginTop: 10 }}>
+          <p style={{ margin: "0 0 8px" }}><b>✨ Vista semplice</b> (quella che vedi): una riga per dipendente, 7 caselle.
+            <b> Un click sulla casella = turno successivo</b> tra le sue "sponde" (i soli turni che può fare, poi Riposo, Ferie, vuoto).
+            Si salva da solo a ogni click. In alto la <b>copertura</b>: ☀️ persone al mattino e 🌆 al pomeriggio (la Lunga conta per entrambi); <span style={{ color: "#b3261e", fontWeight: 700 }}>rosso</span> = fascia scoperta.</p>
+          <p style={{ margin: "0 0 8px" }}><b>Simboli</b>: 🎂 riposo per onomastico · 💤 giorno di riposo chiesto dal dipendente dal portale.</p>
+          <p style={{ margin: "0 0 8px" }}><b>⚙️ Configura turni</b>: le sponde di ogni dipendente — modalità (Sala / Bar in rotazione / turno fisso),
+            riposo fisso, giorni di Lunga, onomastico e il periodo di chiusura pomeridiana del bar.</p>
+          <p style={{ margin: "0 0 8px" }}><b>Genera settimana</b> compila tutto da solo: Ferie nei giorni approvati, Riposo per onomastici e
+            preferenze 💤 (vincono sul riposo fisso), rotazione baristi mattina↔pomeriggio con riposo domenicale del gruppo di pomeriggio,
+            rotazione sala 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo. Ogni casella resta modificabile a mano dopo.</p>
+          <p style={{ margin: 0 }}><b>📋 Vista griglia</b>: menu a tendina con tutti i turni, 🖌 pennello per compilare veloce e trascinamento ⠿ per riordinare le righe.
+            I dipendenti vedono questa stessa settimana dal portale (sola lettura) e da lì mandano le preferenze di riposo.</p>
+        </div>
+      </details>
+
       <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <button onClick={() => setLunedi(d => { const n = new Date(d); n.setDate(d.getDate() - 7); return n; })} className="dc-btn">‹</button>
         <strong style={{ minWidth: 150, textAlign: "center" }}>{meseLabel}{settimanaPari ? "" : " · bar invertito"}</strong>
@@ -2081,9 +2105,13 @@ function TurniPage({ dipendenti, turni, reload }) {
 
       {showCfg && (
         <div onClick={() => setShowCfg(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,51,41,.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, zIndex: 50, overflow: "auto" }}>
-          <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 920, width: "100%", marginTop: 20 }}>
+          <div onClick={e => e.stopPropagation()} className="dc-card" style={{ maxWidth: 1080, width: "100%", marginTop: 20 }}>
             <h3 style={{ marginTop: 0 }}>⚙️ Configura turni dipendenti</h3>
-            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>Punto unico dei turni. Per ognuno scegli UNA modalità: <b>Sala</b> (cameriere → rotazione automatica 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo, riposi nei feriali per coprire il weekend), oppure <b>turno abituale</b>, oppure <b>rotazione bar</b> (mattina ↔ pomeriggio ogni settimana). In più: <b>riposo fisso</b>, la <b>Lunga</b> (1 a settimana, Ven/Sab/Dom; spunta <b>doppia</b> per chi la fa due volte) e l’<b>onomastico</b>. “Genera settimana” mette sempre Ferie nei giorni approvati e Riposo nell’onomastico. Le celle restano modificabili a mano. Salva su database (MongoDB Atlas).</p>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: 0 }}>
+              Una card per dipendente: scegli la <b>modalità</b> (Sala, Bar in rotazione o Turno fisso),
+              poi tocca i giorni per <b>riposo fisso</b> e <b>Lunga</b>. Queste sono le "sponde" usate
+              da "Genera settimana" e dalla vista semplice.
+            </p>
             <div style={{ background: "#eef1ea", border: "1px solid #d7e0d3", borderRadius: 10, padding: "10px 14px", marginBottom: 12 }}>
               <label style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 14 }}>
                 <input type="checkbox" checked={chiusuraPom.attiva} onChange={e => setChiusuraPom(cp => ({ ...cp, attiva: e.target.checked }))} />
@@ -2109,60 +2137,69 @@ function TurniPage({ dipendenti, turni, reload }) {
                 </div>
               )}
             </div>
-            <div style={{ maxHeight: "60vh", overflow: "auto" }}>
-            <table className="dc-table">
-              <thead><tr><th>Dipendente</th><th>Sala<br/><span style={{fontWeight:400,fontSize:11}}>cameriere</span></th><th>Turno abituale</th><th>Rotazione bar<br/><span style={{fontWeight:400,fontSize:11}}>mattina ↔ pom</span></th><th>Riposo fisso</th><th>Lunga<br/><span style={{fontWeight:400,fontSize:11}}>1/sett · doppia</span></th><th>Onomastico<br/><span style={{fontWeight:400,fontSize:11}}>gg / mm · attivo</span></th></tr></thead>
-              <tbody>
-                {cfgRows.map((r, i) => (
-                  <tr key={r.dipendente_id}>
-                    <td>{r.nome}</td>
-                    <td style={{ textAlign: "center" }}>
-                      <input type="checkbox" checked={!!r.sala} title="Cameriere: rotazione automatica 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo" onChange={e => setCfgRow(i, "sala", e.target.checked)} />
-                    </td>
-                    <td>
-                      <select className="dc-input" value={r.turno_id} onChange={e => setCfgRow(i, "turno_id", e.target.value)} disabled={!!r.rotazione || !!r.sala} title={r.sala ? "In rotazione sala: i turni sono assegnati in automatico" : (r.rotazione ? "In rotazione bar: il turno è alternato automaticamente" : "")}>
-                        <option value="">— nessuno —</option>
-                        {turni.map(t => <option key={t.id} value={t.id}>{t.nome}</option>)}
-                      </select>
-                    </td>
-                    <td>
-                      <select className="dc-input" value={r.rotazione} onChange={e => setCfgRow(i, "rotazione", e.target.value)} disabled={!!r.sala} title="Alterna ogni settimana mattina e pomeriggio bar">
-                        <option value="">— no —</option>
-                        <option value="mattina">Inizia mattina</option>
-                        <option value="pomeriggio">Inizia pomeriggio</option>
-                      </select>
-                    </td>
-                    <td>
-                      <select className="dc-input" value={r.riposo_giorno} onChange={e => setCfgRow(i, "riposo_giorno", e.target.value)}>
-                        <option value="">— nessuno —</option>
-                        {giorni.map(g => <option key={g} value={g}>{g}</option>)}
-                      </select>
-                    </td>
-                    <td style={{ whiteSpace: "nowrap" }}>
-                      <select className="dc-input" style={{ width: 95, display: "inline-block" }} value={r.lunga1} onChange={e => setCfgRow(i, "lunga1", e.target.value)} title="Giorno della Lunga (1 a settimana)">
-                        <option value="">— no —</option>
-                        {LUNGA_GIORNI.map(g => <option key={g} value={g}>{g}</option>)}
-                      </select>
-                      <label style={{ marginLeft: 6, fontSize: 12 }} title="Spunta se questo dipendente fa la Lunga due volte a settimana">
-                        <input type="checkbox" checked={!!r.doppia} disabled={!r.lunga1} onChange={e => setCfgRow(i, "doppia", e.target.checked)} /> doppia
-                      </label>
-                      {r.doppia && (
-                        <select className="dc-input" style={{ width: 95, display: "inline-block", marginLeft: 6 }} value={r.lunga2} onChange={e => setCfgRow(i, "lunga2", e.target.value)} title="2° giorno di Lunga">
-                          <option value="">— 2° giorno —</option>
-                          {LUNGA_GIORNI.filter(g => g !== r.lunga1).map(g => <option key={g} value={g}>{g}</option>)}
+            <div style={{ maxHeight: "58vh", overflow: "auto", padding: 2 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(310px, 1fr))", gap: 12 }}>
+                {cfgRows.map((r, i) => {
+                  const modo = r.sala ? "sala" : (r.rotazione ? "rot" : "fisso");
+                  const pill = (on) => ({ border: on ? "2px solid #3f5a4e" : "1px solid #e6e0d4", background: on ? "#3f5a4e" : "#fff",
+                    color: on ? "#fff" : "#2a3329", borderRadius: 999, padding: "5px 11px", fontSize: 12, fontWeight: 700, cursor: "pointer" });
+                  const chipG = (on) => ({ border: on ? "2px solid #5b7a6b" : "1px solid #e6e0d4", background: on ? "#5b7a6b" : "#fff",
+                    color: on ? "#fff" : "#2a3329", borderRadius: 8, padding: "4px 8px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" });
+                  const cap = { fontSize: 11, color: "#6b7669", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".4px", margin: "10px 0 5px" };
+                  return (
+                    <div key={r.dipendente_id} style={{ border: "1px solid #e6e0d4", background: "#fffefb", borderRadius: 14, padding: 12, boxShadow: "0 2px 8px rgba(63,90,78,.06)" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <Avatar nome={r.nome} size="sm" />
+                        <b style={{ fontSize: 14 }}>{r.nome}</b>
+                      </div>
+                      <div style={cap}>Modalità</div>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        <button type="button" style={pill(modo === "sala")} title="Cameriere: rotazione automatica 2 Lunga / 2 Mattina / 2 Pomeriggio / 1 Riposo"
+                          onClick={() => patchCfgRow(i, { sala: true, rotazione: "" })}>🍽 Sala</button>
+                        <button type="button" style={pill(modo === "rot")} title="Barista: alterna ogni settimana mattina e pomeriggio"
+                          onClick={() => patchCfgRow(i, { sala: false, rotazione: r.rotazione || "mattina", turno_id: "" })}>☕ Bar mattina↔pom</button>
+                        <button type="button" style={pill(modo === "fisso")} title="Sempre lo stesso turno"
+                          onClick={() => patchCfgRow(i, { sala: false, rotazione: "" })}>🕐 Turno fisso</button>
+                      </div>
+                      {modo === "rot" && (
+                        <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                          <button type="button" style={chipG(r.rotazione === "mattina")} onClick={() => setCfgRow(i, "rotazione", "mattina")}>inizia mattina</button>
+                          <button type="button" style={chipG(r.rotazione === "pomeriggio")} onClick={() => setCfgRow(i, "rotazione", "pomeriggio")}>inizia pomeriggio</button>
+                        </div>
+                      )}
+                      {modo === "fisso" && (
+                        <select className="dc-input" style={{ marginTop: 8 }} value={r.turno_id} onChange={e => setCfgRow(i, "turno_id", e.target.value)}>
+                          <option value="">— nessun turno —</option>
+                          {turni.map(t => <option key={t.id} value={t.id}>{t.nome}</option>)}
                         </select>
                       )}
-                    </td>
-                    <td style={{ whiteSpace: "nowrap" }}>
-                      <input className="dc-input" style={{ width: 48, display: "inline-block" }} type="number" min="1" max="31" value={r.onom_giorno ?? ""} onChange={e => setCfgRow(i, "onom_giorno", e.target.value)} />
-                      <span> / </span>
-                      <input className="dc-input" style={{ width: 48, display: "inline-block" }} type="number" min="1" max="12" value={r.onom_mese ?? ""} onChange={e => setCfgRow(i, "onom_mese", e.target.value)} />
-                      <input type="checkbox" style={{ marginLeft: 6 }} title="Riposo onomastico attivo" checked={!!r.onom_attivo} onChange={e => setCfgRow(i, "onom_attivo", e.target.checked)} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                      <div style={cap}>Riposo fisso <span style={{ fontWeight: 400, textTransform: "none" }}>(tocca per scegliere)</span></div>
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                        {giorni.map(g => (
+                          <button key={g} type="button" style={chipG(r.riposo_giorno === g)}
+                            onClick={() => setCfgRow(i, "riposo_giorno", r.riposo_giorno === g ? "" : g)}>{g.slice(0, 3)}</button>
+                        ))}
+                      </div>
+                      <div style={cap}>Lunga <span style={{ fontWeight: 400, textTransform: "none" }}>(fino a 2 giorni tra Ven/Sab/Dom)</span></div>
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                        {LUNGA_GIORNI.map(g => {
+                          const on = r.lunga1 === g || (r.doppia && r.lunga2 === g);
+                          return <button key={g} type="button" style={chipG(on)} onClick={() => toggleLungaCfg(i, g)}>{g.slice(0, 3)}</button>;
+                        })}
+                      </div>
+                      <div style={cap}>Onomastico 🎂</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <input className="dc-input" style={{ width: 52, display: "inline-block" }} type="number" min="1" max="31" placeholder="gg" value={r.onom_giorno ?? ""} onChange={e => setCfgRow(i, "onom_giorno", e.target.value)} />
+                        <span>/</span>
+                        <input className="dc-input" style={{ width: 52, display: "inline-block" }} type="number" min="1" max="12" placeholder="mm" value={r.onom_mese ?? ""} onChange={e => setCfgRow(i, "onom_mese", e.target.value)} />
+                        <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4 }} title="Nel giorno dell'onomastico il dipendente è a riposo">
+                          <input type="checkbox" checked={!!r.onom_attivo} onChange={e => setCfgRow(i, "onom_attivo", e.target.checked)} /> riposo attivo
+                        </label>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
               <button className="dc-btn" onClick={() => setShowCfg(false)}>Chiudi</button>

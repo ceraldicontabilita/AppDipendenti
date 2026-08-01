@@ -52,43 +52,44 @@ def crea_token_dipendente(dip: Dict[str, Any]) -> str:
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
-async def lista_login() -> List[Dict[str, Any]]:
-    """Elenco dipendenti per la schermata di login del portale.
-
-    Mostra TUTTI i dipendenti attivi: chi non ha ancora un PIN lo crea al primo
-    accesso (flag pin_impostato=False). Nessun dato sensibile.
-    """
+async def login_dipendente_per_nome(nome: str, pin: str) -> Optional[Dict[str, Any]]:
+    """Login senza elenco esposto: il dipendente scrive il PROPRIO cognome (o
+    nome e cognome) e il PIN. Si cercano i dipendenti attivi che corrispondono
+    al nome e si accetta solo quello il cui PIN verifica — così due omonimi non
+    collidono e nessun nome viene mai mostrato prima dell'autenticazione."""
+    nome = (nome or "").strip()
+    if len(nome) < 2 or not _valid_pin_format(pin):
+        return None
     db = Database.get_db()
-    cursor = db[Collections.EMPLOYEES].find(
-        {"attivo": {"$ne": False},
-         "merged_into": {"$exists": False},
-         "stato": {"$nin": ["cessato", "dimesso", "archiviato"]}},
-        {"_id": 0, "id": 1, "nome_completo": 1, "nome": 1, "cognome": 1,
-         "mansione": 1, "ruolo": 1, "ruolo_app": 1, "pin_hash": 1},
-    )
-    # Gli amministratori accedono SOLO da "Accesso amministratore", non dalla lista.
-    ESCLUSI = [("vincenzo", "ceraldi"), ("valerio", "ceraldi")]
-    out = []
-    for d in await cursor.to_list(500):
-        if not d.get("id"):
-            continue
-        if d.get("ruolo_app") == "admin":
-            continue
-        nome = (d.get("nome_completo") or f"{d.get('nome','')} {d.get('cognome','')}").strip()
-        if not nome:
-            continue
-        _fn = nome.lower()
-        if any(a in _fn and b in _fn for a, b in ESCLUSI):
-            continue
-        out.append({
-            "id": d.get("id"),
-            "nome_completo": nome,
-            "mansione": d.get("mansione", "") or d.get("ruolo", ""),
-            "ruolo_app": d.get("ruolo_app", "dipendente"),
-            "pin_impostato": bool(d.get("pin_hash")),
-        })
-    out.sort(key=lambda x: x["nome_completo"].lower())
-    return out
+    tokens = [t for t in nome.lower().split() if t]
+    candidati = []
+    async for d in db[Collections.EMPLOYEES].find(
+            {"attivo": {"$ne": False},
+             "merged_into": {"$exists": False},
+             "stato": {"$nin": ["cessato", "dimesso", "archiviato"]}}):
+        completo = (d.get("nome_completo") or f"{d.get('nome', '')} {d.get('cognome', '')}").lower()
+        if all(t in completo for t in tokens):
+            candidati.append(d)
+    verificati = []
+    for dip in candidati:
+        ok = bool(dip.get("pin_hash")) and verify_pin(pin, dip["pin_hash"])
+        if not ok:
+            ok = await _pin_operatore_valido(db, dip, pin)
+        if ok:
+            verificati.append(dip)
+    if len(verificati) != 1:
+        return None  # nessuno o ambiguo (stesso nome E stesso PIN): niente accesso
+    dip = verificati[0]
+    token = crea_token_dipendente(dip)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user_id": dip["id"],
+        "name": dip.get("nome_completo", ""),
+        "role": dip.get("ruolo_app", "dipendente"),
+        "tipo": "dipendente",
+        "auth_method": "pin_dipendente",
+    }
 
 
 async def _pin_operatore_valido(db, dip: Dict[str, Any], pin: str) -> bool:

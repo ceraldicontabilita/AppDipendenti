@@ -31,52 +31,49 @@ const fmt = (d) => (d ? `${d.slice(8, 10)}/${d.slice(5, 7)}` : "-");
 
 /* ---------------- LOGIN ---------------- */
 function Login({ onLogin }) {
-  const [lista, setLista] = useState([]);
-  const [sel, setSel] = useState(null);
+  // Niente elenco dei dipendenti prima dell'autenticazione: si entra scrivendo
+  // il PROPRIO cognome + PIN. I nomi di tutti restano visibili solo agli
+  // amministratori nella Gestione.
+  const [sel, setSel] = useState(null);   // {admin:true} | {nome:"..."}
+  const [nome, setNome] = useState("");
   const [pin, setPin] = useState("");
   const [err, setErr] = useState("");
-
-  useEffect(() => {
-    api.get("/auth/dipendenti-login").then((r) => setLista(r.data)).catch(() => {});
-  }, []);
 
   const press = (n) => { setErr(""); if (pin.length < 8) setPin(pin + n); };
   const submit = async (p) => {
     try {
-      const body = sel.admin ? { pin: p } : { dipendente_id: sel.id, pin: p };
+      const body = sel.admin ? { pin: p } : { nome: sel.nome, pin: p };
       const r = await api.post("/auth/pin-login", body);
       localStorage.setItem(TK, r.data.access_token);
       localStorage.setItem("pt_role", r.data.role);
-      localStorage.setItem("pt_name", r.data.name || sel.nome_completo);
+      localStorage.setItem("pt_name", r.data.name || sel.nome);
       // L'amministratore entra DIRETTAMENTE nella Gestione (desktop), non nel portale.
       if (r.data.role === "admin") { window.location.href = "/dipendenti"; return; }
       onLogin();
-    } catch { setErr("PIN errato"); setPin(""); }
+    } catch { setErr(sel.admin ? "PIN errato" : "Nome o PIN non validi"); setPin(""); }
   };
-  useEffect(() => { if (pin.length >= 4 && sel) {/* attendi conferma */} }, [pin, sel]);
 
   if (!sel) return (
     <div className="login">
       <div className="brand"><div className="logo"><Users size={30} /></div>
         <h2>Portale Dipendenti</h2><div className="muted" style={{textAlign:"center"}}>Ceraldi Group</div></div>
       <div className="card"><h3>Chi sei?</h3>
-        {lista.length === 0 && <div className="muted">Nessun dipendente abilitato. Entra come amministratore per impostare i PIN.</div>}
-        {lista.map((d) => (
-          <button key={d.id} className="btn gh" style={{ marginTop: 8, textAlign: "left" }} onClick={() => setSel(d)}>
-            {d.nome_completo} <span className="muted">· {d.mansione}</span>
-          </button>
-        ))}
+        <label>Scrivi il tuo cognome (o nome e cognome)</label>
+        <input className="input" autoFocus value={nome} onChange={(e)=>{setNome(e.target.value); setErr("");}}
+          placeholder="es. Rossi" onKeyDown={(e)=>{ if(e.key==="Enter" && nome.trim().length>=2) setSel({nome: nome.trim()}); }} />
+        <button className="btn" style={{marginTop:10}} disabled={nome.trim().length<2}
+          onClick={()=>setSel({nome: nome.trim()})}>Continua</button>
       </div>
-      <button className="btn sec" onClick={() => setSel({ id: null, nome_completo: "Amministratore", admin: true })}>
+      <button className="btn sec" onClick={() => setSel({ nome: "Amministratore", admin: true })}>
         Accesso amministratore</button>
     </div>
   );
 
   return (
     <div className="login">
-      <button className="btn gh sm" style={{ width: "auto" }} onClick={() => { setSel(null); setPin(""); }}>
+      <button className="btn gh sm" style={{ width: "auto" }} onClick={() => { setSel(null); setPin(""); setErr(""); }}>
         <ChevronLeft size={16} /> indietro</button>
-      <h2 style={{ marginTop: 18 }}>Ciao {sel.nome_completo.split(" ")[0]}</h2>
+      <h2 style={{ marginTop: 18 }}>Ciao {sel.admin ? "Amministratore" : sel.nome}</h2>
       <div className="muted" style={{ textAlign: "center" }}>Inserisci il tuo PIN</div>
       <div className="pin-dots">{Array.from({length: Math.max(4, pin.length)}).map((_,i)=><i key={i} className={pin.length>i?"on":""} />)}</div>
       {err && <div className="err">{err}</div>}
@@ -137,6 +134,16 @@ function Turni() {
   };
   return (
     <>
+      <details className="card" style={{padding:"12px 14px"}}>
+        <summary style={{cursor:"pointer",fontWeight:700,fontSize:14}}>📖 Come funziona</summary>
+        <div className="muted" style={{fontSize:13,lineHeight:1.6,marginTop:8}}>
+          Qui vedi <b>i tuoi turni</b> della settimana, aggiornati in tempo reale appena il responsabile li compone.
+          Con <b>"Vedi i turni di tutti"</b> apri la tabella completa dei colleghi (la tua riga è evidenziata).
+          Nel riquadro <b>💤 Riposo preferito</b> tocca il giorno in cui vorresti riposare la prossima settimana:
+          la preferenza arriva subito a chi fa i turni, che ne tiene conto quando li genera. Non è un obbligo:
+          l'ultima parola resta a chi compone i turni. Per ferie e permessi usa la scheda <b>Richieste</b>.
+        </div>
+      </details>
       <div className="card">
         <div className="row"><h3 style={{margin:0}}>I miei turni</h3>
           {dati.settimana && <span className="pill info">sett. {fmt(dati.settimana)}</span>}</div>
