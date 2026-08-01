@@ -79,6 +79,15 @@ Fondo EST (sanitario), Fon.Te. (previdenza compl.).
   immediato. Pennello e riordino a trascinamento restano solo nella vista griglia.
   (Eliminato il vecchio doppione `impostazioni-turni` / checkbox "Bar chiuso la
   domenica pomeriggio": il sistema unico è `turni-chiusura-pomeridiana` nel modale.)
+- **Turni nel portale + preferenze riposo**: il tab Turni del portale legge la STESSA
+  settimana della gestione (GET `/api/turni/azienda/settimana`, sola lettura: i miei
+  turni + tabella di tutti i colleghi; eliminata la vecchia "griglia pubblicata"
+  `turni_griglia` con squadra cablata). Ogni dipendente imposta la **preferenza del
+  giorno di riposo** per la prossima settimana (GET/POST `/api/turni/preferenza-riposo`,
+  collezione `turni_preferenze_riposo`); il responsabile turni riceve una notifica e
+  le vede in pagina Turni (pannello 💤 + marcatore sulle caselle, GET staff
+  `/api/dipendenti-cloud/turni-preferenze?settimana=`). "Genera settimana" usa la
+  preferenza come giorno di riposo (vince sul riposo fisso per quella settimana).
 - **Onomastici** (`dipendenti_cloud`: ONOMASTICI_DEFAULT + collezione `onomastici`):
   gestiti nel modale "Configura turni"; nella pagina Turni un pannello mostra gli
   onomastici della settimana (solo giorni lavorativi, esclusi stranieri/disattivati e

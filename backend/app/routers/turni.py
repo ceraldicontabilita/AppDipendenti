@@ -220,59 +220,87 @@ async def sblocca(settimana_inizio: str, _: Dict[str, Any] = Depends(require_rol
 # pasticceria). Il responsabile genera nel browser e PUBBLICA qui; tutti la
 # leggono. Storage semplice, una griglia per settimana.
 # ============================================================================
-COLL_GRIGLIA = "turni_griglia"
 
 
-@router.post("/griglia", summary="Pubblica la griglia turni del portale (responsabile/admin)")
-async def salva_griglia(
-    payload: Dict[str, Any] = Body(...),
-    identity: Dict[str, Any] = Depends(require_roles("responsabile_turni", "admin")),
-):
-    settimana = str(payload.get("settimana_inizio", "")).strip()
-    if not settimana:
-        raise HTTPException(400, "settimana_inizio mancante")
-    doc = {
-        "id": _sid(settimana),
-        "settimana_inizio": settimana,
-        "persone": payload.get("persone", []),
-        "giorni": payload.get("giorni", []),
-        "stato": "pubblicato",
-        "pubblicato_il": _now(),
-        "pubblicato_da": identity.get("name") or identity.get("sub"),
-    }
-    db = Database.get_db()
-    await db[COLL_GRIGLIA].replace_one({"id": _sid(settimana)}, doc, upsert=True)
-    # notifica i dipendenti con PIN (best-effort)
-    try:
-        notificati = 0
-        async for d in db[Collections.EMPLOYEES].find(
-            {"pin_hash": {"$exists": True}, "merged_into": {"$exists": False}},
-            {"_id": 0, "id": 1},
-        ):
-            await crea_notifica(
-                db,
-                dipendente_id=d["id"],
-                tipo="turni",
-                titolo=f"Turni settimana {settimana}",
-                messaggio="I turni della settimana sono stati pubblicati. Aprili nella scheda Turni.",
-            )
-            notificati += 1
-    except Exception:
-        notificati = 0
-    return {"ok": True, "settimana_inizio": settimana, "dipendenti_notificati": notificati}
+# ============================================================
+# TURNI AZIENDA NEL PORTALE — sola lettura della settimana REALE
+# (stessa fonte della pagina Turni di gestione: assegnazioni_turni_cloud.
+# Sostituisce la vecchia "griglia pubblicata" separata: un solo sistema.)
+# ============================================================
+GG_SETTIMANA = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
+COLL_PREF = "turni_preferenze_riposo"
 
 
-@router.get("/griglia/corrente", summary="Griglia turni della settimana corrente (tutti)")
-async def griglia_corrente(identity: Dict[str, Any] = Depends(get_identity)):
-    db = Database.get_db()
-    # Settimana che contiene oggi (lunedì corrente); fallback all'ultima pubblicata.
+def _lunedi_corrente() -> str:
     oggi = datetime.now(timezone.utc).date()
-    lunedi = (oggi - timedelta(days=oggi.weekday())).isoformat()
-    doc = await db[COLL_GRIGLIA].find_one(
-        {"settimana_inizio": lunedi, "stato": "pubblicato"}, {"_id": 0})
-    if not doc:
-        doc = await db[COLL_GRIGLIA].find_one(
-            {"stato": "pubblicato"}, {"_id": 0}, sort=[("settimana_inizio", -1)])
-    if not doc:
-        return {"settimana_inizio": None, "persone": [], "giorni": []}
-    return doc
+    return (oggi - timedelta(days=oggi.weekday())).isoformat()
+
+
+def _lunedi_prossimo() -> str:
+    oggi = datetime.now(timezone.utc).date()
+    return (oggi - timedelta(days=oggi.weekday()) + timedelta(days=7)).isoformat()
+
+
+@router.get("/azienda/settimana", summary="Turni azienda della settimana (sola lettura, tutti)")
+async def turni_azienda(settimana: str = "", identity: Dict[str, Any] = Depends(get_identity)):
+    """La stessa settimana che si compone nella pagina Turni di gestione:
+    ogni dipendente vede il proprio turno e quello di tutti i colleghi."""
+    db = Database.get_db()
+    settimana = settimana or _lunedi_corrente()
+    assegnazioni = await db.assegnazioni_turni_cloud.find(
+        {"settimana": settimana}, {"_id": 0}).to_list(2000)
+    turni = await db.turni_cloud.find({}, {"_id": 0}).to_list(100)
+    dipendenti = await db[Collections.EMPLOYEES].find(
+        {"stato": "attivo", "merged_into": {"$exists": False}},
+        {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "nome_completo": 1}).to_list(500)
+    return {"settimana": settimana, "assegnazioni": assegnazioni,
+            "turni": turni, "dipendenti": dipendenti}
+
+
+@router.get("/preferenza-riposo", summary="La mia preferenza di riposo per la settimana")
+async def mia_preferenza(settimana: str = "", identity: Dict[str, Any] = Depends(get_identity)):
+    db = Database.get_db()
+    settimana = settimana or _lunedi_prossimo()
+    doc = await db[COLL_PREF].find_one(
+        {"dipendente_id": identity["id"], "settimana": settimana}, {"_id": 0})
+    return doc or {"dipendente_id": identity["id"], "settimana": settimana, "giorno": None}
+
+
+@router.post("/preferenza-riposo", summary="Imposta la preferenza del giorno di riposo")
+async def salva_preferenza(payload: Dict[str, Any] = Body(...),
+                           identity: Dict[str, Any] = Depends(get_identity)):
+    """Il dipendente indica dal portale il giorno di riposo preferito per la
+    settimana (di norma la prossima): chi compone i turni la vede nella pagina
+    Turni e riceve una notifica. giorno = null per togliere la preferenza."""
+    db = Database.get_db()
+    settimana = str(payload.get("settimana") or _lunedi_prossimo())
+    giorno = payload.get("giorno") or None
+    if giorno is not None and giorno not in GG_SETTIMANA:
+        raise HTTPException(400, f"giorno non valido: usare uno tra {', '.join(GG_SETTIMANA)}")
+    chiave = {"dipendente_id": identity["id"], "settimana": settimana}
+    dip = await db[Collections.EMPLOYEES].find_one(
+        {"id": identity["id"]}, {"_id": 0, "nome": 1, "cognome": 1, "nome_completo": 1})
+    nome = ((dip or {}).get("nome_completo")
+            or f"{(dip or {}).get('cognome', '')} {(dip or {}).get('nome', '')}".strip()
+            or identity.get("name") or "Dipendente")
+    if giorno is None:
+        await db[COLL_PREF].delete_one(chiave)
+    else:
+        await db[COLL_PREF].update_one(
+            chiave,
+            {"$set": {**chiave, "giorno": giorno, "nome": nome, "aggiornata_il": _now()}},
+            upsert=True)
+    # Notifica chi fa i turni (responsabile turni; best-effort)
+    try:
+        msg = (f"{nome} preferisce riposare {giorno} nella settimana del {settimana}."
+               if giorno else
+               f"{nome} ha tolto la preferenza di riposo per la settimana del {settimana}.")
+        async for r in db[Collections.EMPLOYEES].find(
+                {"ruolo_app": "responsabile_turni", "merged_into": {"$exists": False}},
+                {"_id": 0, "id": 1}):
+            if r["id"] != identity["id"]:
+                await crea_notifica(db, dipendente_id=r["id"], tipo="turni",
+                                    titolo="Preferenza giorno di riposo", messaggio=msg)
+    except Exception:
+        logger.warning("Notifica preferenza riposo non inviata")
+    return {"ok": True, "settimana": settimana, "giorno": giorno}

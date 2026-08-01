@@ -1876,6 +1876,16 @@ async def save_turni_config(data: dict = Body(...)):
                       "updated_at": now_iso()}}, upsert=True)
     return {"ok": True, "salvati": len(data.get("voci") or [])}
 
+@router.get("/turni-preferenze")
+async def get_turni_preferenze(settimana: Optional[str] = None):
+    """Preferenze del giorno di riposo inviate dai dipendenti dal portale
+    (collezione `turni_preferenze_riposo`): chi compone i turni le vede
+    nella pagina Turni della settimana corrispondente."""
+    q = {"settimana": settimana} if settimana else {}
+    return await get_db().turni_preferenze_riposo.find(
+        q, {"_id": 0}).sort("aggiornata_il", -1).to_list(500)
+
+
 @router.get("/turni-chiusura-pomeridiana")
 async def get_chiusura_pomeridiana():
     """Periodo in cui il bar resta chiuso di pomeriggio (impostato nel modale

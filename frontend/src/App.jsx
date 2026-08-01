@@ -1712,6 +1712,13 @@ function TurniPage({ dipendenti, turni, reload }) {
       .catch(() => {});
   }, []);
   const cfgDi = (dipId) => turniCfg.find(c => c.dipendente_id === dipId) || {};
+  // Preferenze del giorno di riposo inviate dai dipendenti dal portale (per settimana)
+  const [prefRiposo, setPrefRiposo] = useState([]);
+  useEffect(() => {
+    axios.get(`${API}/turni-preferenze?settimana=${settimana}`)
+      .then(r => setPrefRiposo(r.data || [])).catch(() => setPrefRiposo([]));
+  }, [settimana]);
+  const prefDi = (dipId) => (prefRiposo.find(p => p.dipendente_id === dipId) || {}).giorno || null;
   const ferieDataT = (dipId, dStr) => ferieTurni.find(f => f.dipendente_id === dipId
     && (f.stato === 'approvata' || !f.stato)
     && f.data_inizio <= dStr && (f.data_fine || f.data_inizio) >= dStr);
@@ -1849,8 +1856,10 @@ function TurniPage({ dipendenti, turni, reload }) {
       // ===== CAMERIERE (rotazione sala) =====
       if (c.sala) {
         const k = Math.max(0, camerieri.indexOf(dip.id));
-        // giorno di riposo: quello fisso se feriale, altrimenti distribuito Lun-Gio per coprire il weekend
-        let riposoIdx = c.riposo_giorno ? giorni.indexOf(c.riposo_giorno) : -1;
+        // giorno di riposo: la preferenza dal portale (per QUESTA settimana) vince sul
+        // fisso; poi il fisso se feriale; altrimenti distribuito Lun-Gio per il weekend
+        const riposoScelto = prefDi(dip.id) || c.riposo_giorno;
+        let riposoIdx = riposoScelto ? giorni.indexOf(riposoScelto) : -1;
         if (riposoIdx < 0 || riposoIdx > 4) riposoIdx = FERIALI_RIPOSO[k % 4];
         // sequenza interlacciata (2 Lunga, 2 Mattina, 2 Pomeriggio) ruotata per persona → fasce sfalsate
         const base = [idTurno("Lunga"), idSalaMatt, idSalaPom, idTurno("Lunga"), idSalaMatt, idSalaPom];
@@ -1871,7 +1880,9 @@ function TurniPage({ dipendenti, turni, reload }) {
       }
 
       // ===== ALTRI (turno fisso / rotazione bar) =====
-      const configurato = !!(c.turno_id || c.riposo_giorno || (c.lunga_giorni || []).length || c.rotazione);
+      // La preferenza di riposo dal portale (per QUESTA settimana) vince sul giorno fisso.
+      const giornoRiposo = prefDi(dip.id) || c.riposo_giorno;
+      const configurato = !!(c.turno_id || giornoRiposo || (c.lunga_giorni || []).length || c.rotazione);
       // turno "di lavoro" della settimana: se in rotazione bar, alterna mattina/pomeriggio
       let turnoLavoro = c.turno_id || null;
       if (c.rotazione) {
@@ -1897,7 +1908,7 @@ function TurniPage({ dipendenti, turni, reload }) {
         else if (c.rotazione && inChiusuraPom(dStr)) target = gi === 6 ? idRiposo : (turnoLavoro || null); // chiusura pom.: rotazione regolare + riposo domenica per tutti
         else if (c.rotazione && gi === 6 && idBarPom && turnoLavoro === idBarPom) target = idRiposo; // domenica pomeriggio chiusi: il gruppo pomeriggio riposa
         else if (configurato) {
-          if (c.riposo_giorno && c.riposo_giorno === giorno && !saltaRiposoInfra) target = idRiposo; // riposo fisso settimanale
+          if (giornoRiposo && giornoRiposo === giorno && !saltaRiposoInfra) target = idRiposo; // riposo (preferenza portale o fisso)
           else if ((c.lunga_giorni || []).includes(giorno)) target = idLunga || turnoLavoro || null; // Lunga (ven/sab/dom)
           else target = turnoLavoro || null;                                            // turno abituale / rotazione bar (o giorno di riposo saltato pre-chiusura)
         }
@@ -2263,6 +2274,22 @@ function TurniPage({ dipendenti, turni, reload }) {
         <p className="dc-muted" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>Il riposo è impostato automaticamente nel giorno dell'onomastico (marcato 🎂 nella griglia). Se ti serve copertura, basta riassegnare un turno in quella cella: la tua scelta ha la precedenza.</p>
       </div>
 
+      {prefRiposo.length > 0 && (
+        <div className="dc-card" style={{ marginBottom: 12 }}>
+          <h3 style={{ marginTop: 0 }}>💤 Preferenze di riposo ricevute dal portale</h3>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {prefRiposo.map((p, i) => (
+              <span key={i} style={{ background: "#eef1ea", border: "1px solid #d7e0d3", borderRadius: 999, padding: "5px 12px", fontSize: 13, fontWeight: 600 }}>
+                {p.nome || "Dipendente"} → {p.giorno}
+              </span>
+            ))}
+          </div>
+          <p className="dc-muted" style={{ fontSize: 12, margin: "8px 0 0" }}>
+            "Genera settimana" mette il Riposo nel giorno preferito (segnato 💤 nelle caselle); la tua modifica a mano ha sempre la precedenza.
+          </p>
+        </div>
+      )}
+
       {vista === "semplice" ? (
       <div className="dc-card dc-scroll-x" style={{ paddingBottom: 8 }}>
         <div style={{ display: "grid", gridTemplateColumns: "180px repeat(7, minmax(88px, 1fr))", gap: 6, minWidth: 860, alignItems: "stretch" }}>
@@ -2296,6 +2323,7 @@ function TurniPage({ dipendenti, turni, reload }) {
                     background: t ? t.colore + "30" : "#fffefb", color: "#2a3329", borderRadius: 10,
                     fontWeight: 700, fontSize: 12, padding: "10px 2px", cursor: "pointer", minHeight: 46 }}>
                   {ass?.motivo === "onomastico" && <span style={{ position: "absolute", top: 0, right: 3, fontSize: 10 }}>🎂</span>}
+                  {prefDi(dip.id) === g && <span title="Giorno di riposo preferito (dal portale)" style={{ position: "absolute", top: 0, left: 3, fontSize: 10 }}>💤</span>}
                   {t ? t.nome : "—"}
                 </button>); })}
             </Fragment>
