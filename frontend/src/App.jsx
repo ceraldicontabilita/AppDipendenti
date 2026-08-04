@@ -3449,7 +3449,13 @@ ${accTfr.length ? `<h2>Acconti TFR già erogati</h2><table><thead><tr><th>Data</
 <h2>Riepilogo</h2><table>
 <tr><td>TFR netto simulato</td><td class="n">€ ${eur(sim?.totale_netto)}</td></tr>
 <tr><td>− Acconti TFR erogati</td><td class="n">€ ${eur(totAcc)}</td></tr>
-<tr><td><b>TFR netto residuo</b></td><td class="n"><b>€ ${eur(residuo)}</b></td></tr></table>
+<tr><td><b>TFR netto residuo</b></td><td class="n"><b>€ ${eur(residuo)}</b></td></tr>
+${rate?.rate?.length ? `<tr><td>Pagamento concordato</td><td class="n"><b>${rate.numero_rate} rate</b></td></tr>` : ""}</table>
+${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
+<table><thead><tr><th>Rata</th><th>Data</th><th class="n">Importo</th></tr></thead>
+<tbody>${rate.rate.map(r => `<tr><td>${r.numero}/${rate.numero_rate}</td><td>${r.data ? formatDate(r.data) : "da concordare"}</td><td class="n">€ ${eur(r.importo)}</td></tr>`).join("")}</tbody>
+<tfoot><tr><td colspan="2">Totale da pagare${rate.totale_acconti ? " (residuo dopo acconti)" : ""}</td><td class="n">€ ${eur(rate.netto_residuo ?? rate.totale_netto)}</td></tr></tfoot></table>
+<div class="mini">Firma per accettazione del piano: dipendente ______________________ · titolare ______________________</div>` : ""}
 <script>window.print()<\\/script></body></html>`);
     w.document.close();
   };
@@ -3857,9 +3863,15 @@ ${accTfr.length ? `<h2>Acconti TFR già erogati</h2><table><thead><tr><th>Data</
                         </tr>
                       ))}
                       <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4" }}>
-                        <td colSpan={rate.rate[0]?.data ? 2 : 1}>Totale</td>
-                        <td style={{ textAlign: "right" }}>{eur(rate.totale_netto)}</td>
+                        <td colSpan={rate.rate[0]?.data ? 2 : 1}>Totale da pagare{rate.totale_acconti ? " (netto residuo dopo acconti)" : ""}</td>
+                        <td style={{ textAlign: "right" }}>{eur(rate.netto_residuo ?? rate.totale_netto)}</td>
                       </tr>
+                      {rate.totale_acconti > 0 && (
+                        <tr className="dc-muted" style={{ fontSize: 12.5 }}>
+                          <td colSpan={rate.rate[0]?.data ? 2 : 1}>TFR netto € {eur(rate.totale_netto)} − acconti già erogati € {eur(rate.totale_acconti)}</td>
+                          <td></td>
+                        </tr>
+                      )}
                     </tbody>
                   </table>
                 </div>

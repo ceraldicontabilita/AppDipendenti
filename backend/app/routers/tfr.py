@@ -2117,13 +2117,24 @@ async def dividi_in_rate_simulazione(dipendente_id: str, input_data: RateSimulaz
     if totale_netto <= 0:
         raise HTTPException(status_code=400, detail="Il totale netto della simulazione è zero")
 
+    # Gli acconti TFR già erogati (registro unico acconti_dipendenti) si scalano
+    # PRIMA di dividere: le rate si calcolano sul netto residuo da pagare.
+    acconti = await db["acconti_dipendenti"].find(
+        {"dipendente_id": dipendente_id, "tipo": "tfr", "stato": {"$ne": "annullato"}},
+        {"_id": 0, "importo": 1}).to_list(500)
+    totale_acconti = round(sum(float(a.get("importo") or 0) for a in acconti), 2)
+    netto_residuo = round(totale_netto - totale_acconti, 2)
+    if netto_residuo <= 0:
+        raise HTTPException(status_code=400,
+                            detail="Il TFR è già coperto dagli acconti erogati: nulla da rateizzare")
+
     n = input_data.numero_rate
-    rata_base = round(totale_netto / n, 2)
+    rata_base = round(netto_residuo / n, 2)
     data_rata = _parse_data_tfr(input_data.data_prima_rata) if input_data.data_prima_rata else None
 
     rate = []
     for i in range(1, n + 1):
-        importo = round(totale_netto - rata_base * (n - 1), 2) if i == n else rata_base
+        importo = round(netto_residuo - rata_base * (n - 1), 2) if i == n else rata_base
         voce = {"numero": i, "importo": importo}
         if data_rata:
             mese_idx = data_rata.month - 1 + (i - 1)
@@ -2133,7 +2144,8 @@ async def dividi_in_rate_simulazione(dipendente_id: str, input_data: RateSimulaz
             voce["data"] = f"{anno_target:04d}-{mese_target:02d}-{giorno:02d}"
         rate.append(voce)
 
-    return {"totale_netto": totale_netto, "numero_rate": n, "rate": rate}
+    return {"totale_netto": totale_netto, "totale_acconti": totale_acconti,
+            "netto_residuo": netto_residuo, "numero_rate": n, "rate": rate}
 
 
 @router.get("/simulazione/{dipendente_id}/liquidazione")
@@ -2164,6 +2176,16 @@ async def liquidazione_finale_simulazione(dipendente_id: str) -> Dict[str, Any]:
         raise HTTPException(
             status_code=400,
             detail="Nessun periodo nella simulazione: inserisci prima la paga settimanale in corso")
+
+    # Se l'ULTIMO periodo della tabella è chiuso, quella data di fine è la
+    # cessazione del conteggio: 13ª, 14ª e ferie maturano fino a lì (es. 14ª
+    # dal 1° luglio dell'anno prima → alla data finale della tabella), non a oggi.
+    if periodi[-1].get("data_fine"):
+        fine_tabella = _parse_data_tfr(periodi[-1]["data_fine"])
+        if fine_tabella < fino_a:
+            fino_a = fine_tabella
+            cessato = True
+            data_cessazione = periodi[-1]["data_fine"]
 
     data_assunzione = None
     if dipendente.get("data_assunzione"):
