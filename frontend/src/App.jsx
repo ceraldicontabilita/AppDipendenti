@@ -3461,7 +3461,7 @@ ${rate?.rate?.length ? `<tr><td>Pagamento concordato</td><td class="n"><b>${rate
 ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
 <table><thead><tr><th>Rata</th><th>Data</th><th class="n">Importo</th></tr></thead>
 <tbody>${rate.rate.map(r => `<tr><td>${r.numero}/${rate.numero_rate}</td><td>${r.data ? formatDate(r.data) : "da concordare"}</td><td class="n">€ ${eur(r.importo)}</td></tr>`).join("")}</tbody>
-<tfoot><tr><td colspan="2">Totale da pagare${rate.totale_acconti ? " (residuo dopo acconti)" : ""}</td><td class="n">€ ${eur(rate.netto_residuo ?? rate.totale_netto)}</td></tr></tfoot></table>
+<tfoot><tr><td colspan="2">Totale complessivo da pagare</td><td class="n">€ ${eur(rate.totale_complessivo ?? rate.netto_residuo ?? rate.totale_netto)}</td></tr></tfoot></table>
 <div class="mini">Firma per accettazione del piano: dipendente ______________________ · titolare ______________________</div>` : ""}
 <script>window.print()<\\/script></body></html>`);
     w.document.close();
@@ -3877,7 +3877,11 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
 
           {sim?.periodi?.length > 0 && (
             <div className="dc-card">
-              <h3 style={{ marginTop: 0 }}>Dividi il netto in rate</h3>
+              <h3 style={{ marginTop: 0 }}>Dividi il totale complessivo in rate</h3>
+              <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
+                Le rate si calcolano sul <b>totale complessivo da liquidare</b> (TFR residuo dopo gli
+                acconti + tredicesima + quattordicesima ± ferie), lo stesso della card qui sopra.
+              </p>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
                 <div>
                   <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Numero rate</label>
@@ -3902,12 +3906,15 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
                         </tr>
                       ))}
                       <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4" }}>
-                        <td colSpan={rate.rate[0]?.data ? 2 : 1}>Totale da pagare{rate.totale_acconti ? " (netto residuo dopo acconti)" : ""}</td>
-                        <td style={{ textAlign: "right" }}>{eur(rate.netto_residuo ?? rate.totale_netto)}</td>
+                        <td colSpan={rate.rate[0]?.data ? 2 : 1}>Totale complessivo da pagare</td>
+                        <td style={{ textAlign: "right" }}>{eur(rate.totale_complessivo ?? rate.netto_residuo ?? rate.totale_netto)}</td>
                       </tr>
-                      {rate.totale_acconti > 0 && (
+                      {rate.totale_complessivo !== undefined && (
                         <tr className="dc-muted" style={{ fontSize: 12.5 }}>
-                          <td colSpan={rate.rate[0]?.data ? 2 : 1}>TFR netto € {eur(rate.totale_netto)} − acconti già erogati € {eur(rate.totale_acconti)}</td>
+                          <td colSpan={rate.rate[0]?.data ? 2 : 1}>
+                            TFR residuo € {eur(rate.netto_residuo)} + 13ª € {eur(rate.tredicesima || 0)} + 14ª € {eur(rate.quattordicesima || 0)}
+                            {rate.ferie < 0 ? ` − ferie € ${eur(Math.abs(rate.ferie))}` : ` + ferie € ${eur(rate.ferie || 0)}`}
+                          </td>
                           <td></td>
                         </tr>
                       )}

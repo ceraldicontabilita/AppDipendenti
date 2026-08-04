@@ -2124,17 +2124,28 @@ async def dividi_in_rate_simulazione(dipendente_id: str, input_data: RateSimulaz
         {"_id": 0, "importo": 1}).to_list(500)
     totale_acconti = round(sum(float(a.get("importo") or 0) for a in acconti), 2)
     netto_residuo = round(totale_netto - totale_acconti, 2)
-    if netto_residuo <= 0:
-        raise HTTPException(status_code=400,
-                            detail="Il TFR è già coperto dagli acconti erogati: nulla da rateizzare")
+
+    # Le rate si calcolano sul TOTALE COMPLESSIVO: TFR residuo + tredicesima +
+    # quattordicesima + ferie (anche negative), come nella card di riepilogo.
+    extra_13 = extra_14 = extra_ferie = 0.0
+    try:
+        liq = await liquidazione_finale_simulazione(dipendente_id)
+        extra_13 = float((liq.get("tredicesima") or {}).get("netto") or 0)
+        extra_14 = float((liq.get("quattordicesima") or {}).get("netto") or 0)
+        extra_ferie = float((liq.get("ferie") or {}).get("controvalore") or 0)
+    except Exception:
+        pass  # senza liquidazione le rate restano sul solo TFR residuo
+    totale_complessivo = round(netto_residuo + extra_13 + extra_14 + extra_ferie, 2)
+    if totale_complessivo <= 0:
+        raise HTTPException(status_code=400, detail="Il totale complessivo da pagare è zero o negativo")
 
     n = input_data.numero_rate
-    rata_base = round(netto_residuo / n, 2)
+    rata_base = round(totale_complessivo / n, 2)
     data_rata = _parse_data_tfr(input_data.data_prima_rata) if input_data.data_prima_rata else None
 
     rate = []
     for i in range(1, n + 1):
-        importo = round(netto_residuo - rata_base * (n - 1), 2) if i == n else rata_base
+        importo = round(totale_complessivo - rata_base * (n - 1), 2) if i == n else rata_base
         voce = {"numero": i, "importo": importo}
         if data_rata:
             mese_idx = data_rata.month - 1 + (i - 1)
@@ -2145,7 +2156,10 @@ async def dividi_in_rate_simulazione(dipendente_id: str, input_data: RateSimulaz
         rate.append(voce)
 
     return {"totale_netto": totale_netto, "totale_acconti": totale_acconti,
-            "netto_residuo": netto_residuo, "numero_rate": n, "rate": rate}
+            "netto_residuo": netto_residuo,
+            "tredicesima": round(extra_13, 2), "quattordicesima": round(extra_14, 2),
+            "ferie": round(extra_ferie, 2), "totale_complessivo": totale_complessivo,
+            "numero_rate": n, "rate": rate}
 
 
 @router.get("/simulazione/{dipendente_id}/liquidazione")
