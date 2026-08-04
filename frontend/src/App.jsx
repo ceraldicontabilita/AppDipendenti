@@ -3450,6 +3450,10 @@ ${accTfr.length ? `<h2>Acconti TFR già erogati</h2><table><thead><tr><th>Data</
 <tr><td>TFR netto simulato</td><td class="n">€ ${eur(sim?.totale_netto)}</td></tr>
 <tr><td>− Acconti TFR erogati</td><td class="n">€ ${eur(totAcc)}</td></tr>
 <tr><td><b>TFR netto residuo</b></td><td class="n"><b>€ ${eur(residuo)}</b></td></tr>
+${liq ? `<tr><td>+ Tredicesima maturata</td><td class="n">€ ${eur(liq.tredicesima.netto)}</td></tr>
+<tr><td>+ Quattordicesima maturata</td><td class="n">€ ${eur(liq.quattordicesima.netto)}</td></tr>
+${liq.ferie ? `<tr><td>${(liq.ferie.controvalore || 0) < 0 ? "−" : "+"} Ferie (${liq.ferie.giorni_residui} gg)</td><td class="n">€ ${eur(Math.abs(liq.ferie.controvalore || 0))}</td></tr>` : ""}
+<tr><td><b>TOTALE COMPLESSIVO DA LIQUIDARE</b></td><td class="n"><b>€ ${eur(Math.round((residuo + liq.tredicesima.netto + liq.quattordicesima.netto + (liq.ferie?.controvalore || 0)) * 100) / 100)}</b></td></tr>` : ""}
 ${rate?.rate?.length ? `<tr><td>Pagamento concordato</td><td class="n"><b>${rate.numero_rate} rate</b></td></tr>` : ""}</table>
 ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
 <table><thead><tr><th>Rata</th><th>Data</th><th class="n">Importo</th></tr></thead>
@@ -3835,6 +3839,33 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
               <span>= <b style={{ fontSize: 16 }}>Netto residuo € {eur((sim?.totale_netto || 0) - (acconti?.tfr_acconti || 0))}</b></span>
             </div>
           </div>
+
+          {liquidazione && (() => {
+            const tfrResiduo = (sim?.totale_netto || 0) - (acconti?.tfr_acconti || 0);
+            const t13 = liquidazione.tredicesima?.netto || 0;
+            const t14 = liquidazione.quattordicesima?.netto || 0;
+            const fer = liquidazione.ferie?.controvalore || 0;
+            const totale = Math.round((tfrResiduo + t13 + t14 + fer) * 100) / 100;
+            const riga = { display: "flex", justifyContent: "space-between", padding: "6px 4px", borderBottom: "1px solid #f0ece1", fontSize: 14 };
+            return (
+              <div className="dc-card" style={{ marginBottom: 16, border: "2px solid #5b7a6b" }}>
+                <h3 style={{ marginTop: 0 }}>💰 Totale complessivo da liquidare</h3>
+                <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
+                  TFR residuo (dopo gli acconti) più tredicesima, quattordicesima e ferie della
+                  liquidazione qui sopra. Le ferie negative si sottraggono.
+                </p>
+                <div style={{ maxWidth: 460 }}>
+                  <div style={riga}><span>TFR netto residuo</span><b>€ {eur(tfrResiduo)}</b></div>
+                  <div style={riga}><span>+ Tredicesima maturata{liquidazione.tredicesima?.manuale ? " (manuale)" : ""}</span><b>€ {eur(t13)}</b></div>
+                  <div style={riga}><span>+ Quattordicesima maturata{liquidazione.quattordicesima?.manuale ? " (manuale)" : ""}</span><b>€ {eur(t14)}</b></div>
+                  <div style={riga}><span>{fer < 0 ? "−" : "+"} Ferie ({liquidazione.ferie ? `${liquidazione.ferie.giorni_residui} gg` : "—"}{liquidazione.ferie?.manuale ? ", manuale" : ""})</span><b style={fer < 0 ? { color: "#b3261e" } : {}}>€ {eur(Math.abs(fer))}</b></div>
+                  <div style={{ ...riga, borderBottom: "none", background: "#eef1ea", borderRadius: 10, padding: "10px 12px", marginTop: 6, fontSize: 16 }}>
+                    <span><b>TOTALE COMPLESSIVO</b></span><b>€ {eur(totale)}</b>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
 
           {sim?.periodi?.length > 0 && (
             <div className="dc-card">
