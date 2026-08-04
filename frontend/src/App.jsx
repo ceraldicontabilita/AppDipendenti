@@ -3318,6 +3318,9 @@ function TfrPage({ dipendenti, getDipendente }) {
   const [rate, setRate] = useState(null);
 
   const [liquidazione, setLiquidazione] = useState(null);
+  const [acconti, setAcconti] = useState(null);          // acconti TFR già erogati (sistema unico acconti_dipendenti)
+  const [formAcconto, setFormAcconto] = useState({ data: "", importo: "", note: "" });
+  const [scalaGiorni, setScalaGiorni] = useState("");
 
   const [nlForm, setNlForm] = useState({ importo: "", settimane: "52", mesi: "12" });
   const [nlEsito, setNlEsito] = useState(null);
@@ -3350,6 +3353,10 @@ function TfrPage({ dipendenti, getDipendente }) {
         const l = await axios.get(`${API_TFR}/simulazione/${id}/liquidazione`);
         setLiquidazione(l.data);
       } catch { setLiquidazione(null); }
+      try {
+        const a = await axios.get(`${API_TFR}/acconti/${id}`);
+        setAcconti(a.data);
+      } catch { setAcconti(null); }
     } catch (e) {
       setErrore(e?.response?.data?.detail || "Errore nel caricamento");
     } finally { setLoading(false); }
@@ -3369,6 +3376,82 @@ function TfrPage({ dipendenti, getDipendente }) {
       await carica(dipId);
     } catch (e) { setErrore(e?.response?.data?.detail || "Errore nel salvataggio del periodo"); }
     finally { setSalvandoPeriodo(false); }
+  };
+
+  // Valori manuali della liquidazione (13ª, 14ª, giorni ferie): null = torna al calcolo automatico
+  const salvaOverride = async (campo, valore) => {
+    try {
+      await axios.put(`${API_TFR}/simulazione/${dipId}/liquidazione-override`, { [campo]: valore });
+      const l = await axios.get(`${API_TFR}/simulazione/${dipId}/liquidazione`);
+      setLiquidazione(l.data);
+    } catch (e) { setErrore(e?.response?.data?.detail || "Errore nel salvataggio"); }
+  };
+
+  const ricaricaAcconti = async () => {
+    try { const a = await axios.get(`${API_TFR}/acconti/${dipId}`); setAcconti(a.data); } catch { /* niente */ }
+  };
+  const registraAcconto = async () => {
+    const importo = Number(String(formAcconto.importo).replace(",", "."));
+    if (!importo) return;
+    try {
+      await axios.post(`${API_TFR}/acconti`, {
+        dipendente_id: dipId, tipo: "tfr", importo,
+        data: formAcconto.data || new Date().toISOString().slice(0, 10),
+        note: formAcconto.note || "Acconto TFR (dal simulatore)",
+      });
+      setFormAcconto({ data: "", importo: "", note: "" });
+      await ricaricaAcconti();
+    } catch (e) { setErrore(e?.response?.data?.detail || "Errore nel salvataggio dell'acconto"); }
+  };
+  const eliminaAcconto = async (accId) => {
+    if (!window.confirm("Eliminare questo acconto TFR?")) return;
+    try { await axios.delete(`${API_TFR}/acconti/${accId}`); await ricaricaAcconti(); }
+    catch (e) { setErrore(e?.response?.data?.detail || "Errore nell'eliminazione dell'acconto"); }
+  };
+
+  // Report stampabile: periodi, totali, liquidazione, acconti e netto residuo
+  const stampaReport = () => {
+    const dip = dipendenti.find(d => d.id === dipId) || {};
+    const nome = dip.nome_completo || `${dip.cognome || ""} ${dip.nome || ""}`.trim() || "Dipendente";
+    const oggi = new Date().toLocaleDateString("it-IT");
+    const righe = (sim?.periodi || []).map(p =>
+      `<tr><td>${formatDate(p.data_inizio)}</td><td>${p.data_fine ? formatDate(p.data_fine) : "in corso"}</td>` +
+      `<td class="n">€ ${eur(p.importo_settimanale)}</td><td class="n">${p.settimane}</td>` +
+      `<td class="n">€ ${eur(p.retribuzione_utile)}</td><td class="n">€ ${eur(p.lordo)}</td>` +
+      `<td class="n">€ ${eur(p.inps)}</td><td class="n">€ ${eur(p.imposte)}</td><td class="n"><b>€ ${eur(p.netto)}</b></td></tr>`).join("");
+    const accTfr = acconti?.acconti?.tfr || [];
+    const totAcc = acconti?.tfr_acconti || 0;
+    const residuo = (sim?.totale_netto || 0) - totAcc;
+    const accRighe = accTfr.map(a => `<tr><td>${formatDate(a.data)}</td><td class="n">€ ${eur(a.importo)}</td><td>${a.note || ""}</td></tr>`).join("");
+    const liq = liquidazione;
+    const w = window.open("", "_blank");
+    if (!w) { setErrore("Sblocca i popup per stampare il report"); return; }
+    w.document.write(`<!DOCTYPE html><html lang="it"><head><meta charset="utf-8"><title>Report TFR — ${nome}</title>
+<style>body{font-family:Georgia,'Times New Roman',serif;color:#2a3329;padding:28px;max-width:900px;margin:auto}
+h1{font-size:20px;border-bottom:2px solid #5b7a6b;padding-bottom:6px;margin-bottom:4px}
+h2{font-size:15px;color:#3f5a4e;margin:18px 0 6px}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:4px}
+th,td{border:1px solid #cbd5c9;padding:4px 6px;text-align:left}.n{text-align:right}
+tfoot td{font-weight:bold;background:#eef1ea}.mini{font-size:11px;color:#6b7669}</style></head><body>
+<h1>Report TFR — ${nome}</h1>
+<div class="mini">Ceraldi Group S.r.l. · generato il ${oggi}${liq ? ` · calcolo fino al ${formatDate(liq.calcolato_fino_a)}` : ""}${liq?.cessato ? " · rapporto cessato" : ""}</div>
+<h2>Periodi retributivi</h2>
+<table><thead><tr><th>Dal</th><th>Al</th><th class="n">€/sett.</th><th class="n">Sett.</th><th class="n">Retrib. utile</th><th class="n">Lordo</th><th class="n">INPS 0,50%</th><th class="n">IRPEF</th><th class="n">Netto</th></tr></thead>
+<tbody>${righe}</tbody>
+<tfoot><tr><td colspan="5">Totale (incluso il periodo in corso)</td><td class="n">€ ${eur(sim?.totale_lordo)}</td><td class="n">€ ${eur(sim?.totale_inps)}</td><td class="n">€ ${eur(sim?.totale_imposte)}</td><td class="n">€ ${eur(sim?.totale_netto)}</td></tr></tfoot></table>
+${liq ? `<h2>Liquidazione finale</h2><table>
+<tr><td>Tredicesima maturata (${formatDate(liq.tredicesima.dal)} → ${formatDate(liq.tredicesima.al)})${liq.tredicesima.manuale ? " — inserita a mano" : ""}</td><td class="n">€ ${eur(liq.tredicesima.netto)}</td></tr>
+<tr><td>Quattordicesima maturata (${formatDate(liq.quattordicesima.dal)} → ${formatDate(liq.quattordicesima.al)})${liq.quattordicesima.manuale ? " — inserita a mano" : ""}</td><td class="n">€ ${eur(liq.quattordicesima.netto)}</td></tr>
+${liq.ferie ? `<tr><td>Ferie residue: ${liq.ferie.giorni_residui} gg × € ${eur(liq.ferie.paga_giornaliera)}/giorno${liq.ferie.manuale ? " — inserite a mano" : ""}</td><td class="n">€ ${eur(liq.ferie.controvalore)}</td></tr>` : ""}
+</table>` : ""}
+${accTfr.length ? `<h2>Acconti TFR già erogati</h2><table><thead><tr><th>Data</th><th class="n">Importo</th><th>Note</th></tr></thead><tbody>${accRighe}</tbody>
+<tfoot><tr><td>Totale acconti</td><td class="n">€ ${eur(totAcc)}</td><td></td></tr></tfoot></table>` : ""}
+<h2>Riepilogo</h2><table>
+<tr><td>TFR netto simulato</td><td class="n">€ ${eur(sim?.totale_netto)}</td></tr>
+<tr><td>− Acconti TFR erogati</td><td class="n">€ ${eur(totAcc)}</td></tr>
+<tr><td><b>TFR netto residuo</b></td><td class="n"><b>€ ${eur(residuo)}</b></td></tr></table>
+<script>window.print()<\\/script></body></html>`);
+    w.document.close();
   };
 
   const eliminaUltimoPeriodo = async (periodoId) => {
@@ -3508,7 +3591,13 @@ function TfrPage({ dipendenti, getDipendente }) {
           </div>
 
           <div className="dc-card" style={{ marginBottom: 16 }}>
-            <h3 style={{ marginTop: 0 }}>Simulazione storica TFR</h3>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+              <h3 style={{ marginTop: 0, marginBottom: 0 }}>Simulazione storica TFR</h3>
+              <button className="dc-btn" onClick={stampaReport} disabled={!sim?.periodi?.length}
+                title="Apre il report completo (periodi, liquidazione, acconti, netto residuo) pronto da stampare o salvare in PDF">
+                🖨 Stampa report
+              </button>
+            </div>
             <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
               Formula: importo settimanale × settimane = retribuzione utile → ÷ divisore = quota lorda → meno
               INPS 0,50% sulla retribuzione utile → meno IRPEF sul lordo (% globale {parametri.irpef_percento}%,
@@ -3631,27 +3720,115 @@ function TfrPage({ dipendenti, getDipendente }) {
               </p>
               <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
                 <div>
-                  <div className="dc-muted" style={{ fontSize: 12.5 }}>Tredicesima maturata</div>
-                  <div style={{ fontWeight: 700, fontSize: 18 }}>€ {eur(liquidazione.tredicesima.netto)}</div>
+                  <div className="dc-muted" style={{ fontSize: 12.5 }}>
+                    Tredicesima maturata (rateo){liquidazione.tredicesima.manuale && <> · <b>manuale</b> <button className="dc-btn" style={{ padding: "0 6px", fontSize: 11 }} title="Torna al calcolo automatico" onClick={() => salvaOverride("tredicesima", null)}>↺ auto</button></>}
+                  </div>
+                  <div style={{ fontWeight: 700, fontSize: 18, display: "flex", alignItems: "center", gap: 4 }}>
+                    € <input key={`t13-${liquidazione.tredicesima.netto}`} type="text" inputMode="decimal"
+                      defaultValue={liquidazione.tredicesima.netto}
+                      style={{ width: 100, fontWeight: 700, fontSize: 17, border: "1px solid #e6e0d4", borderRadius: 8, padding: "3px 6px" }}
+                      onBlur={e => { const v = Number(String(e.target.value).replace(",", ".")); if (!isNaN(v) && v !== liquidazione.tredicesima.netto) salvaOverride("tredicesima", v); }}
+                      onKeyDown={e => { if (e.key === "Enter") e.target.blur(); }} />
+                  </div>
                   <div className="dc-muted" style={{ fontSize: 11.5 }}>{formatDate(liquidazione.tredicesima.dal)} → {formatDate(liquidazione.tredicesima.al)}</div>
                 </div>
                 <div>
-                  <div className="dc-muted" style={{ fontSize: 12.5 }}>Quattordicesima maturata</div>
-                  <div style={{ fontWeight: 700, fontSize: 18 }}>€ {eur(liquidazione.quattordicesima.netto)}</div>
+                  <div className="dc-muted" style={{ fontSize: 12.5 }}>
+                    Quattordicesima maturata (totale){liquidazione.quattordicesima.manuale && <> · <b>manuale</b> <button className="dc-btn" style={{ padding: "0 6px", fontSize: 11 }} title="Torna al calcolo automatico" onClick={() => salvaOverride("quattordicesima", null)}>↺ auto</button></>}
+                  </div>
+                  <div style={{ fontWeight: 700, fontSize: 18, display: "flex", alignItems: "center", gap: 4 }}>
+                    € <input key={`t14-${liquidazione.quattordicesima.netto}`} type="text" inputMode="decimal"
+                      defaultValue={liquidazione.quattordicesima.netto}
+                      style={{ width: 100, fontWeight: 700, fontSize: 17, border: "1px solid #e6e0d4", borderRadius: 8, padding: "3px 6px" }}
+                      onBlur={e => { const v = Number(String(e.target.value).replace(",", ".")); if (!isNaN(v) && v !== liquidazione.quattordicesima.netto) salvaOverride("quattordicesima", v); }}
+                      onKeyDown={e => { if (e.key === "Enter") e.target.blur(); }} />
+                  </div>
                   <div className="dc-muted" style={{ fontSize: 11.5 }}>{formatDate(liquidazione.quattordicesima.dal)} → {formatDate(liquidazione.quattordicesima.al)}</div>
                 </div>
                 <div>
-                  <div className="dc-muted" style={{ fontSize: 12.5 }}>Ferie residue</div>
-                  {liquidazione.ferie ? (
-                    <>
-                      <div style={{ fontWeight: 700, fontSize: 18 }}>{liquidazione.ferie.giorni_residui} gg — € {eur(liquidazione.ferie.controvalore)}</div>
-                      <div className="dc-muted" style={{ fontSize: 11.5 }}>€ {eur(liquidazione.ferie.paga_giornaliera)}/giorno · {liquidazione.ferie.fonte}</div>
-                    </>
-                  ) : <div className="dc-muted" style={{ fontSize: 13 }}>Dato non disponibile in anagrafica</div>}
+                  <div className="dc-muted" style={{ fontSize: 12.5 }}>
+                    Ferie residue (giorni){liquidazione.ferie?.manuale && <> · <b>manuale</b> <button className="dc-btn" style={{ padding: "0 6px", fontSize: 11 }} title="Torna al residuo tracciato dall'app" onClick={() => salvaOverride("ferie_giorni", null)}>↺ auto</button></>}
+                  </div>
+                  <div style={{ fontWeight: 700, fontSize: 18, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <input key={`fg-${liquidazione.ferie?.giorni_residui ?? ""}`} type="text" inputMode="decimal"
+                      defaultValue={liquidazione.ferie?.giorni_residui ?? ""}
+                      placeholder="gg"
+                      style={{ width: 64, fontWeight: 700, fontSize: 17, border: "1px solid #e6e0d4", borderRadius: 8, padding: "3px 6px" }}
+                      onBlur={e => { const v = Number(String(e.target.value).replace(",", ".")); if (e.target.value !== "" && !isNaN(v) && v !== liquidazione.ferie?.giorni_residui) salvaOverride("ferie_giorni", v); }}
+                      onKeyDown={e => { if (e.key === "Enter") e.target.blur(); }} />
+                    gg{liquidazione.ferie && <> — € {eur(liquidazione.ferie.controvalore)}</>}
+                  </div>
+                  {liquidazione.ferie && <div className="dc-muted" style={{ fontSize: 11.5 }}>€ {eur(liquidazione.ferie.paga_giornaliera)}/giorno · {liquidazione.ferie.fonte}</div>}
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+                    <span className="dc-muted" style={{ fontSize: 12 }}>Scala</span>
+                    <input type="text" inputMode="decimal" value={scalaGiorni} onChange={e => setScalaGiorni(e.target.value)}
+                      placeholder="es. 26" style={{ width: 56, border: "1px solid #e6e0d4", borderRadius: 8, padding: "3px 6px", fontSize: 13 }} />
+                    <span className="dc-muted" style={{ fontSize: 12 }}>gg</span>
+                    <button className="dc-btn" style={{ padding: "3px 10px", fontSize: 12 }}
+                      disabled={!scalaGiorni || !liquidazione.ferie}
+                      title="Sottrae i giorni indicati dal residuo e salva la differenza"
+                      onClick={() => {
+                        const sc = Number(String(scalaGiorni).replace(",", "."));
+                        const cur = liquidazione.ferie?.giorni_residui || 0;
+                        if (isNaN(sc) || !sc) return;
+                        const diff = Math.round((cur - sc) * 100) / 100;
+                        if (diff < 0 && !window.confirm(`Il residuo diventerebbe negativo (${cur} − ${sc} = ${diff}). Salvo lo stesso?`)) return;
+                        salvaOverride("ferie_giorni", diff);
+                        toast(`Ferie: ${cur} − ${sc} = ${diff} gg`, "ok");
+                        setScalaGiorni("");
+                      }}>− Scala e salva differenza</button>
+                  </div>
                 </div>
               </div>
             </div>
           )}
+
+          <div className="dc-card" style={{ marginBottom: 16 }}>
+            <h3 style={{ marginTop: 0 }}>Acconti sul TFR (anticipi già dati)</h3>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
+              Gli acconti si scalano dal totale netto della simulazione. Stesso registro degli
+              acconti dell'app (niente doppioni): compaiono anche in Cedolini &amp; Bonifici.
+            </p>
+            {(acconti?.acconti?.tfr || []).length > 0 && (
+              <table className="dc-table" style={{ marginBottom: 10 }}>
+                <thead><tr><th>Data</th><th style={{ textAlign: "right" }}>Importo</th><th>Note</th><th></th></tr></thead>
+                <tbody>
+                  {(acconti.acconti.tfr).map(a => (
+                    <tr key={a.id}>
+                      <td>{formatDate(a.data)}</td>
+                      <td style={{ textAlign: "right" }}>€ {eur(a.importo)}</td>
+                      <td className="dc-muted">{a.note || ""}{a.stato === "annullato" ? " · annullato" : ""}</td>
+                      <td style={{ textAlign: "right" }}>
+                        <button className="dc-btn" style={{ padding: "2px 8px", fontSize: 12 }} title="Elimina acconto" onClick={() => eliminaAcconto(a.id)}>✕</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Data</label>
+                <MiniCalendario value={formAcconto.data} onChange={v => setFormAcconto(f => ({ ...f, data: v }))} />
+              </div>
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Importo €</label>
+                <input type="text" inputMode="decimal" value={formAcconto.importo} onChange={e => setFormAcconto(f => ({ ...f, importo: e.target.value }))}
+                  placeholder="es. 500" style={{ width: 110, border: "1px solid #e6e0d4", borderRadius: 8, padding: "8px 10px" }} />
+              </div>
+              <div style={{ flex: 1, minWidth: 160 }}>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Nota (facoltativa)</label>
+                <input type="text" value={formAcconto.note} onChange={e => setFormAcconto(f => ({ ...f, note: e.target.value }))}
+                  placeholder="es. anticipo richiesto a voce" style={{ width: "100%", border: "1px solid #e6e0d4", borderRadius: 8, padding: "8px 10px" }} />
+              </div>
+              <button className="dc-btn-primary" disabled={!formAcconto.importo} onClick={registraAcconto}>+ Registra acconto</button>
+            </div>
+            <div style={{ marginTop: 12, background: "#eef1ea", border: "1px solid #d7e0d3", borderRadius: 10, padding: "10px 14px", display: "flex", gap: 24, flexWrap: "wrap", fontSize: 14 }}>
+              <span>TFR netto simulato: <b>€ {eur(sim?.totale_netto || 0)}</b></span>
+              <span>− Acconti erogati: <b>€ {eur(acconti?.tfr_acconti || 0)}</b></span>
+              <span>= <b style={{ fontSize: 16 }}>Netto residuo € {eur((sim?.totale_netto || 0) - (acconti?.tfr_acconti || 0))}</b></span>
+            </div>
+          </div>
 
           {sim?.periodi?.length > 0 && (
             <div className="dc-card">

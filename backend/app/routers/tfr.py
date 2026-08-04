@@ -2191,6 +2191,26 @@ async def liquidazione_finale_simulazione(dipendente_id: str) -> Dict[str, Any]:
             "fonte": "residuo tracciato dall'app (da cedolino)",
         }
 
+    # Valori inseriti a mano dal titolare (vincono sul calcolo automatico,
+    # segnati "manuale"; si tolgono rimettendo il campo a vuoto).
+    override = await db["tfr_liquidazione_override"].find_one(
+        {"dipendente_id": dipendente_id}, {"_id": 0}) or {}
+    if override.get("tredicesima") is not None:
+        v = round(float(override["tredicesima"]), 2)
+        tredicesima = {**tredicesima, "lordo": v, "netto": v, "manuale": True}
+    if override.get("quattordicesima") is not None:
+        v = round(float(override["quattordicesima"]), 2)
+        quattordicesima = {**quattordicesima, "lordo": v, "netto": v, "manuale": True}
+    if override.get("ferie_giorni") is not None:
+        giorni = round(float(override["ferie_giorni"]), 2)
+        ferie = {
+            "giorni_residui": giorni,
+            "paga_giornaliera": paga_giornaliera,
+            "controvalore": round(giorni * paga_giornaliera, 2),
+            "fonte": "inserito a mano",
+            "manuale": True,
+        }
+
     return {
         "dipendente_id": dipendente_id,
         "dipendente_nome": dipendente.get("nome_completo", ""),
@@ -2200,7 +2220,44 @@ async def liquidazione_finale_simulazione(dipendente_id: str) -> Dict[str, Any]:
         "tredicesima": tredicesima,
         "quattordicesima": quattordicesima,
         "ferie": ferie,
+        "override": override,
     }
+
+
+@router.put("/simulazione/{dipendente_id}/liquidazione-override")
+@handle_errors
+async def salva_liquidazione_override(dipendente_id: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Valori manuali della liquidazione: totale 14ª, rateo 13ª, giorni di ferie
+    residue. Passare un numero per forzare il valore, null/"" per tornare al
+    calcolo automatico. Il DB salva solo gli override: tutto il resto resta
+    ricalcolato a lettura."""
+    db = Database.get_db()
+    campi = {}
+    for k in ("tredicesima", "quattordicesima", "ferie_giorni"):
+        if k not in body:
+            continue
+        v = body[k]
+        if v is None or v == "":
+            campi[k] = None
+        else:
+            try:
+                campi[k] = round(float(str(v).replace(",", ".")), 2)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Valore non valido per {k}")
+    if not campi:
+        raise HTTPException(status_code=400, detail="Nessun campo da salvare")
+    da_settare = {k: v for k, v in campi.items() if v is not None}
+    da_togliere = {k: "" for k, v in campi.items() if v is None}
+    update: Dict[str, Any] = {"$set": {"dipendente_id": dipendente_id,
+                                       "updated_at": datetime.now(timezone.utc).isoformat(),
+                                       **da_settare}}
+    if da_togliere:
+        update["$unset"] = da_togliere
+    await db["tfr_liquidazione_override"].update_one(
+        {"dipendente_id": dipendente_id}, update, upsert=True)
+    doc = await db["tfr_liquidazione_override"].find_one(
+        {"dipendente_id": dipendente_id}, {"_id": 0})
+    return {"ok": True, "override": doc or {}}
 
 
 
