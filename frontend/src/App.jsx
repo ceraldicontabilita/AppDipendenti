@@ -3298,6 +3298,22 @@ function MiniCalendario({ value, onChange }) {
   );
 }
 
+// Minimi tabellari CCNL Pubblici Esercizi/Turismo (Confcommercio-FIPE, rinnovo
+// 5/6/2024 — terza tranche dal 1/6/2026, fonte Confcommercio Milano).
+// [livello, paga base, contingenza, totale mensile] — da ricontrollare a ogni rinnovo.
+const CCNL_LIVELLI_2026 = [
+  ["Quadro A", 1920.26, 542.70, 2462.96],
+  ["Quadro B", 1734.02, 537.59, 2271.61],
+  ["1º", 1570.97, 536.71, 2107.68],
+  ["2º", 1384.76, 531.59, 1916.35],
+  ["3º", 1272.47, 528.26, 1800.73],
+  ["4º", 1167.75, 524.94, 1692.69],
+  ["5º", 1057.72, 522.37, 1580.09],
+  ["6º S", 994.19, 520.64, 1514.83],
+  ["6º", 971.06, 520.51, 1491.57],
+  ["7º", 871.75, 518.45, 1390.20],
+];
+
 // TFR — situazione ufficiale (calcolo automatico dai cedolini) + simulatore
 // storico periodo per periodo, per ricostruire il TFR maturato prima dell'app.
 function TfrPage({ dipendenti, getDipendente }) {
@@ -3324,6 +3340,7 @@ function TfrPage({ dipendenti, getDipendente }) {
 
   const [nlForm, setNlForm] = useState({ importo: "", settimane: "52", mesi: "12" });
   const [nlEsito, setNlEsito] = useState(null);
+  const [nlLivello, setNlLivello] = useState("");
   const calcolaNetto = async () => {
     if (!nlForm.importo || !nlForm.settimane || !nlForm.mesi) return;
     setNlEsito(null);
@@ -3332,6 +3349,23 @@ function TfrPage({ dipendenti, getDipendente }) {
         importo_settimanale_lordo: Number(nlForm.importo),
         settimane_lavorate: Number(nlForm.settimane),
         mesi_lavorati: Number(nlForm.mesi),
+      });
+      setNlEsito(r.data);
+    } catch (e) { setNlEsito({ errore: e?.response?.data?.detail || "Errore nel calcolo" }); }
+  };
+  // Scegli la tariffa CCNL → il resto si calcola da solo (lordo settimanale + netto)
+  const usaLivelloCcnl = async (liv) => {
+    setNlLivello(liv);
+    const row = CCNL_LIVELLI_2026.find(r => r[0] === liv);
+    if (!row) return;
+    const sett = Math.round((row[3] * 12 / 52) * 100) / 100;
+    setNlForm(f => ({ ...f, importo: String(sett) }));
+    setNlEsito(null);
+    try {
+      const r = await axios.post(`${API_TFR}/calcolo-netto-da-lordo`, {
+        importo_settimanale_lordo: sett,
+        settimane_lavorate: Number(nlForm.settimane) || 52,
+        mesi_lavorati: Number(nlForm.mesi) || 12,
       });
       setNlEsito(r.data);
     } catch (e) { setNlEsito({ errore: e?.response?.data?.detail || "Errore nel calcolo" }); }
@@ -3946,21 +3980,10 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
                 <table className="dc-table" style={{ fontSize: 13 }}>
                   <thead><tr><th>Livello</th><th style={{ textAlign: "right" }}>Paga base €</th><th style={{ textAlign: "right" }}>Contingenza €</th><th style={{ textAlign: "right" }}>Totale mensile €</th><th style={{ textAlign: "right" }}>≈ €/settimana</th><th></th></tr></thead>
                   <tbody>
-                    {[
-                      ["Quadro A", 1920.26, 542.70, 2462.96],
-                      ["Quadro B", 1734.02, 537.59, 2271.61],
-                      ["1º", 1570.97, 536.71, 2107.68],
-                      ["2º", 1384.76, 531.59, 1916.35],
-                      ["3º", 1272.47, 528.26, 1800.73],
-                      ["4º", 1167.75, 524.94, 1692.69],
-                      ["5º", 1057.72, 522.37, 1580.09],
-                      ["6º S", 994.19, 520.64, 1514.83],
-                      ["6º", 971.06, 520.51, 1491.57],
-                      ["7º", 871.75, 518.45, 1390.20],
-                    ].map(([liv, base, cont, tot]) => {
+                    {CCNL_LIVELLI_2026.map(([liv, base, cont, tot]) => {
                       const sett = Math.round((tot * 12 / 52) * 100) / 100;
                       return (
-                        <tr key={liv}>
+                        <tr key={liv} style={nlLivello === liv ? { background: "#eef1ea" } : undefined}>
                           <td style={{ fontWeight: 700 }}>{liv}</td>
                           <td style={{ textAlign: "right" }}>{eur(base)}</td>
                           <td style={{ textAlign: "right" }}>{eur(cont)}</td>
@@ -3968,8 +3991,8 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
                           <td style={{ textAlign: "right" }}>{eur(sett)}</td>
                           <td style={{ textAlign: "right" }}>
                             <button className="dc-btn" style={{ padding: "3px 10px", fontSize: 12 }}
-                              title={`Compila il calcolo con il lordo del livello ${liv}`}
-                              onClick={() => { setNlForm(f => ({ ...f, importo: String(sett) })); setNlEsito(null); }}>
+                              title={`Calcola tutto con la tariffa del livello ${liv}`}
+                              onClick={() => usaLivelloCcnl(liv)}>
                               Usa
                             </button>
                           </td>
@@ -3982,9 +4005,18 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
             </details>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
               <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Tariffa CCNL (livello)</label>
+                <select style={{ ...inp, width: 220 }} value={nlLivello} onChange={e => usaLivelloCcnl(e.target.value)}>
+                  <option value="">— scegli e calcolo tutto io —</option>
+                  {CCNL_LIVELLI_2026.map(([liv, , , tot]) => (
+                    <option key={liv} value={liv}>{liv} — € {eur(tot)}/mese</option>
+                  ))}
+                </select>
+              </div>
+              <div>
                 <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>€/settimana (lordo)</label>
                 <input type="number" step="0.01" style={{ ...inp, width: 130 }} value={nlForm.importo}
-                  onChange={e => setNlForm(f => ({ ...f, importo: e.target.value }))} />
+                  onChange={e => { setNlForm(f => ({ ...f, importo: e.target.value })); setNlLivello(""); }} />
               </div>
               <div>
                 <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Settimane lavorate</label>
