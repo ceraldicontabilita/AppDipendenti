@@ -1678,11 +1678,16 @@ async def import_cedolini_da_drive(body: Dict[str, Any] = Body(default={})) -> D
     dell'upload massivo: classificazione, aggancio al dipendente, anti-duplicati."""
     import json
     import time
-    creds_raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    # Stessi nomi usati dal GestionaleCloud, così su Render basta collegare lo
+    # stesso Environment Group (o copiare la variabile senza rinominarla).
+    creds_raw = (os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+                 or os.environ.get("GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON")
+                 or os.environ.get("GOOGLE_DRIVE_SA_JSON") or "")
     if not creds_raw:
         raise HTTPException(status_code=503, detail=(
-            "Manca GOOGLE_SERVICE_ACCOUNT_JSON nelle env di Render: incolla lì il JSON "
-            "della chiave del service account (mai in codice o chat)."))
+            "Manca la chiave del service account nelle env di Render: variabile "
+            "GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON (stesso nome del GestionaleCloud) "
+            "o GOOGLE_SERVICE_ACCOUNT_JSON — mai in codice o chat."))
     try:
         creds = json.loads(creds_raw)
     except ValueError:
