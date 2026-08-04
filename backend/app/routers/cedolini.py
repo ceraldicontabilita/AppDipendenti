@@ -1725,7 +1725,8 @@ async def import_cedolini_da_drive(body: Dict[str, Any] = Body(default={})) -> D
                 if not page:
                     return out
 
-        folder = str(body.get("folder_id") or DRIVE_FOLDER_CEDOLINI)
+        # priorità: cartella nel body → env (stessa del GestionaleCloud) → default
+        folder = str(body.get("folder_id") or os.environ.get("DRIVE_CEDOLINI_FOLDER_ID") or DRIVE_FOLDER_CEDOLINI)
         files = await lista(folder)
         pdfs = [f for f in files if f.get("mimeType") == "application/pdf"]
         for sub in [f for f in files if f.get("mimeType") == "application/vnd.google-apps.folder"]:
