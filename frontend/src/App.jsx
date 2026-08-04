@@ -3447,9 +3447,12 @@ ${liq.ferie ? `<tr><td>Ferie residue: ${liq.ferie.giorni_residui} gg × € ${eu
 ${accTfr.length ? `<h2>Acconti TFR già erogati</h2><table><thead><tr><th>Data</th><th class="n">Importo</th><th>Note</th></tr></thead><tbody>${accRighe}</tbody>
 <tfoot><tr><td>Totale acconti</td><td class="n">€ ${eur(totAcc)}</td><td></td></tr></tfoot></table>` : ""}
 <h2>Riepilogo</h2><table>
-<tr><td>TFR netto simulato</td><td class="n">€ ${eur(sim?.totale_netto)}</td></tr>
+<tr><td>TFR lordo maturato</td><td class="n">€ ${eur(sim?.totale_lordo)}</td></tr>
+<tr><td>− INPS 0,50%</td><td class="n">€ ${eur(sim?.totale_inps)}</td></tr>
+<tr><td>− IRPEF</td><td class="n">€ ${eur(sim?.totale_imposte)}</td></tr>
+<tr><td>= TFR netto simulato</td><td class="n">€ ${eur(sim?.totale_netto)}</td></tr>
 <tr><td>− Acconti TFR erogati</td><td class="n">€ ${eur(totAcc)}</td></tr>
-<tr><td><b>TFR netto residuo</b></td><td class="n"><b>€ ${eur(residuo)}</b></td></tr>
+<tr><td><b>= TFR netto residuo</b></td><td class="n"><b>€ ${eur(residuo)}</b></td></tr>
 ${liq ? `<tr><td>+ Tredicesima maturata</td><td class="n">€ ${eur(liq.tredicesima.netto)}</td></tr>
 <tr><td>+ Quattordicesima maturata</td><td class="n">€ ${eur(liq.quattordicesima.netto)}</td></tr>
 ${liq.ferie ? `<tr><td>${(liq.ferie.controvalore || 0) < 0 ? "−" : "+"} Ferie (${liq.ferie.giorni_residui} gg)</td><td class="n">€ ${eur(Math.abs(liq.ferie.controvalore || 0))}</td></tr>` : ""}
@@ -3855,7 +3858,12 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
                   liquidazione qui sopra. Le ferie negative si sottraggono.
                 </p>
                 <div style={{ maxWidth: 460 }}>
-                  <div style={riga}><span>TFR netto residuo</span><b>€ {eur(tfrResiduo)}</b></div>
+                  <div style={riga}><span>TFR lordo maturato (dalla tabella)</span><b>€ {eur(sim?.totale_lordo || 0)}</b></div>
+                  <div style={riga}><span>− INPS 0,50%</span><b>€ {eur(sim?.totale_inps || 0)}</b></div>
+                  <div style={riga}><span>− IRPEF</span><b>€ {eur(sim?.totale_imposte || 0)}</b></div>
+                  <div style={riga}><span>= TFR netto</span><b>€ {eur(sim?.totale_netto || 0)}</b></div>
+                  <div style={riga}><span>− Acconti già erogati</span><b>€ {eur(acconti?.tfr_acconti || 0)}</b></div>
+                  <div style={riga}><span>= TFR netto residuo</span><b>€ {eur(tfrResiduo)}</b></div>
                   <div style={riga}><span>+ Tredicesima maturata{liquidazione.tredicesima?.manuale ? " (manuale)" : ""}</span><b>€ {eur(t13)}</b></div>
                   <div style={riga}><span>+ Quattordicesima maturata{liquidazione.quattordicesima?.manuale ? " (manuale)" : ""}</span><b>€ {eur(t14)}</b></div>
                   <div style={riga}><span>{fer < 0 ? "−" : "+"} Ferie ({liquidazione.ferie ? `${liquidazione.ferie.giorni_residui} gg` : "—"}{liquidazione.ferie?.manuale ? ", manuale" : ""})</span><b style={fer < 0 ? { color: "#b3261e" } : {}}>€ {eur(Math.abs(fer))}</b></div>
