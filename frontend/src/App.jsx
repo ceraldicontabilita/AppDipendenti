@@ -3299,19 +3299,21 @@ function MiniCalendario({ value, onChange }) {
 }
 
 // Minimi tabellari CCNL Pubblici Esercizi/Turismo (Confcommercio-FIPE, rinnovo
-// 5/6/2024 — terza tranche dal 1/6/2026, fonte Confcommercio Milano).
-// [livello, paga base, contingenza, totale mensile] — da ricontrollare a ogni rinnovo.
+// 5/6/2024 — terza tranche dal 1/6/2026, fonte Confcommercio Milano; mansioni
+// dalle declaratorie di classificazione del personale).
+// [livello, paga base, contingenza, totale mensile, mansioni tipiche] — da
+// ricontrollare a ogni rinnovo.
 const CCNL_LIVELLI_2026 = [
-  ["Quadro A", 1920.26, 542.70, 2462.96],
-  ["Quadro B", 1734.02, 537.59, 2271.61],
-  ["1º", 1570.97, 536.71, 2107.68],
-  ["2º", 1384.76, 531.59, 1916.35],
-  ["3º", 1272.47, 528.26, 1800.73],
-  ["4º", 1167.75, 524.94, 1692.69],
-  ["5º", 1057.72, 522.37, 1580.09],
-  ["6º S", 994.19, 520.64, 1514.83],
-  ["6º", 971.06, 520.51, 1491.57],
-  ["7º", 871.75, 518.45, 1390.20],
+  ["Quadro A", 1920.26, 542.70, 2462.96, "quadri direttivi"],
+  ["Quadro B", 1734.02, 537.59, 2271.61, "quadri"],
+  ["1º", 1570.97, 536.71, 2107.68, "direttore, capo servizi"],
+  ["2º", 1384.76, 531.59, 1916.35, "capo cuoco, capo barista"],
+  ["3º", 1272.47, 528.26, 1800.73, "cuoco unico, primo pasticciere, barman unico"],
+  ["4º", 1167.75, 524.94, 1692.69, "cuoco tavola calda/capo partita, secondo pasticciere, rosticciere, barman"],
+  ["5º", 1057.72, 522.37, 1580.09, "barista, cameriere (anche tavola calda), banconiere pasticceria/gelateria"],
+  ["6º S", 994.19, 520.64, 1514.83, "operai qualificati super"],
+  ["6º", 971.06, 520.51, 1491.57, "commis cucina/sala/bar, secondo banconiere pasticceria"],
+  ["7º", 871.75, 518.45, 1390.20, "personale di fatica / primo ingresso"],
 ];
 
 // TFR — situazione ufficiale (calcolo automatico dai cedolini) + simulatore
@@ -3978,13 +3980,14 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
               </p>
               <div className="dc-scroll-x">
                 <table className="dc-table" style={{ fontSize: 13 }}>
-                  <thead><tr><th>Livello</th><th style={{ textAlign: "right" }}>Paga base €</th><th style={{ textAlign: "right" }}>Contingenza €</th><th style={{ textAlign: "right" }}>Totale mensile €</th><th style={{ textAlign: "right" }}>≈ €/settimana</th><th></th></tr></thead>
+                  <thead><tr><th>Livello</th><th>Mansioni tipiche</th><th style={{ textAlign: "right" }}>Paga base €</th><th style={{ textAlign: "right" }}>Contingenza €</th><th style={{ textAlign: "right" }}>Totale mensile €</th><th style={{ textAlign: "right" }}>≈ €/settimana</th><th></th></tr></thead>
                   <tbody>
-                    {CCNL_LIVELLI_2026.map(([liv, base, cont, tot]) => {
+                    {CCNL_LIVELLI_2026.map(([liv, base, cont, tot, mansioni]) => {
                       const sett = Math.round((tot * 12 / 52) * 100) / 100;
                       return (
                         <tr key={liv} style={nlLivello === liv ? { background: "#eef1ea" } : undefined}>
                           <td style={{ fontWeight: 700 }}>{liv}</td>
+                          <td className="dc-muted" style={{ fontSize: 12 }}>{mansioni}</td>
                           <td style={{ textAlign: "right" }}>{eur(base)}</td>
                           <td style={{ textAlign: "right" }}>{eur(cont)}</td>
                           <td style={{ textAlign: "right", fontWeight: 700 }}>{eur(tot)}</td>
@@ -4008,8 +4011,8 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
                 <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Tariffa CCNL (livello)</label>
                 <select style={{ ...inp, width: 220 }} value={nlLivello} onChange={e => usaLivelloCcnl(e.target.value)}>
                   <option value="">— scegli e calcolo tutto io —</option>
-                  {CCNL_LIVELLI_2026.map(([liv, , , tot]) => (
-                    <option key={liv} value={liv}>{liv} — € {eur(tot)}/mese</option>
+                  {CCNL_LIVELLI_2026.map(([liv, , , tot, mansioni]) => (
+                    <option key={liv} value={liv}>{liv} — € {eur(tot)}/mese ({mansioni})</option>
                   ))}
                 </select>
               </div>
