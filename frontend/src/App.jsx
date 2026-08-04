@@ -3340,37 +3340,37 @@ function TfrPage({ dipendenti, getDipendente }) {
   const [formAcconto, setFormAcconto] = useState({ data: "", importo: "", note: "" });
   const [scalaGiorni, setScalaGiorni] = useState("");
 
-  const [nlForm, setNlForm] = useState({ importo: "", settimane: "52", mesi: "12" });
+  const [nlForm, setNlForm] = useState({ importo: "", superminimo: "", settimane: "52", mesi: "12" });
   const [nlEsito, setNlEsito] = useState(null);
   const [nlLivello, setNlLivello] = useState("");
-  const calcolaNetto = async () => {
-    if (!nlForm.importo || !nlForm.settimane || !nlForm.mesi) return;
+  // Superminimo: si somma al lordo tabellare e paga contributi e IRPEF come il resto.
+  // È espresso in €/MESE e viene convertito in settimanale (× 12 ÷ 52).
+  const smSettimanale = (f) => {
+    const sm = Number(String(f.superminimo || "0").replace(",", "."));
+    return isNaN(sm) ? 0 : Math.round((sm * 12 / 52) * 100) / 100;
+  };
+  const calcolaNetto = async (form = nlForm) => {
+    if (!form.importo || !form.settimane || !form.mesi) return;
     setNlEsito(null);
     try {
+      const lordoSett = Math.round((Number(String(form.importo).replace(",", ".")) + smSettimanale(form)) * 100) / 100;
       const r = await axios.post(`${API_TFR}/calcolo-netto-da-lordo`, {
-        importo_settimanale_lordo: Number(nlForm.importo),
-        settimane_lavorate: Number(nlForm.settimane),
-        mesi_lavorati: Number(nlForm.mesi),
+        importo_settimanale_lordo: lordoSett,
+        settimane_lavorate: Number(form.settimane),
+        mesi_lavorati: Number(form.mesi),
       });
-      setNlEsito(r.data);
+      setNlEsito({ ...r.data, superminimo_mese: Number(String(form.superminimo || "0").replace(",", ".")) || 0, lordo_settimanale_totale: lordoSett });
     } catch (e) { setNlEsito({ errore: e?.response?.data?.detail || "Errore nel calcolo" }); }
   };
-  // Scegli la tariffa CCNL → il resto si calcola da solo (lordo settimanale + netto)
+  // Scegli la tariffa CCNL → il resto si calcola da solo (lordo settimanale + superminimo + netto)
   const usaLivelloCcnl = async (liv) => {
     setNlLivello(liv);
     const row = CCNL_LIVELLI_2026.find(r => r[0] === liv);
     if (!row) return;
     const sett = Math.round((row[3] * 12 / 52) * 100) / 100;
-    setNlForm(f => ({ ...f, importo: String(sett) }));
-    setNlEsito(null);
-    try {
-      const r = await axios.post(`${API_TFR}/calcolo-netto-da-lordo`, {
-        importo_settimanale_lordo: sett,
-        settimane_lavorate: Number(nlForm.settimane) || 52,
-        mesi_lavorati: Number(nlForm.mesi) || 12,
-      });
-      setNlEsito(r.data);
-    } catch (e) { setNlEsito({ errore: e?.response?.data?.detail || "Errore nel calcolo" }); }
+    const form = { ...nlForm, importo: String(sett) };
+    setNlForm(form);
+    await calcolaNetto(form);
   };
 
   const carica = useCallback(async (id) => {
@@ -4022,6 +4022,12 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
                   onChange={e => { setNlForm(f => ({ ...f, importo: e.target.value })); setNlLivello(""); }} />
               </div>
               <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }} title="Si somma al minimo tabellare e paga INPS e IRPEF come il resto della retribuzione">Superminimo €/mese</label>
+                <input type="number" step="0.01" placeholder="0" style={{ ...inp, width: 130 }} value={nlForm.superminimo}
+                  onChange={e => setNlForm(f => ({ ...f, superminimo: e.target.value }))}
+                  onBlur={() => { if (nlForm.importo) calcolaNetto(); }} />
+              </div>
+              <div>
                 <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Settimane lavorate</label>
                 <input type="number" step="0.01" style={{ ...inp, width: 120 }} value={nlForm.settimane}
                   onChange={e => setNlForm(f => ({ ...f, settimane: e.target.value }))} />
@@ -4031,10 +4037,16 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
                 <input type="number" step="0.01" style={{ ...inp, width: 110 }} value={nlForm.mesi}
                   onChange={e => setNlForm(f => ({ ...f, mesi: e.target.value }))} />
               </div>
-              <button className="dc-btn dc-btn-primary" onClick={calcolaNetto}>Calcola netto</button>
+              <button className="dc-btn dc-btn-primary" onClick={() => calcolaNetto()}>Calcola netto</button>
             </div>
             {nlEsito && !nlEsito.errore && (
               <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginTop: 14 }}>
+                {nlEsito.superminimo_mese > 0 && (
+                  <div style={{ flexBasis: "100%", fontSize: 12.5 }} className="dc-muted">
+                    Calcolato su lordo settimanale totale € {eur(nlEsito.lordo_settimanale_totale)} = tabellare + superminimo
+                    € {eur(nlEsito.superminimo_mese)}/mese (il superminimo paga INPS e IRPEF come il resto).
+                  </div>
+                )}
                 <div><div className="dc-muted" style={{ fontSize: 12.5 }}>Lordo mensile medio</div><div style={{ fontWeight: 700, fontSize: 17 }}>€ {eur(nlEsito.lordo_mensile_medio)}</div></div>
                 <div><div className="dc-muted" style={{ fontSize: 12.5 }}>INPS (anno)</div><div style={{ fontWeight: 700, fontSize: 17 }}>€ {eur(nlEsito.contributi_inps)}</div></div>
                 <div><div className="dc-muted" style={{ fontSize: 12.5 }}>IRPEF netta (anno)</div><div style={{ fontWeight: 700, fontSize: 17 }}>€ {eur(nlEsito.irpef_netta)}</div></div>
