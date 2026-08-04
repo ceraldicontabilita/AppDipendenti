@@ -1539,3 +1539,210 @@ async def lista_acconti_dipendente(dipendente_id: str, anno: Optional[int] = Non
     from backend.app.services.acconti_auto_linker import get_pagamenti_dipendente
     from backend.app.database import Database as _DB
     return await get_pagamenti_dipendente(_DB.get_db(), dipendente_id, anno=anno)
+
+
+# ============================================
+# SIMULAZIONE F24 MENSILE + IMPORT CEDOLINI DA GOOGLE DRIVE
+# ============================================
+import re as _re
+
+
+def _voci_somma(voci, pattern: str) -> float:
+    """Somma gli importi delle voci di busta la cui descrizione combacia col pattern."""
+    tot = 0.0
+    for v in voci or []:
+        desc = str(v.get("descrizione") or v.get("voce") or v.get("codice") or "").lower()
+        if not _re.search(pattern, desc):
+            continue
+        for k in ("importo", "trattenuta", "ritenuta", "competenze", "valore"):
+            try:
+                x = float(str(v.get(k)).replace(".", "").replace(",", ".")) if isinstance(v.get(k), str) else float(v.get(k) or 0)
+                if x:
+                    tot += abs(x)
+                    break
+            except (TypeError, ValueError):
+                continue
+    return round(tot, 2)
+
+
+def _stima_mensile_da_lordo(lordo: float) -> Dict[str, float]:
+    """Trattenute mensili stimate dal lordo mensile (stesse regole della stima
+    cedolino: INPS dipendente 9,19%, IRPEF a scaglioni annualizzata con
+    detrazione lavoro dipendente)."""
+    inps_dip = lordo * INPS_DIPENDENTE_PERCENT / 100
+    imponibile_annuo = (lordo - inps_dip) * 12
+    irpef_annua = max(0.0, calcola_irpef_annua(imponibile_annuo) - calcola_detrazioni_lavoro(imponibile_annuo))
+    irpef_mese = irpef_annua / 12
+    return {"inps_dipendente": round(inps_dip, 2), "irpef": round(irpef_mese, 2),
+            "netto": round(lordo - inps_dip - irpef_mese, 2)}
+
+
+def _lordo_da_netto_mensile(netto: float) -> float:
+    """Inverte per bisezione la stima mensile: dal netto in busta al lordo."""
+    lo, hi = 1.0, 4000.0
+    while _stima_mensile_da_lordo(hi)["netto"] < netto:
+        hi *= 2
+        if hi > 1_000_000:
+            break
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if _stima_mensile_da_lordo(mid)["netto"] < netto:
+            lo = mid
+        else:
+            hi = mid
+    return round(hi, 2)
+
+
+@router.get("/simulazione-f24")
+@handle_errors
+async def simulazione_f24(anno: int, mese: int) -> Dict[str, Any]:
+    """Simulazione F24 e costo mensile per ogni dipendente, dai cedolini del mese.
+
+    Per ogni cedolino: usa lordo/IRPEF/INPS reali quando presenti nelle voci di
+    busta; altrimenti li stima dal netto (bisezione con le stesse regole della
+    stima cedolino). INPS azienda = aliquota unica dell'app (30%), TFR mese =
+    lordo ÷ 13,5. F24 del mese = IRPEF trattenuta + INPS dipendente + INPS
+    azienda. Costo azienda = lordo + INPS azienda + quota TFR. È una SIMULAZIONE:
+    fa fede il modello F24 del consulente."""
+    db = Database.get_db()
+    cedolini = await db["cedolini"].find(
+        {"anno": anno, "mese": mese}, {"_id": 0, "pdf_data": 0}).to_list(500)
+    nomi = {d["id"]: (d.get("nome_completo") or f"{d.get('cognome', '')} {d.get('nome', '')}".strip())
+            for d in await db["dipendenti"].find({}, {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "nome_completo": 1}).to_list(1000)}
+
+    righe = []
+    for c in cedolini:
+        netto = None
+        for k in ("netto", "netto_mese", "netto_in_busta", "netto_pagato"):
+            try:
+                if c.get(k) is not None:
+                    netto = float(c[k])
+                    break
+            except (TypeError, ValueError):
+                continue
+        lordo = None
+        for k in ("lordo", "lordo_totale", "totale_competenze", "retribuzione_lorda"):
+            try:
+                if c.get(k):
+                    lordo = float(c[k])
+                    break
+            except (TypeError, ValueError):
+                continue
+        voci = c.get("voci") or []
+        irpef_busta = _voci_somma(voci, r"irpef")
+        inps_busta = _voci_somma(voci, r"f\.?a\.?p|ivs|contributi?\s|inps")
+        fonte = "cedolino"
+        if lordo is None and netto is not None and netto > 0:
+            lordo = _lordo_da_netto_mensile(netto)
+            fonte = "stima dal netto"
+        if lordo is None:
+            continue
+        stima = _stima_mensile_da_lordo(lordo)
+        irpef = irpef_busta if irpef_busta > 0 else stima["irpef"]
+        inps_dip = inps_busta if inps_busta > 0 else stima["inps_dipendente"]
+        if netto is None:
+            netto = round(lordo - inps_dip - irpef, 2)
+        inps_azienda = round(lordo * INPS_AZIENDA_PERCENT / 100, 2)
+        tfr_mese = round(lordo / 13.5, 2)
+        totale_f24 = round(irpef + inps_dip + inps_azienda, 2)
+        costo_azienda = round(lordo + inps_azienda + tfr_mese, 2)
+        righe.append({
+            "dipendente_id": c.get("dipendente_id"),
+            "dipendente_nome": c.get("dipendente_nome") or nomi.get(c.get("dipendente_id"), "?"),
+            "fonte": fonte,
+            "lordo": round(lordo, 2), "netto": round(netto, 2) if netto is not None else None,
+            "irpef": round(irpef, 2), "inps_dipendente": round(inps_dip, 2),
+            "inps_azienda": inps_azienda, "tfr_mese": tfr_mese,
+            "totale_f24": totale_f24, "costo_azienda": costo_azienda,
+        })
+
+    righe.sort(key=lambda r: (r["dipendente_nome"] or "").lower())
+    tot = {k: round(sum(r[k] or 0 for r in righe), 2)
+           for k in ("lordo", "netto", "irpef", "inps_dipendente", "inps_azienda", "tfr_mese", "totale_f24", "costo_azienda")}
+    return {"anno": anno, "mese": mese, "dipendenti": len(righe), "righe": righe, "totali": tot,
+            "parametri": {"inps_azienda_percento": INPS_AZIENDA_PERCENT,
+                          "inps_dipendente_percento": INPS_DIPENDENTE_PERCENT,
+                          "nota": "Simulazione: fa fede il modello F24 del consulente."}}
+
+
+DRIVE_FOLDER_CEDOLINI = "1tmVu6fl7qhJbLcGCHT3wEQzrvFAElc9h"  # cartella indicata dal titolare
+
+
+@router.post("/import-drive")
+@handle_errors
+async def import_cedolini_da_drive(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """Importa i PDF (buste paga e documenti) da una cartella Google Drive col
+    service account (env GOOGLE_SERVICE_ACCOUNT_JSON, la chiave di
+    gestionale@ceraldi-gestionale.iam.gserviceaccount.com — la cartella deve
+    essere condivisa con quell'indirizzo). Ogni PDF passa dalla STESSA pipeline
+    dell'upload massivo: classificazione, aggancio al dipendente, anti-duplicati."""
+    import json
+    import time
+    creds_raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    if not creds_raw:
+        raise HTTPException(status_code=503, detail=(
+            "Manca GOOGLE_SERVICE_ACCOUNT_JSON nelle env di Render: incolla lì il JSON "
+            "della chiave del service account (mai in codice o chat)."))
+    try:
+        creds = json.loads(creds_raw)
+    except ValueError:
+        raise HTTPException(status_code=503, detail="GOOGLE_SERVICE_ACCOUNT_JSON non è un JSON valido")
+
+    from jose import jwt as jose_jwt
+    now = int(time.time())
+    assertion = jose_jwt.encode(
+        {"iss": creds.get("client_email"), "scope": "https://www.googleapis.com/auth/drive.readonly",
+         "aud": "https://oauth2.googleapis.com/token", "iat": now, "exp": now + 3600},
+        creds.get("private_key"), algorithm="RS256")
+
+    import httpx
+    risultato = {"trovati_pdf": 0, "archiviati": 0, "duplicati": 0, "non_assegnati": []}
+    async with httpx.AsyncClient(timeout=120) as client:
+        tok = await client.post("https://oauth2.googleapis.com/token", data={
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": assertion})
+        if tok.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Autenticazione Google fallita: {tok.text[:200]}")
+        headers = {"Authorization": f"Bearer {tok.json()['access_token']}"}
+
+        async def lista(fid: str):
+            out, page = [], None
+            while True:
+                params = {"q": f"'{fid}' in parents and trashed=false",
+                          "fields": "nextPageToken,files(id,name,mimeType)", "pageSize": 200,
+                          "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"}
+                if page:
+                    params["pageToken"] = page
+                r = await client.get("https://www.googleapis.com/drive/v3/files", params=params, headers=headers)
+                r.raise_for_status()
+                j = r.json()
+                out += j.get("files", [])
+                page = j.get("nextPageToken")
+                if not page:
+                    return out
+
+        folder = str(body.get("folder_id") or DRIVE_FOLDER_CEDOLINI)
+        files = await lista(folder)
+        pdfs = [f for f in files if f.get("mimeType") == "application/pdf"]
+        for sub in [f for f in files if f.get("mimeType") == "application/vnd.google-apps.folder"]:
+            pdfs += [f for f in await lista(sub["id"]) if f.get("mimeType") == "application/pdf"]
+        risultato["trovati_pdf"] = len(pdfs)
+
+        from backend.app.routers.dipendenti_cloud import _archivia_documento_cloud, _indici_dipendenti
+        db = Database.get_db()
+        indici = await _indici_dipendenti(db)
+        for f in pdfs[:500]:
+            r = await client.get(f"https://www.googleapis.com/drive/v3/files/{f['id']}",
+                                 params={"alt": "media", "supportsAllDrives": "true"}, headers=headers)
+            if r.status_code != 200:
+                risultato["non_assegnati"].append(f.get("name"))
+                continue
+            esito, categoria, nome = await _archivia_documento_cloud(
+                db, f.get("name") or "documento.pdf", r.content, contesto="google-drive", indici=indici)
+            if esito == "duplicato":
+                risultato["duplicati"] += 1
+            elif esito == "caricato":
+                risultato["archiviati"] += 1
+            else:
+                risultato["non_assegnati"].append(f.get("name"))
+    risultato["non_assegnati"] = risultato["non_assegnati"][:50]
+    return risultato

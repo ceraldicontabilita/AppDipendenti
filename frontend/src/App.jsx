@@ -2775,6 +2775,25 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
 
   const [showImport, setShowImport] = useState(false);
   const [showCerca, setShowCerca] = useState(false);
+
+  // Simulazione F24 + costo mensile (dai cedolini del mese) e import da Google Drive
+  const [f24, setF24] = useState(null);
+  const [f24Busy, setF24Busy] = useState(false);
+  const [driveMsg, setDriveMsg] = useState(null);
+  const calcolaF24 = async () => {
+    setF24Busy(true); setF24(null);
+    try { const r = await axios.get(`/api/cedolini/simulazione-f24?anno=${anno}&mese=${mese}`); setF24(r.data); }
+    catch (e) { setF24({ errore: e?.response?.data?.detail || "Errore nel calcolo" }); }
+    finally { setF24Busy(false); }
+  };
+  const importaDaDrive = async () => {
+    if (!window.confirm("Importo i PDF (buste paga e documenti) dalla cartella Google Drive dei cedolini?")) return;
+    setImporting(true); setDriveMsg(null);
+    try { const r = await axios.post(`/api/cedolini/import-drive`, {}); setDriveMsg(r.data); }
+    catch (e) { setDriveMsg({ errore: e?.response?.data?.detail || "Errore import da Drive" }); }
+    finally { setImporting(false); }
+  };
+
   return (
     <div className="dc-page">
       <div className="dc-page-header">
@@ -2810,6 +2829,76 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
             {[2022, 2023, 2024, 2025, 2026, 2027].map(y => <option key={y} value={y}>{y}</option>)}
           </select>
         </div>
+      </div>
+
+      <div className="dc-card" style={{ marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <h3 style={{ margin: 0 }}>🧾 Simulazione F24 e costo mensile — {mesi[mese - 1]} {anno}</h3>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="dc-btn" disabled={importing} onClick={importaDaDrive}
+              title="Scarica i PDF delle buste dalla cartella Drive dei cedolini (service account) e li archivia con la stessa pipeline dell'upload massivo">
+              📥 Importa cedolini da Drive
+            </button>
+            <button className="dc-btn-primary" disabled={f24Busy} onClick={calcolaF24}>{f24Busy ? "Calcolo…" : "Calcola F24 del mese"}</button>
+          </div>
+        </div>
+        <p className="dc-muted" style={{ fontSize: 12.5, margin: "6px 0 0" }}>
+          Per ogni dipendente legge il cedolino del mese (contratto e livello applicati in busta): IRPEF e INPS
+          reali dalle voci quando ci sono, altrimenti stimati dal netto con le regole CCNL. INPS azienda 30%,
+          quota TFR = lordo ÷ 13,5. È una simulazione: fa fede l'F24 del consulente.
+        </p>
+        {driveMsg && (
+          <div style={{ marginTop: 8, fontSize: 13, color: driveMsg.errore ? "#b3261e" : "#3f5a4e" }}>
+            {driveMsg.errore
+              ? `⚠ ${driveMsg.errore}`
+              : `✓ Drive: ${driveMsg.trovati_pdf} PDF trovati · ${driveMsg.archiviati} archiviati · ${driveMsg.duplicati} duplicati saltati${(driveMsg.non_assegnati || []).length ? ` · da controllare: ${driveMsg.non_assegnati.join(", ")}` : ""}`}
+          </div>
+        )}
+        {f24?.errore && <div style={{ marginTop: 8, color: "#b3261e", fontWeight: 600 }}>⚠ {f24.errore}</div>}
+        {f24 && !f24.errore && (
+          f24.righe.length === 0
+            ? <p className="dc-muted" style={{ marginTop: 10 }}>Nessun cedolino trovato per {mesi[mese - 1]} {anno}: importa prima le buste (Libro Unico, upload o Drive).</p>
+            : (
+              <div className="dc-scroll-x" style={{ marginTop: 10 }}>
+                <table className="dc-table" style={{ fontSize: 13 }}>
+                  <thead><tr>
+                    <th>Dipendente</th><th style={{ textAlign: "right" }}>Lordo €</th><th style={{ textAlign: "right" }}>Netto €</th>
+                    <th style={{ textAlign: "right" }}>IRPEF €</th><th style={{ textAlign: "right" }}>INPS dip. €</th>
+                    <th style={{ textAlign: "right" }}>INPS azienda €</th><th style={{ textAlign: "right" }}>TFR mese €</th>
+                    <th style={{ textAlign: "right" }}>F24 €</th><th style={{ textAlign: "right" }}>Costo azienda €</th><th>Fonte</th>
+                  </tr></thead>
+                  <tbody>
+                    {f24.righe.map(r => (
+                      <tr key={r.dipendente_id || r.dipendente_nome}>
+                        <td style={{ fontWeight: 600 }}>{r.dipendente_nome}</td>
+                        <td style={{ textAlign: "right" }}>{eur(r.lordo)}</td>
+                        <td style={{ textAlign: "right" }}>{eur(r.netto)}</td>
+                        <td style={{ textAlign: "right" }}>{eur(r.irpef)}</td>
+                        <td style={{ textAlign: "right" }}>{eur(r.inps_dipendente)}</td>
+                        <td style={{ textAlign: "right" }}>{eur(r.inps_azienda)}</td>
+                        <td style={{ textAlign: "right" }}>{eur(r.tfr_mese)}</td>
+                        <td style={{ textAlign: "right", fontWeight: 700 }}>{eur(r.totale_f24)}</td>
+                        <td style={{ textAlign: "right", fontWeight: 700 }}>{eur(r.costo_azienda)}</td>
+                        <td className="dc-muted" style={{ fontSize: 11.5 }}>{r.fonte}</td>
+                      </tr>
+                    ))}
+                    <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4", background: "#eef1ea" }}>
+                      <td>TOTALE ({f24.dipendenti} dipendenti)</td>
+                      <td style={{ textAlign: "right" }}>{eur(f24.totali.lordo)}</td>
+                      <td style={{ textAlign: "right" }}>{eur(f24.totali.netto)}</td>
+                      <td style={{ textAlign: "right" }}>{eur(f24.totali.irpef)}</td>
+                      <td style={{ textAlign: "right" }}>{eur(f24.totali.inps_dipendente)}</td>
+                      <td style={{ textAlign: "right" }}>{eur(f24.totali.inps_azienda)}</td>
+                      <td style={{ textAlign: "right" }}>{eur(f24.totali.tfr_mese)}</td>
+                      <td style={{ textAlign: "right", fontSize: 15 }}>{eur(f24.totali.totale_f24)}</td>
+                      <td style={{ textAlign: "right", fontSize: 15 }}>{eur(f24.totali.costo_azienda)}</td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )
+        )}
       </div>
 
       {pnMsg && (
