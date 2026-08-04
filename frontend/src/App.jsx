@@ -3362,6 +3362,23 @@ function TfrPage({ dipendenti, getDipendente }) {
       setNlEsito({ ...r.data, superminimo_mese: Number(String(form.superminimo || "0").replace(",", ".")) || 0, lordo_settimanale_totale: lordoSett });
     } catch (e) { setNlEsito({ errore: e?.response?.data?.detail || "Errore nel calcolo" }); }
   };
+  // Calcolo inverso: dal NETTO mensile desiderato → lordo settimanale e tutto il resto
+  const [lnForm, setLnForm] = useState({ netto: "", settimane: "52", mesi: "12" });
+  const [lnEsito, setLnEsito] = useState(null);
+  const calcolaLordo = async () => {
+    const netto = Number(String(lnForm.netto).replace(",", "."));
+    if (!netto) return;
+    setLnEsito(null);
+    try {
+      const r = await axios.post(`${API_TFR}/calcolo-lordo-da-netto`, {
+        netto_mensile_desiderato: netto,
+        settimane_lavorate: Number(lnForm.settimane) || 52,
+        mesi_lavorati: Number(lnForm.mesi) || 12,
+      });
+      setLnEsito(r.data);
+    } catch (e) { setLnEsito({ errore: e?.response?.data?.detail || "Errore nel calcolo" }); }
+  };
+
   // Scegli la tariffa CCNL → il resto si calcola da solo (lordo settimanale + superminimo + netto)
   const usaLivelloCcnl = async (liv) => {
     setNlLivello(liv);
@@ -4056,6 +4073,56 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
               </div>
             )}
             {nlEsito?.errore && <div style={{ color: "#d35f4e", fontWeight: 600, marginTop: 10 }}>⚠ {nlEsito.errore}</div>}
+          </div>
+
+          <div className="dc-card" style={{ marginTop: 16 }}>
+            <h3 style={{ marginTop: 0 }}>Calcolo lordo da netto (inverso)</h3>
+            <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
+              Scrivi il NETTO mensile che vuoi dare al dipendente e calcolo io tutto il resto:
+              lordo settimanale e mensile, INPS 9,19%, IRPEF 2026 e costo del periodo.
+              Stesse regole del calcolo qui sopra (niente addizionali né bonus).
+            </p>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Netto €/mese desiderato</label>
+                <input type="number" step="0.01" style={{ ...inp, width: 150 }} value={lnForm.netto}
+                  onChange={e => setLnForm(f => ({ ...f, netto: e.target.value }))}
+                  onKeyDown={e => { if (e.key === "Enter") calcolaLordo(); }} />
+              </div>
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Settimane lavorate</label>
+                <input type="number" step="0.01" style={{ ...inp, width: 120 }} value={lnForm.settimane}
+                  onChange={e => setLnForm(f => ({ ...f, settimane: e.target.value }))} />
+              </div>
+              <div>
+                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>Mesi lavorati</label>
+                <input type="number" step="0.01" style={{ ...inp, width: 110 }} value={lnForm.mesi}
+                  onChange={e => setLnForm(f => ({ ...f, mesi: e.target.value }))} />
+              </div>
+              <button className="dc-btn dc-btn-primary" onClick={calcolaLordo}>Calcola lordo</button>
+            </div>
+            {lnEsito && !lnEsito.errore && (
+              <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginTop: 14 }}>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>Lordo €/settimana</div><div style={{ fontWeight: 700, fontSize: 20, color: "#3f5a4e" }}>€ {eur(lnEsito.importo_settimanale_lordo)}</div></div>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>Lordo mensile medio</div><div style={{ fontWeight: 700, fontSize: 17 }}>€ {eur(lnEsito.lordo_mensile_medio)}</div></div>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>INPS (anno)</div><div style={{ fontWeight: 700, fontSize: 17 }}>€ {eur(lnEsito.contributi_inps)}</div></div>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>IRPEF netta (anno)</div><div style={{ fontWeight: 700, fontSize: 17 }}>€ {eur(lnEsito.irpef_netta)}</div></div>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>Aliquota media</div><div style={{ fontWeight: 700, fontSize: 17 }}>{lnEsito.aliquota_media_effettiva}%</div></div>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>Netto mensile verificato</div><div style={{ fontWeight: 700, fontSize: 17, color: "#3d8168" }}>€ {eur(lnEsito.netto_mensile)}</div></div>
+                <div><div className="dc-muted" style={{ fontSize: 12.5 }}>Lordo del periodo</div><div style={{ fontWeight: 700, fontSize: 17 }}>€ {eur(lnEsito.lordo_periodo)}</div></div>
+                {(() => {
+                  const vicino = [...CCNL_LIVELLI_2026].map(([liv, , , tot]) => ({ liv, tot, diff: Math.abs(tot - lnEsito.lordo_mensile_medio) }))
+                    .sort((a, b) => a.diff - b.diff)[0];
+                  return vicino ? (
+                    <div style={{ flexBasis: "100%" }} className="dc-muted">
+                      Livello CCNL più vicino per lordo mensile: <b>{vicino.liv}</b> (minimo € {eur(vicino.tot)}/mese
+                      {lnEsito.lordo_mensile_medio > vicino.tot ? `, differenza € ${eur(lnEsito.lordo_mensile_medio - vicino.tot)} da coprire come superminimo` : ""}).
+                    </div>
+                  ) : null;
+                })()}
+              </div>
+            )}
+            {lnEsito?.errore && <div style={{ color: "#d35f4e", fontWeight: 600, marginTop: 10 }}>⚠ {lnEsito.errore}</div>}
           </div>
         </>
       )}

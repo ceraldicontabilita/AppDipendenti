@@ -2363,8 +2363,15 @@ async def calcolo_netto_da_lordo(input_data: CalcoloNettoInput) -> Dict[str, Any
     if input_data.mesi_lavorati <= 0:
         raise HTTPException(status_code=400, detail="I mesi lavorati devono essere positivi")
 
-    lordo_periodo = input_data.importo_settimanale_lordo * input_data.settimane_lavorate
-    lordo_mensile_medio = lordo_periodo / input_data.mesi_lavorati
+    return _conti_netto_da_lordo(input_data.importo_settimanale_lordo,
+                                 input_data.settimane_lavorate, input_data.mesi_lavorati)
+
+
+def _conti_netto_da_lordo(importo_settimanale: float, settimane: float, mesi: float) -> Dict[str, Any]:
+    """Motore unico lordo→netto (INPS 9,19% + IRPEF 2026 + detrazione lavoro
+    dipendente), usato sia dal calcolo diretto sia da quello inverso."""
+    lordo_periodo = importo_settimanale * settimane
+    lordo_mensile_medio = lordo_periodo / mesi
     ral_equivalente = lordo_mensile_medio * 12
 
     contributi_inps = ral_equivalente * _ALIQUOTA_INPS_DIPENDENTE
@@ -2373,7 +2380,6 @@ async def calcolo_netto_da_lordo(input_data: CalcoloNettoInput) -> Dict[str, Any
     detrazione = _detrazione_lavoro_dipendente_2026(imponibile_fiscale)
     irpef_netta = max(0.0, irpef_lorda - detrazione)
 
-    netto_annuo_equivalente = ral_equivalente - contributi_inps - irpef_netta
     aliquota_media_effettiva = (contributi_inps + irpef_netta) / ral_equivalente if ral_equivalente else 0.0
     netto_mensile = lordo_mensile_medio * (1 - aliquota_media_effettiva)
 
@@ -2388,6 +2394,44 @@ async def calcolo_netto_da_lordo(input_data: CalcoloNettoInput) -> Dict[str, Any
         "irpef_netta": round(irpef_netta, 2),
         "aliquota_media_effettiva": round(aliquota_media_effettiva * 100, 2),
         "netto_mensile": round(netto_mensile, 2),
-        "netto_periodo": round(netto_mensile * input_data.mesi_lavorati, 2),
+        "netto_periodo": round(netto_mensile * mesi, 2),
     }
+
+
+class CalcoloLordoInput(BaseModel):
+    netto_mensile_desiderato: float
+    settimane_lavorate: float = 52
+    mesi_lavorati: float = 12
+
+
+@router.post("/calcolo-lordo-da-netto")
+@handle_errors
+async def calcolo_lordo_da_netto(input_data: CalcoloLordoInput) -> Dict[str, Any]:
+    """Inverso del calcolo lordo→netto: dal NETTO mensile che si vuole dare trova
+    per bisezione l'importo settimanale lordo che lo produce (stesse regole:
+    INPS 9,19% + IRPEF 2026 a scaglioni + detrazione lavoro dipendente)."""
+    target = input_data.netto_mensile_desiderato
+    settimane = input_data.settimane_lavorate
+    mesi = input_data.mesi_lavorati
+    if target <= 0:
+        raise HTTPException(status_code=400, detail="Il netto mensile deve essere positivo")
+    if settimane <= 0 or mesi <= 0:
+        raise HTTPException(status_code=400, detail="Settimane e mesi devono essere positivi")
+
+    lo, hi = 0.01, 2000.0
+    while _conti_netto_da_lordo(hi, settimane, mesi)["netto_mensile"] < target:
+        hi *= 2
+        if hi > 1_000_000:
+            raise HTTPException(status_code=400, detail="Netto richiesto fuori scala")
+    for _ in range(80):
+        mid = (lo + hi) / 2
+        if _conti_netto_da_lordo(mid, settimane, mesi)["netto_mensile"] < target:
+            lo = mid
+        else:
+            hi = mid
+    lordo_settimanale = round(hi, 2)
+    esito = _conti_netto_da_lordo(lordo_settimanale, settimane, mesi)
+    return {**esito,
+            "importo_settimanale_lordo": lordo_settimanale,
+            "netto_mensile_richiesto": round(target, 2)}
 
