@@ -1691,7 +1691,16 @@ async def import_cedolini_da_drive(body: Dict[str, Any] = Body(default={})) -> D
     try:
         creds = json.loads(creds_raw)
     except ValueError:
-        raise HTTPException(status_code=503, detail="GOOGLE_SERVICE_ACCOUNT_JSON non è un JSON valido")
+        # Tollera il formato "export .env": a capo scritti come \n letterali e
+        # virgolette con la barra (\"), come nel dump del GestionaleCloud.
+        try:
+            riparato = (creds_raw.strip().strip('"').strip("'")
+                        .replace("\\\\n", "\x00").replace("\\n", "\n")
+                        .replace("\x00", "\\n").replace('\\"', '"'))
+            creds = json.loads(riparato)
+        except ValueError:
+            raise HTTPException(status_code=503,
+                                detail="La chiave del service account non è un JSON valido: ricopiala intera dal pannello")
 
     from jose import jwt as jose_jwt
     now = int(time.time())
