@@ -1701,6 +1701,16 @@ async def import_cedolini_da_drive(body: Dict[str, Any] = Body(default={})) -> D
         except ValueError:
             raise HTTPException(status_code=503,
                                 detail="La chiave del service account non è un JSON valido: ricopiala intera dal pannello")
+    if isinstance(creds, str):
+        # incollata con le virgolette esterne: il primo parse dà una stringa → riparse
+        try:
+            creds = json.loads(creds)
+        except ValueError:
+            raise HTTPException(status_code=503,
+                                detail="La chiave del service account non è un JSON valido: togli le virgolette esterne")
+    if not isinstance(creds, dict) or not creds.get("client_email") or not creds.get("private_key"):
+        raise HTTPException(status_code=503,
+                            detail="La chiave del service account è incompleta (mancano client_email/private_key)")
 
     from jose import jwt as jose_jwt
     now = int(time.time())
