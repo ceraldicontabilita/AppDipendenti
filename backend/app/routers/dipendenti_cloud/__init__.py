@@ -2098,9 +2098,12 @@ async def riscansiona_cedolini(anno: Optional[int] = None, dipendente_id: Option
 @router.post("/paghe/importa-prima-nota")
 async def importa_prima_nota(file: UploadFile = File(...)):
     """Importa la 'Prima Nota Salari' (Excel: Dipendente, Mese, Anno, Stipendio Netto,
-    Importo Erogato). Per ogni dipendente/mese/anno SOMMA gli Importi Erogati (più bonifici
-    nello stesso mese) e li scrive in paghe_mensili.bonifico_importo. Riempie l'importo
-    busta se mancante. Confronta col dato già in app e segnala differenze e nomi non trovati."""
+    Importo Erogato) oppure il tracciato 'PAGAMENTI' (Banca, Data contabile, Mese cedolino,
+    Anno, Uscita, Entrata, NOME DIPENDENTE, Numero operazione — mese numerico, 13=tredicesima
+    e 14=quattordicesima). Per ogni dipendente/mese/anno SOMMA gli Importi Erogati (più
+    bonifici nello stesso mese) e li scrive in paghe_mensili.bonifico_importo. Riempie
+    l'importo busta se mancante. Confronta col dato già in app e segnala differenze e
+    nomi non trovati."""
     import io
     import openpyxl
     raw = await file.read()
@@ -2121,17 +2124,31 @@ async def importa_prima_nota(file: UploadFile = File(...)):
             if h in names:
                 return i
         return None
-    ci_dip, ci_mese, ci_anno = col("dipendente"), col("mese"), col("anno")
+    ci_dip = col("dipendente", "nome dipendente")
+    ci_mese = col("mese", "mese cedolino")
+    ci_anno = col("anno")
     ci_netto = col("stipendio netto", "netto", "importo busta")
-    ci_erog = col("importo erogato", "erogato", "bonifico")
+    ci_erog = col("importo erogato", "erogato", "bonifico", "uscita")
     if None in (ci_dip, ci_mese, ci_anno, ci_erog):
-        raise HTTPException(400, "Colonne attese: Dipendente, Mese, Anno, Stipendio Netto, Importo Erogato")
+        raise HTTPException(400, "Colonne attese: Dipendente, Mese, Anno, Importo Erogato "
+                                 "(oppure tracciato PAGAMENTI: NOME DIPENDENTE, Mese cedolino, Anno, Uscita)")
 
     MESI = {"gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
-            "luglio": 7, "agosto": 8, "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12}
+            "luglio": 7, "agosto": 8, "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12,
+            "tredicesima": 13, "quattordicesima": 14}
 
     def norm(s):
         return re.sub(r"\s+", " ", str(s or "").strip()).lower()
+
+    def parse_mese(v):
+        vn = norm(v)
+        if vn in MESI:
+            return MESI[vn]
+        try:
+            m = int(float(vn))
+            return m if 1 <= m <= 14 else None  # 13 = tredicesima, 14 = quattordicesima
+        except (TypeError, ValueError):
+            return None
 
     def fnum(v):
         try:
@@ -2143,9 +2160,9 @@ async def importa_prima_nota(file: UploadFile = File(...)):
     for r in rows[1:]:
         if ci_dip >= len(r) or not r[ci_dip]:
             continue
-        mese = MESI.get(norm(r[ci_mese]))
+        mese = parse_mese(r[ci_mese])
         try:
-            anno = int(r[ci_anno])
+            anno = int(float(r[ci_anno]))
         except (TypeError, ValueError):
             anno = None
         if not mese or not anno:
