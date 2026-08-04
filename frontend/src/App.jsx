@@ -3932,6 +3932,54 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
               (settimane × importo ÷ mesi), toglie INPS 9,19% e IRPEF a scaglioni 2026 (con detrazione lavoro
               dipendente) e restituisce il netto da ricevere. Non include addizionali regionali/comunali né bonus.
             </p>
+            <details style={{ marginBottom: 12 }}>
+              <summary style={{ cursor: "pointer", fontWeight: 700, fontSize: 14 }}>
+                📊 Tabelle CCNL Turismo — Pubblici Esercizi (minimi dal 1/6/2026)
+              </summary>
+              <p className="dc-muted" style={{ fontSize: 12.5, margin: "8px 0" }}>
+                Minimi tabellari del CCNL Pubblici Esercizi, Ristorazione e Turismo (Confcommercio-FIPE,
+                rinnovo 5/6/2024 — terza tranche dal 1° giugno 2026; fonte: Confcommercio Milano).
+                "Usa" compila il lordo settimanale (mensile × 12 ÷ 52) nel calcolo qui sotto.
+                Da ricontrollare a ogni rinnovo contrattuale.
+              </p>
+              <div className="dc-scroll-x">
+                <table className="dc-table" style={{ fontSize: 13 }}>
+                  <thead><tr><th>Livello</th><th style={{ textAlign: "right" }}>Paga base €</th><th style={{ textAlign: "right" }}>Contingenza €</th><th style={{ textAlign: "right" }}>Totale mensile €</th><th style={{ textAlign: "right" }}>≈ €/settimana</th><th></th></tr></thead>
+                  <tbody>
+                    {[
+                      ["Quadro A", 1920.26, 542.70, 2462.96],
+                      ["Quadro B", 1734.02, 537.59, 2271.61],
+                      ["1º", 1570.97, 536.71, 2107.68],
+                      ["2º", 1384.76, 531.59, 1916.35],
+                      ["3º", 1272.47, 528.26, 1800.73],
+                      ["4º", 1167.75, 524.94, 1692.69],
+                      ["5º", 1057.72, 522.37, 1580.09],
+                      ["6º S", 994.19, 520.64, 1514.83],
+                      ["6º", 971.06, 520.51, 1491.57],
+                      ["7º", 871.75, 518.45, 1390.20],
+                    ].map(([liv, base, cont, tot]) => {
+                      const sett = Math.round((tot * 12 / 52) * 100) / 100;
+                      return (
+                        <tr key={liv}>
+                          <td style={{ fontWeight: 700 }}>{liv}</td>
+                          <td style={{ textAlign: "right" }}>{eur(base)}</td>
+                          <td style={{ textAlign: "right" }}>{eur(cont)}</td>
+                          <td style={{ textAlign: "right", fontWeight: 700 }}>{eur(tot)}</td>
+                          <td style={{ textAlign: "right" }}>{eur(sett)}</td>
+                          <td style={{ textAlign: "right" }}>
+                            <button className="dc-btn" style={{ padding: "3px 10px", fontSize: 12 }}
+                              title={`Compila il calcolo con il lordo del livello ${liv}`}
+                              onClick={() => { setNlForm(f => ({ ...f, importo: String(sett) })); setNlEsito(null); }}>
+                              Usa
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </details>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
               <div>
                 <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>€/settimana (lordo)</label>
