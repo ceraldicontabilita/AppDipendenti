@@ -34,3 +34,6 @@ services:
         value: sandbox
       - key: CONVERTAPI_TOKEN       # ConvertAPI: conversione docx→PDF per la firma (token/Secret) — SOLO qui
         sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON  # chiave JSON del service account Drive
+        sync: false                       # (gestionale@ceraldi-gestionale.iam.gserviceaccount.com)
+                                          # copiala dal servizio impresasemplice/GestionaleCloud — SOLO qui
