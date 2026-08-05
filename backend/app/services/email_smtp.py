@@ -1,20 +1,32 @@
-"""Invio email via SMTP — punto unico di risoluzione delle credenziali.
+"""Invio email — punto unico di risoluzione delle credenziali.
 
 Un solo sistema per tutte le email dell'app (presenze al commercialista,
-notifiche richieste dal portale...): niente logica SMTP duplicata in più router.
+notifiche richieste dal portale...): niente logica di invio duplicata in più router.
 
-Ordine di risoluzione (nessuna nuova variabile da chiedere se è già configurato
-l'account Gmail amministrativo, come nel GestionaleCloud):
-  1. SMTP_HOST/SMTP_PORT + SMTP_EMAIL|SMTP_USER + SMTP_PASSWORD
-  2. PEC_HOST/PEC_PORT + PEC_USER + PEC_PASSWORD
-  3. GMAIL_APP_PASSWORD (+ ADMIN_EMAIL o GMAIL_ACCOUNT_AMMINISTRATIVO) → smtp.gmail.com:465
+Ordine di risoluzione:
+  1. GMAIL_RELAY_URL + GMAIL_RELAY_SECRET → relay HTTPS (Apps Script), non richiede
+     App Password ed evita i blocchi SMTP di Google/Render.
+  2. SMTP_HOST/SMTP_PORT + SMTP_EMAIL|SMTP_USER + SMTP_PASSWORD
+  3. PEC_HOST/PEC_PORT + PEC_USER + PEC_PASSWORD
+  4. GMAIL_APP_PASSWORD (+ ADMIN_EMAIL o GMAIL_ACCOUNT_AMMINISTRATIVO) → smtp.gmail.com:465
 Credenziali SOLO nelle env di Render, mai nel codice/chat.
 """
+import base64
 import os
 import smtplib
 import ssl
 from email.message import EmailMessage
 from typing import Optional, Sequence, Tuple
+
+import httpx
+
+
+def _credenziali_relay() -> Optional[dict]:
+    url = os.getenv("GMAIL_RELAY_URL")
+    secret = os.getenv("GMAIL_RELAY_SECRET")
+    if not (url and secret):
+        return None
+    return {"url": url, "secret": secret}
 
 
 def credenziali_smtp() -> Optional[dict]:
@@ -35,14 +47,32 @@ def credenziali_smtp() -> Optional[dict]:
     return {"host": host, "port": int(port_str or 465), "user": user, "password": pwd}
 
 
-def invia_email(destinatario: str, oggetto: str, corpo: str,
-                allegati: Optional[Sequence[Tuple[bytes, str, str, str]]] = None) -> None:
-    """Invio SINCRONO (bloccante): chiamare da un thread (asyncio.to_thread) se
-    usato da codice async. allegati: lista di (bytes, maintype, subtype, filename)."""
-    cred = credenziali_smtp()
-    if not cred:
-        raise RuntimeError("Email non configurata su Render (mancano SMTP_HOST/PEC_HOST oppure "
-                           "GMAIL_APP_PASSWORD + ADMIN_EMAIL)")
+def _invia_via_relay(cred: dict, destinatario: str, oggetto: str, corpo: str,
+                     allegati: Optional[Sequence[Tuple[bytes, str, str, str]]] = None) -> None:
+    payload = {
+        "secret": cred["secret"],
+        "to": destinatario,
+        "subject": oggetto,
+        "body": corpo,
+    }
+    if allegati:
+        payload["attachments"] = [
+            {
+                "filename": filename,
+                "mimeType": f"{maintype}/{subtype}",
+                "content": base64.b64encode(dati).decode("ascii"),
+            }
+            for dati, maintype, subtype, filename in allegati
+        ]
+    resp = httpx.post(cred["url"], json=payload, timeout=30)
+    resp.raise_for_status()
+    corpo_risposta = resp.text or ""
+    if '"ok":true' not in corpo_risposta.replace(" ", ""):
+        raise RuntimeError(f"Relay email ha risposto senza conferma: {corpo_risposta[:300]}")
+
+
+def _invia_via_smtp(cred: dict, destinatario: str, oggetto: str, corpo: str,
+                    allegati: Optional[Sequence[Tuple[bytes, str, str, str]]] = None) -> None:
     msg = EmailMessage()
     msg["From"] = cred["user"]
     msg["To"] = destinatario
@@ -59,3 +89,18 @@ def invia_email(destinatario: str, oggetto: str, corpo: str,
             s.starttls(context=ssl.create_default_context())
             s.login(cred["user"], cred["password"])
             s.send_message(msg)
+
+
+def invia_email(destinatario: str, oggetto: str, corpo: str,
+                allegati: Optional[Sequence[Tuple[bytes, str, str, str]]] = None) -> None:
+    """Invio SINCRONO (bloccante): chiamare da un thread (asyncio.to_thread) se
+    usato da codice async. allegati: lista di (bytes, maintype, subtype, filename)."""
+    relay = _credenziali_relay()
+    if relay:
+        _invia_via_relay(relay, destinatario, oggetto, corpo, allegati)
+        return
+    cred = credenziali_smtp()
+    if not cred:
+        raise RuntimeError("Email non configurata su Render (mancano GMAIL_RELAY_URL/SECRET, "
+                           "SMTP_HOST/PEC_HOST oppure GMAIL_APP_PASSWORD + ADMIN_EMAIL)")
+    _invia_via_smtp(cred, destinatario, oggetto, corpo, allegati)
