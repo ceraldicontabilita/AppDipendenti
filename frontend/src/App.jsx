@@ -1346,6 +1346,15 @@ function PresenzePage({ dipendenti, reload }) {
             ))}
           </tbody>
         </table>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", marginTop: 12, paddingTop: 10, borderTop: "1px solid #e6e0d4" }}>
+          <span className="dc-muted" style={{ fontSize: 12, fontWeight: 700 }}>Legenda:</span>
+          {tipiGiustificativo.map(t => (
+            <span key={t.code} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12 }}>
+              <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 20, height: 18, borderRadius: 4, background: t.color, color: "#fff", fontWeight: 700, fontSize: 10.5 }}>{t.code}</span>
+              <span className="dc-muted">{t.label}</span>
+            </span>
+          ))}
+        </div>
       </div>
 
       {/* Malattie del mese */}
