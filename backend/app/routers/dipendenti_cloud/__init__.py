@@ -13,10 +13,13 @@ import zipfile
 import hashlib
 import base64
 import tempfile
+import logging
 from datetime import datetime, timezone, timedelta, date
 from decimal import Decimal, InvalidOperation
 
 from backend.app.database import Database
+
+logger = logging.getLogger(__name__)
 
 # Router principale
 router = APIRouter(prefix="/dipendenti-cloud", tags=["Dipendenti Cloud"])
@@ -1658,6 +1661,25 @@ def _pdf_riepilogo_periodi(anno, mese, giorni, righe):
     return pdf.tobytes()
 
 
+@router.post("/presenze/riepilogo-dati")
+async def presenze_riepilogo_dati(data: dict = Body(...)):
+    """Stessi dati dell'Opzione C (riepilogo totali + periodi) ma in JSON, per
+    l'anteprima diretta in pagina — senza dover scaricare il PDF."""
+    righe = data.get("righe") or []
+    out_righe, out_periodi = [], []
+    totali = {"lav": 0, "ferie": 0, "perm": 0, "malat": 0, "rol": 0, "riposi": 0, "altro": 0, "tot": 0}
+    for r in righe:
+        celle = r.get("celle") or []
+        rp = _riepilogo_da_celle(celle)
+        out_righe.append({"nome": r.get("nome", ""), **rp})
+        for k in totali:
+            totali[k] += rp[k]
+        eventi = _periodi_da_celle(celle, r.get("note") or [])
+        if eventi:
+            out_periodi.append({"nome": r.get("nome", ""), "eventi": eventi})
+    return {"righe": out_righe, "totali": totali, "periodi": out_periodi}
+
+
 @router.post("/presenze/pdf-riepilogo")
 async def presenze_pdf_riepilogo(data: dict = Body(...)):
     """Opzione C: documento 'per il commercialista' — riepilogo totali +
@@ -1753,7 +1775,11 @@ async def invia_presenze_commercialista(data: dict = Body(...)):
             f"Messaggio generato automaticamente dal gestionale Ceraldi Group.",
             allegati)
     except Exception as e:
-        raise HTTPException(502, f"Invio email fallito: {e}")
+        # Log con traceback completo: l'errore esatto (auth Gmail, porta SMTP
+        # bloccata dall'hosting, timeout...) va nei log di Render, il messaggio
+        # corto va all'utente.
+        logger.exception("Invio presenze al commercialista fallito")
+        raise HTTPException(502, f"Invio email fallito: {type(e).__name__}: {e}")
 
     # Salva lo storico dell'invio (a chi, quando)
     rec = {"id": generate_id(), "anno": anno, "mese": mese, "periodo": periodo,

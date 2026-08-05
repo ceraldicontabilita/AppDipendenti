@@ -1103,6 +1103,18 @@ function PresenzePage({ dipendenti, reload }) {
       toast("Riepilogo per il commercialista scaricato");
     } catch (e) { toast("Errore generazione riepilogo", "err"); }
   };
+  // Anteprima Opzione C direttamente in pagina (stessi dati del PDF, senza scaricare nulla)
+  const [previewC, setPreviewC] = useState(null);
+  const [previewCBusy, setPreviewCBusy] = useState(false);
+  const toggleAnteprimaC = async () => {
+    if (previewC) { setPreviewC(null); return; }
+    setPreviewCBusy(true);
+    try {
+      const r = await axios.post(`${API}/presenze/riepilogo-dati`, { anno, mese, ...buildRighe() });
+      setPreviewC(r.data);
+    } catch (e) { toast("Errore nel calcolo del riepilogo", "err"); }
+    finally { setPreviewCBusy(false); }
+  };
   const COLST = { P: "#3d8168", AS: "#d35f4e", F: "#5b7a6b", PE: "#7d5526", M: "#f59e0b", R: "#8a9a5b", RS: "#9ca3af", CH: "#6b7280", FNL: "#a6724a", X: "#374151" };
   const stampaPresenze = () => {
     const { giorni, righe } = buildRighe();
@@ -1267,6 +1279,9 @@ function PresenzePage({ dipendenti, reload }) {
         <button onClick={stampaPresenze} className="dc-btn" title="Stampa su una sola pagina (o salva come PDF dalla finestra di stampa)">
           🖨 Stampa
         </button>
+        <button onClick={toggleAnteprimaC} disabled={previewCBusy} className="dc-btn" title="Vedi qui il riepilogo per il commercialista, senza scaricare nulla">
+          👁 {previewC ? "Nascondi" : "Vedi"} Opzione C
+        </button>
         <button onClick={scaricaRiepilogoCommercialista} className="dc-btn" title="Documento leggero per il commercialista: riepilogo totali per dipendente + dettaglio dei periodi di assenza con le date (niente griglia giorno-per-giorno)">
           📄 Riepilogo per commercialista
         </button>
@@ -1274,6 +1289,65 @@ function PresenzePage({ dipendenti, reload }) {
           <Send size={16} /> Invia
         </button>
       </div>
+
+      {previewC && (
+        <div className="dc-card" style={{ marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+            <h3 style={{ margin: 0 }}>Opzione C — riepilogo per il commercialista ({mesi[mese - 1]} {anno})</h3>
+            <span className="dc-muted" style={{ fontSize: 12 }}>Stessi dati del PDF/dell'invio — anteprima, non scarica nulla</span>
+          </div>
+          <div className="dc-scroll-x" style={{ marginTop: 12 }}>
+            <table className="dc-table" style={{ fontSize: 13 }}>
+              <thead><tr>
+                <th>Dipendente</th><th style={{ textAlign: "right" }}>Lav.</th><th style={{ textAlign: "right" }}>Ferie</th>
+                <th style={{ textAlign: "right" }}>Perm.</th><th style={{ textAlign: "right" }}>Malat.</th>
+                <th style={{ textAlign: "right" }}>ROL</th><th style={{ textAlign: "right" }}>Riposi</th>
+                <th style={{ textAlign: "right" }}>Altro</th><th style={{ textAlign: "right" }}>Tot.</th>
+              </tr></thead>
+              <tbody>
+                {previewC.righe.map(r => (
+                  <tr key={r.nome}>
+                    <td style={{ fontWeight: 600 }}>{r.nome}</td>
+                    <td style={{ textAlign: "right" }}>{r.lav}</td><td style={{ textAlign: "right" }}>{r.ferie}</td>
+                    <td style={{ textAlign: "right" }}>{r.perm}</td><td style={{ textAlign: "right" }}>{r.malat}</td>
+                    <td style={{ textAlign: "right" }}>{r.rol}</td><td style={{ textAlign: "right" }}>{r.riposi}</td>
+                    <td style={{ textAlign: "right" }}>{r.altro}</td><td style={{ textAlign: "right", fontWeight: 700 }}>{r.tot}</td>
+                  </tr>
+                ))}
+                <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4", background: "#eef1ea" }}>
+                  <td>Totale azienda</td>
+                  <td style={{ textAlign: "right" }}>{previewC.totali.lav}</td><td style={{ textAlign: "right" }}>{previewC.totali.ferie}</td>
+                  <td style={{ textAlign: "right" }}>{previewC.totali.perm}</td><td style={{ textAlign: "right" }}>{previewC.totali.malat}</td>
+                  <td style={{ textAlign: "right" }}>{previewC.totali.rol}</td><td style={{ textAlign: "right" }}>{previewC.totali.riposi}</td>
+                  <td style={{ textAlign: "right" }}>{previewC.totali.altro}</td><td style={{ textAlign: "right" }}>{previewC.totali.tot}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <h4 style={{ marginTop: 18, marginBottom: 4 }}>Dettaglio dei periodi</h4>
+          <p className="dc-muted" style={{ fontSize: 12, marginTop: 0 }}>Il riposo settimanale non compare: è regolare e non richiede annotazione.</p>
+          {previewC.periodi.length === 0 ? (
+            <p className="dc-muted">Nessuna assenza da segnalare questo mese.</p>
+          ) : previewC.periodi.map(p => (
+            <div key={p.nome} style={{ marginBottom: 10 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>{p.nome}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {p.eventi.map((e, i) => {
+                  const tipo = tipiGiustificativo.find(t => t.code === e.tipo);
+                  const periodo = e.dal === e.al ? `${String(e.dal).padStart(2, "0")}` : `${String(e.dal).padStart(2, "0")}-${String(e.al).padStart(2, "0")}`;
+                  return (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, padding: "5px 9px", borderRadius: 8, background: "#f6f3ea" }}>
+                      <span style={{ width: 8, height: 8, borderRadius: "50%", background: tipo?.color || "#999", flex: "none" }} />
+                      <b>{e.label}:</b> {periodo}/{String(mese).padStart(2, "0")} ({e.giorni} gg)
+                      {e.nota && <span className="dc-muted" style={{ marginLeft: "auto" }}>{e.nota}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Barra pennello */}
       <div className="dc-card" style={{ marginBottom: 12, padding: 12 }}>
