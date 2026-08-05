@@ -3,15 +3,14 @@
 Un solo sistema per tutte le email dell'app (presenze al commercialista,
 notifiche richieste dal portale...): niente logica di invio duplicata in più router.
 
-Ordine di risoluzione:
-  1. GMAIL_RELAY_URL + GMAIL_RELAY_SECRET → relay HTTPS (Apps Script), non richiede
-     App Password ed evita i blocchi SMTP di Google/Render.
-  2. SMTP_HOST/SMTP_PORT + SMTP_EMAIL|SMTP_USER + SMTP_PASSWORD
-  3. PEC_HOST/PEC_PORT + PEC_USER + PEC_PASSWORD
-  4. GMAIL_APP_PASSWORD (+ ADMIN_EMAIL o GMAIL_ACCOUNT_AMMINISTRATIVO) → smtp.gmail.com:465
+Il relay Apps Script (GMAIL_RELAY_URL/SECRET) NON supporta allegati (risponde
+sempre "ok" anche ignorandoli, verificato) — va bene solo per email senza
+allegato. Quando c'è un allegato serve SMTP:
+  1. SMTP_HOST/SMTP_PORT + SMTP_EMAIL|SMTP_USER + SMTP_PASSWORD
+  2. PEC_HOST/PEC_PORT + PEC_USER + PEC_PASSWORD
+  3. GMAIL_APP_PASSWORD (+ ADMIN_EMAIL o GMAIL_ACCOUNT_AMMINISTRATIVO) → smtp.gmail.com:465
 Credenziali SOLO nelle env di Render, mai nel codice/chat.
 """
-import base64
 import os
 import smtplib
 import ssl
@@ -47,23 +46,13 @@ def credenziali_smtp() -> Optional[dict]:
     return {"host": host, "port": int(port_str or 465), "user": user, "password": pwd}
 
 
-def _invia_via_relay(cred: dict, destinatario: str, oggetto: str, corpo: str,
-                     allegati: Optional[Sequence[Tuple[bytes, str, str, str]]] = None) -> None:
+def _invia_via_relay(cred: dict, destinatario: str, oggetto: str, corpo: str) -> None:
     payload = {
         "secret": cred["secret"],
         "to": destinatario,
         "subject": oggetto,
         "body": corpo,
     }
-    if allegati:
-        payload["attachments"] = [
-            {
-                "filename": filename,
-                "mimeType": f"{maintype}/{subtype}",
-                "content": base64.b64encode(dati).decode("ascii"),
-            }
-            for dati, maintype, subtype, filename in allegati
-        ]
     resp = httpx.post(cred["url"], json=payload, timeout=30, follow_redirects=True)
     resp.raise_for_status()
     corpo_risposta = resp.text or ""
@@ -94,13 +83,22 @@ def _invia_via_smtp(cred: dict, destinatario: str, oggetto: str, corpo: str,
 def invia_email(destinatario: str, oggetto: str, corpo: str,
                 allegati: Optional[Sequence[Tuple[bytes, str, str, str]]] = None) -> None:
     """Invio SINCRONO (bloccante): chiamare da un thread (asyncio.to_thread) se
-    usato da codice async. allegati: lista di (bytes, maintype, subtype, filename)."""
+    usato da codice async. allegati: lista di (bytes, maintype, subtype, filename).
+    Con allegati serve per forza SMTP (il relay li ignora silenziosamente)."""
+    if allegati:
+        cred = credenziali_smtp()
+        if not cred:
+            raise RuntimeError("Email con allegato non configurata su Render: il relay "
+                               "(GMAIL_RELAY_URL/SECRET) non supporta gli allegati, serve "
+                               "SMTP_HOST/PEC_HOST oppure GMAIL_APP_PASSWORD + ADMIN_EMAIL")
+        _invia_via_smtp(cred, destinatario, oggetto, corpo, allegati)
+        return
     relay = _credenziali_relay()
     if relay:
-        _invia_via_relay(relay, destinatario, oggetto, corpo, allegati)
+        _invia_via_relay(relay, destinatario, oggetto, corpo)
         return
     cred = credenziali_smtp()
     if not cred:
         raise RuntimeError("Email non configurata su Render (mancano GMAIL_RELAY_URL/SECRET, "
                            "SMTP_HOST/PEC_HOST oppure GMAIL_APP_PASSWORD + ADMIN_EMAIL)")
-    _invia_via_smtp(cred, destinatario, oggetto, corpo, allegati)
+    _invia_via_smtp(cred, destinatario, oggetto, corpo)
