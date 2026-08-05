@@ -11,11 +11,8 @@ un blocco di indisponibilità per il generatore turni (collegamento ferie→turn
 """
 import logging
 import os
-import ssl
-import smtplib
 import asyncio
 import uuid
-from email.message import EmailMessage
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, HTTPException, Body, Query, Depends
@@ -58,34 +55,27 @@ LABEL = {
 
 
 def _invia_email_richiesta(nome: str, label: str, doc: Dict[str, Any]) -> None:
-    """Avvisa l'azienda via email di una nuova richiesta. Credenziali da env Render."""
-    host = os.getenv("SMTP_HOST", "smtp.gmail.com")
-    port = int(os.getenv("SMTP_PORT", "465"))
-    user = os.getenv("SMTP_EMAIL") or os.getenv("SMTP_USER")
-    pwd = os.getenv("SMTP_PASSWORD")
-    dest = os.getenv("REQUEST_NOTIFY_EMAIL") or user
-    if not (user and pwd and dest):
-        logger.warning("Email richiesta non inviata: SMTP non configurato")
+    """Avvisa l'azienda via email di una nuova richiesta. Credenziali da
+    services/email_smtp.py (punto unico: SMTP_*/PEC_*/GMAIL_APP_PASSWORD)."""
+    from backend.app.services.email_smtp import credenziali_smtp, invia_email
+    cred = credenziali_smtp()
+    dest = os.getenv("REQUEST_NOTIFY_EMAIL") or (cred["user"] if cred else None)
+    if not (cred and dest):
+        logger.warning("Email richiesta non inviata: email non configurata su Render")
         return
     dati = doc.get("dati") or {}
     righe = "\n".join(f"  {k}: {v}" for k, v in dati.items()) if dati else ""
-    msg = EmailMessage()
-    msg["From"] = user
-    msg["To"] = dest
-    msg["Subject"] = f"Nuova richiesta dal portale: {label} — {nome}"
-    msg.set_content(
+    corpo = (
         f"Il dipendente {nome} ha inviato una richiesta dal Portale Dipendenti.\n\n"
         f"Tipo: {label}\n"
         f"Dettaglio: {doc.get('dettaglio') or '-'}\n"
         f"{righe}\n\n"
         f"Data: {doc.get('creato_il')}\n\n"
         f"Accedi alla gestione per approvarla o rifiutarla.")
-    if port == 465:
-        with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context()) as s:
-            s.login(user, pwd); s.send_message(msg)
-    else:
-        with smtplib.SMTP(host, port) as s:
-            s.starttls(context=ssl.create_default_context()); s.login(user, pwd); s.send_message(msg)
+    try:
+        invia_email(dest, f"Nuova richiesta dal portale: {label} — {nome}", corpo)
+    except Exception as e:
+        logger.warning(f"Email richiesta non inviata: {e}")
 
 
 def _now() -> str:

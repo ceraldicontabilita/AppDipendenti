@@ -1709,12 +1709,11 @@ async def lista_invii_presenze(anno: Optional[int] = None, mese: Optional[int] =
 
 @router.post("/presenze/invia-commercialista")
 async def invia_presenze_commercialista(data: dict = Body(...)):
-    """Invia via email al commercialista il foglio presenze del mese (allegati PDF una
-    pagina + CSV). Salva lo storico dell'invio (destinatario + data). Destinatario dal
-    body o dalla env COMMERCIALISTA_EMAIL. SMTP dalle env di Render (SMTP_* o PEC_*)."""
-    import smtplib
-    import ssl
-    from email.message import EmailMessage
+    """Invia via email al commercialista il foglio presenze del mese (allegati PDF
+    riepilogo+periodi + CSV). Salva lo storico dell'invio (destinatario + data).
+    Destinatario dal body o dalla env COMMERCIALISTA_EMAIL. Credenziali email da
+    services/email_smtp.py (SMTP_*/PEC_*/GMAIL_APP_PASSWORD — punto unico)."""
+    from backend.app.services.email_smtp import credenziali_smtp, invia_email
     anno = int(data.get("anno") or datetime.now().year)
     mese = int(data.get("mese") or datetime.now().month)
     giorni = int(data.get("giorni") or 31)
@@ -1725,13 +1724,9 @@ async def invia_presenze_commercialista(data: dict = Body(...)):
     dest = (data.get("destinatario") or os.getenv("COMMERCIALISTA_EMAIL") or "").strip()
     if not dest:
         raise HTTPException(400, "Manca l'email del commercialista (impostala o inseriscila).")
-
-    host = os.getenv("SMTP_HOST") or os.getenv("PEC_HOST")
-    port = int(os.getenv("SMTP_PORT") or os.getenv("PEC_PORT") or 465)
-    user = os.getenv("SMTP_EMAIL") or os.getenv("SMTP_USER") or os.getenv("PEC_USER")
-    pwd = os.getenv("SMTP_PASSWORD") or os.getenv("PEC_PASSWORD")
-    if not (host and user and pwd):
-        raise HTTPException(400, "SMTP non configurato su Render (SMTP_HOST, SMTP_EMAIL/SMTP_USER, SMTP_PASSWORD).")
+    if not credenziali_smtp():
+        raise HTTPException(400, "Email non configurata su Render (manca SMTP_HOST/PEC_HOST oppure "
+                                 "GMAIL_APP_PASSWORD + ADMIN_EMAIL).")
 
     periodo = f"{_MESI_PRES[mese - 1]} {anno}"
     base = f"presenze_{anno}_{str(mese).zfill(2)}"
@@ -1744,30 +1739,19 @@ async def invia_presenze_commercialista(data: dict = Body(...)):
         except Exception:
             pdf_bytes = None
 
-    def _send():
-        msg = EmailMessage()
-        msg["From"] = user
-        msg["To"] = dest
-        msg["Subject"] = f"Presenze {periodo} — Ceraldi Group S.r.l."
-        msg.set_content(f"In allegato il foglio presenze di {periodo} (PDF + CSV).\n\n"
-                        f"Messaggio generato automaticamente dal gestionale Ceraldi Group.")
-        if pdf_bytes:
-            msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=f"{base}.pdf")
-        if csv.strip():
-            msg.add_attachment(csv.encode("utf-8"), maintype="text", subtype="csv", filename=f"{base}.csv")
-        if port == 465:
-            with smtplib.SMTP_SSL(host, port, timeout=25) as s:
-                s.login(user, pwd)
-                s.send_message(msg)
-        else:
-            with smtplib.SMTP(host, port, timeout=25) as s:
-                s.starttls(context=ssl.create_default_context())
-                s.login(user, pwd)
-                s.send_message(msg)
+    allegati = []
+    if pdf_bytes:
+        allegati.append((pdf_bytes, "application", "pdf", f"{base}.pdf"))
+    if csv.strip():
+        allegati.append((csv.encode("utf-8"), "text", "csv", f"{base}.csv"))
 
     try:
         import asyncio
-        await asyncio.to_thread(_send)
+        await asyncio.to_thread(
+            invia_email, dest, f"Presenze {periodo} — Ceraldi Group S.r.l.",
+            f"In allegato il riepilogo presenze di {periodo} (PDF + CSV).\n\n"
+            f"Messaggio generato automaticamente dal gestionale Ceraldi Group.",
+            allegati)
     except Exception as e:
         raise HTTPException(502, f"Invio email fallito: {e}")
 
