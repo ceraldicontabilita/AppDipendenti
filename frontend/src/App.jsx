@@ -1318,7 +1318,9 @@ function PresenzePage({ dipendenti, reload }) {
         <div className="dc-card" style={{ marginBottom: 12 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
             <h3 style={{ margin: 0 }}>Opzione C — riepilogo per il commercialista ({mesi[mese - 1]} {anno})</h3>
-            <span className="dc-muted" style={{ fontSize: 12 }}>Stessi dati del PDF/dell'invio — anteprima, non scarica nulla</span>
+            <button onClick={scaricaRiepilogoCommercialista} className="dc-btn dc-btn-primary" style={{ padding: "8px 14px" }}>
+              <Download size={15} /> Scarica PDF
+            </button>
           </div>
           <div className="dc-scroll-x" style={{ marginTop: 12 }}>
             <table className="dc-table" style={{ fontSize: 13 }}>
