@@ -1717,6 +1717,25 @@ async def presenze_pdf(data: dict = Body(...)):
                              headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
+@router.get("/presenze/email-commercialista")
+async def get_email_commercialista():
+    """Email del commercialista salvata in app: 'Invia' la usa in automatico,
+    senza doverla ridigitare ogni volta."""
+    doc = await get_db().impostazioni.find_one({"id": "email_commercialista"}, {"_id": 0}) or {}
+    return {"email": doc.get("email") or os.getenv("COMMERCIALISTA_EMAIL") or None}
+
+
+@router.post("/presenze/email-commercialista")
+async def salva_email_commercialista(data: dict = Body(...)):
+    """Body: {email: str|null}. null = torna a chiedere/usare l'env."""
+    email = (data.get("email") or "").strip() or None
+    await get_db().impostazioni.update_one(
+        {"id": "email_commercialista"},
+        {"$set": {"id": "email_commercialista", "email": email, "updated_at": now_iso()}},
+        upsert=True)
+    return {"ok": True, "email": email}
+
+
 @router.get("/presenze/invii")
 async def lista_invii_presenze(anno: Optional[int] = None, mese: Optional[int] = None):
     """Storico degli invii del foglio presenze: a chi e quando."""
@@ -1743,7 +1762,9 @@ async def invia_presenze_commercialista(data: dict = Body(...)):
     csv = data.get("csv") or (_csv_presenze(anno, mese, giorni, righe) if righe else "")
     if not csv.strip() and not righe:
         raise HTTPException(400, "Nessun dato presenze da inviare")
-    dest = (data.get("destinatario") or os.getenv("COMMERCIALISTA_EMAIL") or "").strip()
+    dest_salvato = (await get_db().impostazioni.find_one(
+        {"id": "email_commercialista"}, {"_id": 0, "email": 1}) or {}).get("email")
+    dest = (data.get("destinatario") or dest_salvato or os.getenv("COMMERCIALISTA_EMAIL") or "").strip()
     if not dest:
         raise HTTPException(400, "Manca l'email del commercialista (impostala o inseriscila).")
     if not credenziali_smtp():

@@ -1133,11 +1133,30 @@ function PresenzePage({ dipendenti, reload }) {
     const w = window.open("", "_blank");
     if (w) { w.document.write(html); w.document.close(); } else toast("Consenti i popup per stampare", "err");
   };
-  const inviaCommercialista = async () => {
-    const email = window.prompt("Email del commercialista a cui inviare le presenze:", (invii[0]?.destinatario) || "");
+  // Email del commercialista: salvata in app (non nel browser) — "Invia" la
+  // usa sempre in automatico, senza richiederla ogni volta.
+  const [emailCommercialista, setEmailCommercialista] = useState(null); // null = non ancora caricata
+  const caricaEmailCommercialista = async () => {
+    try { const r = await axios.get(`${API}/presenze/email-commercialista`); setEmailCommercialista(r.data.email || ""); }
+    catch { setEmailCommercialista(""); }
+  };
+  useEffect(() => { caricaEmailCommercialista(); }, []);
+  const cambiaEmailCommercialista = async () => {
+    const email = window.prompt("Email del commercialista (usata per tutti i prossimi invii):", emailCommercialista || "");
     if (email === null) return;
     try {
-      const r = await axios.post(`${API}/presenze/invia-commercialista`, { anno, mese, ...buildRighe(), destinatario: email || undefined });
+      await axios.post(`${API}/presenze/email-commercialista`, { email: email.trim() || null });
+      setEmailCommercialista(email.trim());
+      toast(email.trim() ? "Email commercialista salvata" : "Email commercialista rimossa");
+    } catch { toast("Errore nel salvataggio dell'email", "err"); }
+  };
+  const inviaCommercialista = async () => {
+    if (!emailCommercialista) {
+      toast("Imposta prima l'email del commercialista (✎ accanto a Invia)", "err");
+      return;
+    }
+    try {
+      const r = await axios.post(`${API}/presenze/invia-commercialista`, { anno, mese, ...buildRighe() });
       toast(`Presenze inviate a ${r.data.destinatario}`);
       loadInvii();
     } catch (e) { toast(e?.response?.data?.detail || "Invio non riuscito (SMTP da configurare su Render)", "err"); }
@@ -1285,8 +1304,13 @@ function PresenzePage({ dipendenti, reload }) {
         <button onClick={scaricaRiepilogoCommercialista} className="dc-btn" title="Documento leggero per il commercialista: riepilogo totali per dipendente + dettaglio dei periodi di assenza con le date (niente griglia giorno-per-giorno)">
           📄 Riepilogo per commercialista
         </button>
-        <button onClick={inviaCommercialista} className="dc-btn dc-btn-primary" title="Invia via email il riepilogo (PDF leggibile) + la griglia (CSV per l'import) al commercialista">
+        <button onClick={inviaCommercialista} className="dc-btn dc-btn-primary"
+          title={emailCommercialista ? `Invia a ${emailCommercialista}` : "Imposta prima l'email del commercialista"}>
           <Send size={16} /> Invia
+        </button>
+        <button onClick={cambiaEmailCommercialista} className="dc-btn" style={{ padding: "9px 10px" }}
+          title={emailCommercialista ? `Destinatario: ${emailCommercialista} — clicca per cambiarlo` : "Imposta l'email del commercialista"}>
+          ✎ {emailCommercialista || "imposta email"}
         </button>
       </div>
 
