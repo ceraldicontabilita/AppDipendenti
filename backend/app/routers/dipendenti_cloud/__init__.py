@@ -1506,6 +1506,177 @@ def _pdf_presenze(anno, mese, giorni, righe):
     return pdf.tobytes()
 
 
+# ---- Opzione C: documento combinato per il commercialista ----
+# (riepilogo totali per dipendente + dettaglio periodi con le date) — vedi
+# mockup discusso col titolare: più leggero della griglia giorno-per-giorno,
+# che resta per l'uso interno.
+_MAPPA_RIEPILOGO = {"P": "lav", "F": "ferie", "PE": "perm", "M": "malat", "R": "rol", "RS": "riposi"}
+_CODICI_EVENTO = {"F": "Ferie", "PE": "Permesso", "M": "Malattia", "R": "ROL",
+                  "AS": "Assenza", "CH": "Chiusura", "FNL": "Festività"}
+
+
+def _riepilogo_da_celle(celle):
+    cont = {"lav": 0, "ferie": 0, "perm": 0, "malat": 0, "rol": 0, "riposi": 0, "altro": 0}
+    for c in celle:
+        chiave = _MAPPA_RIEPILOGO.get(c)
+        if chiave:
+            cont[chiave] += 1
+        else:
+            cont["altro"] += 1  # AS, CH, FNL, X, cella vuota…
+    cont["tot"] = len(celle)
+    return cont
+
+
+def _periodi_da_celle(celle, note=None):
+    """Raggruppa le celle in periodi consecutivi per i codici che meritano
+    annotazione (il riposo settimanale e la presenza normale sono routine,
+    non compaiono)."""
+    note = note or []
+    eventi, i, n = [], 0, len(celle)
+    while i < n:
+        code = celle[i] or ""
+        if code not in _CODICI_EVENTO:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and (celle[j + 1] or "") == code:
+            j += 1
+        nota = next((note[k] for k in range(i, j + 1) if k < len(note) and note[k]), "")
+        eventi.append({"tipo": code, "label": _CODICI_EVENTO[code],
+                       "dal": i + 1, "al": j + 1, "giorni": j - i + 1, "nota": nota})
+        i = j + 1
+    return eventi
+
+
+def _pdf_riepilogo_periodi(anno, mese, giorni, righe):
+    """Documento 'per il commercialista' (Opzione C): riepilogo totali per
+    dipendente + dettaglio dei periodi di assenza con le date, su una o più
+    pagine A4 verticali (si estende da sola se i periodi sono tanti)."""
+    import fitz
+    W, H = 595, 842  # A4 verticale
+    mL, mR, mT, mB = 32, 32, 70, 40
+    pdf = fitz.open()
+    page = pdf.new_page(width=W, height=H)
+    y = [mT]
+
+    def intestazione(continua=False):
+        page.insert_text((mL, 34), f"Presenze {_MESI_PRES[mese - 1]} {anno}"
+                         + (" (continua)" if continua else ""), fontsize=15, fontname="hebo")
+        page.insert_text((mL, 50), "Ceraldi Group S.r.l.", fontsize=9, fontname="helv", color=(0.4, 0.4, 0.4))
+
+    def nuova_pagina(continua=True):
+        nonlocal page
+        page = pdf.new_page(width=W, height=H)
+        intestazione(continua)
+        y[0] = mT
+
+    def spazio(h):
+        if y[0] + h > H - mB:
+            nuova_pagina()
+
+    intestazione()
+
+    # ---- Sezione 1: riepilogo totali ----
+    page.insert_text((mL, y[0]), "1 · RIEPILOGO DEL MESE", fontsize=9.5, fontname="hebo", color=(0.36, 0.48, 0.42))
+    y[0] += 16
+    cols = [("Dipendente", 150), ("Lav.", 44), ("Ferie", 44), ("Perm.", 44),
+            ("Malat.", 46), ("ROL", 40), ("Riposi", 44), ("Altro", 42), ("Tot.", 40)]
+    x = mL
+    for lab, w in cols:
+        page.insert_text((x + (0 if lab == "Dipendente" else w - 4 - len(lab) * 3.2), y[0]),
+                         lab, fontsize=7.5, fontname="hebo", color=(0.42, 0.45, 0.4))
+        x += w
+    y[0] += 4
+    page.draw_line((mL, y[0]), (mL + sum(w for _, w in cols), y[0]), color=(0.85, 0.82, 0.76), width=0.6)
+    y[0] += 12
+    totali = {"lav": 0, "ferie": 0, "perm": 0, "malat": 0, "rol": 0, "riposi": 0, "altro": 0, "tot": 0}
+    riepiloghi = {}
+    for r in righe:
+        celle = r.get("celle") or []
+        rp = _riepilogo_da_celle(celle)
+        riepiloghi[r.get("nome", "")] = rp
+        for k in totali:
+            totali[k] += rp[k]
+        spazio(14)
+        x = mL
+        vals = [r.get("nome", ""), rp["lav"], rp["ferie"], rp["perm"], rp["malat"], rp["rol"], rp["riposi"], rp["altro"], rp["tot"]]
+        for (lab, w), v in zip(cols, vals):
+            testo = str(v)
+            if lab == "Dipendente":
+                page.insert_text((x, y[0]), testo[:26], fontsize=8, fontname="helv")
+            else:
+                page.insert_text((x + w - 4 - len(testo) * 4, y[0]), testo, fontsize=8, fontname="helv")
+            x += w
+        y[0] += 14
+    # riga totale
+    spazio(18)
+    page.draw_line((mL, y[0] - 4), (mL + sum(w for _, w in cols), y[0] - 4), color=(0.85, 0.82, 0.76), width=0.6)
+    x = mL
+    vals = ["Totale azienda", totali["lav"], totali["ferie"], totali["perm"], totali["malat"],
+            totali["rol"], totali["riposi"], totali["altro"], totali["tot"]]
+    for (lab, w), v in zip(cols, vals):
+        testo = str(v)
+        if lab == "Dipendente":
+            page.insert_text((x, y[0]), testo, fontsize=8, fontname="hebo")
+        else:
+            page.insert_text((x + w - 4 - len(testo) * 4, y[0]), testo, fontsize=8, fontname="hebo")
+        x += w
+    y[0] += 26
+
+    # ---- Sezione 2: dettaglio periodi ----
+    spazio(20)
+    page.insert_text((mL, y[0]), "2 · DETTAGLIO DEI PERIODI", fontsize=9.5, fontname="hebo", color=(0.65, 0.45, 0.29))
+    y[0] += 6
+    page.insert_text((mL, y[0] + 10), "Il riposo settimanale non compare: è regolare e non richiede annotazione.",
+                     fontsize=7, fontname="helv", color=(0.5, 0.5, 0.5))
+    y[0] += 22
+    qualcuno = False
+    for r in righe:
+        eventi = _periodi_da_celle(r.get("celle") or [], r.get("note") or [])
+        if not eventi:
+            continue
+        qualcuno = True
+        # Riservo lo spazio per il nome + almeno il primo evento, così il nome
+        # non resta da solo in fondo pagina separato dai suoi eventi.
+        spazio(16 + 13)
+        page.insert_text((mL, y[0]), str(r.get("nome", "")), fontsize=8.5, fontname="hebo")
+        y[0] += 13
+        for e in eventi:
+            spazio(13)
+            col = _COL_PRES.get(e["tipo"], (0.6, 0.6, 0.6))
+            page.draw_rect(fitz.Rect(mL + 4, y[0] - 6, mL + 14, y[0] + 1), color=col, fill=col, width=0)
+            # Il font base PyMuPDF (helv) non ha il glifo "→": uso un trattino ASCII.
+            periodo = f"{e['dal']:02d}" if e["dal"] == e["al"] else f"{e['dal']:02d}-{e['al']:02d}"
+            testo = f"{e['label']}: {periodo}/{mese:02d} ({e['giorni']} gg)"
+            if e["nota"]:
+                testo += f" — {e['nota'][:60]}"
+            page.insert_text((mL + 18, y[0]), testo, fontsize=7.5, fontname="helv")
+            y[0] += 13
+        y[0] += 6
+    if not qualcuno:
+        page.insert_text((mL, y[0]), "Nessuna assenza da segnalare questo mese.", fontsize=8, fontname="helv", color=(0.5, 0.5, 0.5))
+    return pdf.tobytes()
+
+
+@router.post("/presenze/pdf-riepilogo")
+async def presenze_pdf_riepilogo(data: dict = Body(...)):
+    """Opzione C: documento 'per il commercialista' — riepilogo totali +
+    dettaglio periodi, al posto della griglia giorno-per-giorno."""
+    from fastapi.responses import StreamingResponse
+    import io as _io
+    anno = int(data.get("anno") or datetime.now().year)
+    mese = int(data.get("mese") or datetime.now().month)
+    giorni = int(data.get("giorni") or 31)
+    righe = data.get("righe") or []
+    try:
+        pdf_bytes = _pdf_riepilogo_periodi(anno, mese, giorni, righe)
+    except Exception as e:
+        raise HTTPException(500, f"Errore generazione documento: {e}")
+    fname = f"presenze_riepilogo_{anno}_{str(mese).zfill(2)}.pdf"
+    return StreamingResponse(_io.BytesIO(pdf_bytes), media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
 @router.post("/presenze/pdf")
 async def presenze_pdf(data: dict = Body(...)):
     """Genera il PDF del foglio presenze del mese (una pagina), dai dati passati dal frontend."""
@@ -1564,11 +1735,12 @@ async def invia_presenze_commercialista(data: dict = Body(...)):
 
     periodo = f"{_MESI_PRES[mese - 1]} {anno}"
     base = f"presenze_{anno}_{str(mese).zfill(2)}"
-    # PDF una pagina (se possibile); il CSV resta come allegato per l'import del commercialista
+    # PDF leggibile (riepilogo + periodi, Opzione C) per la lettura umana; il CSV
+    # (griglia giorno-per-giorno) resta come allegato per l'import nel software paghe.
     pdf_bytes = None
     if righe:
         try:
-            pdf_bytes = _pdf_presenze(anno, mese, giorni, righe)
+            pdf_bytes = _pdf_riepilogo_periodi(anno, mese, giorni, righe)
         except Exception:
             pdf_bytes = None
 

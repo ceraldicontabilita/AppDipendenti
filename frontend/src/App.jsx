@@ -1062,6 +1062,9 @@ function PresenzePage({ dipendenti, reload }) {
     righe: dipendenti.map(dip => ({
       nome: `${dip.cognome || ''} ${dip.nome || ''}`.trim(),
       celle: Array.from({ length: daysInMonth }, (_, i) => codiceDerivato(dip.id, i + 1) || ""),
+      // Nota di ogni giorno (es. protocollo INPS malattia): usata nel documento
+      // "per il commercialista" (Opzione C) per annotare i periodi.
+      note: Array.from({ length: daysInMonth }, (_, i) => notaDi(dip.id, i + 1) || ""),
     })),
   });
   const buildCSV = () => {
@@ -1088,6 +1091,17 @@ function PresenzePage({ dipendenti, reload }) {
       setTimeout(() => URL.revokeObjectURL(a.href), 10000);
       toast("PDF presenze scaricato");
     } catch (e) { toast("Errore generazione PDF", "err"); }
+  };
+  // Opzione C: documento "per il commercialista" — riepilogo totali + dettaglio periodi,
+  // molto più leggero della griglia giorno-per-giorno (che resta per l'uso interno).
+  const scaricaRiepilogoCommercialista = async () => {
+    try {
+      const r = await axios.post(`${API}/presenze/pdf-riepilogo`, { anno, mese, ...buildRighe() }, { responseType: "blob" });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(r.data);
+      a.download = `presenze_riepilogo_${anno}_${String(mese).padStart(2, '0')}.pdf`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      toast("Riepilogo per il commercialista scaricato");
+    } catch (e) { toast("Errore generazione riepilogo", "err"); }
   };
   const COLST = { P: "#3d8168", AS: "#d35f4e", F: "#5b7a6b", PE: "#7d5526", M: "#f59e0b", R: "#8a9a5b", RS: "#9ca3af", CH: "#6b7280", FNL: "#a6724a", X: "#374151" };
   const stampaPresenze = () => {
@@ -1253,7 +1267,10 @@ function PresenzePage({ dipendenti, reload }) {
         <button onClick={stampaPresenze} className="dc-btn" title="Stampa su una sola pagina (o salva come PDF dalla finestra di stampa)">
           🖨 Stampa
         </button>
-        <button onClick={inviaCommercialista} className="dc-btn dc-btn-primary" title="Invia PDF+CSV al commercialista via email (salva a chi e quando)">
+        <button onClick={scaricaRiepilogoCommercialista} className="dc-btn" title="Documento leggero per il commercialista: riepilogo totali per dipendente + dettaglio dei periodi di assenza con le date (niente griglia giorno-per-giorno)">
+          📄 Riepilogo per commercialista
+        </button>
+        <button onClick={inviaCommercialista} className="dc-btn dc-btn-primary" title="Invia via email il riepilogo (PDF leggibile) + la griglia (CSV per l'import) al commercialista">
           <Send size={16} /> Invia
         </button>
       </div>
