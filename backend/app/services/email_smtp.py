@@ -64,7 +64,7 @@ def _invia_via_relay(cred: dict, destinatario: str, oggetto: str, corpo: str,
             }
             for dati, maintype, subtype, filename in allegati
         ]
-    resp = httpx.post(cred["url"], json=payload, timeout=30)
+    resp = httpx.post(cred["url"], json=payload, timeout=30, follow_redirects=True)
     resp.raise_for_status()
     corpo_risposta = resp.text or ""
     if '"ok":true' not in corpo_risposta.replace(" ", ""):
