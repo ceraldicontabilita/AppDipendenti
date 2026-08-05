@@ -1665,109 +1665,31 @@ async def simulazione_f24(anno: int, mese: int) -> Dict[str, Any]:
                           "nota": "Simulazione: fa fede il modello F24 del consulente."}}
 
 
-DRIVE_FOLDER_CEDOLINI = "1tmVu6fl7qhJbLcGCHT3wEQzrvFAElc9h"  # cartella indicata dal titolare
-
-
 @router.post("/import-drive")
 @handle_errors
 async def import_cedolini_da_drive(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     """Importa i PDF (buste paga e documenti) da una cartella Google Drive col
-    service account (env GOOGLE_SERVICE_ACCOUNT_JSON, la chiave di
-    gestionale@ceraldi-gestionale.iam.gserviceaccount.com — la cartella deve
+    service account (vedi services/google_drive_sa.py — chiave di
+    gestionale@ceraldi-gestionale.iam.gserviceaccount.com, la cartella deve
     essere condivisa con quell'indirizzo). Ogni PDF passa dalla STESSA pipeline
     dell'upload massivo: classificazione, aggancio al dipendente, anti-duplicati."""
-    import json
-    import time
-    # Stessi nomi usati dal GestionaleCloud, così su Render basta collegare lo
-    # stesso Environment Group (o copiare la variabile senza rinominarla).
-    creds_raw = (os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-                 or os.environ.get("GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON")
-                 or os.environ.get("GOOGLE_DRIVE_SA_JSON") or "")
-    if not creds_raw:
-        raise HTTPException(status_code=503, detail=(
-            "Manca la chiave del service account nelle env di Render: variabile "
-            "GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON (stesso nome del GestionaleCloud) "
-            "o GOOGLE_SERVICE_ACCOUNT_JSON — mai in codice o chat."))
-    try:
-        creds = json.loads(creds_raw)
-    except ValueError:
-        # Tollera il formato "export .env": a capo scritti come \n letterali e
-        # virgolette con la barra (\"), come nel dump del GestionaleCloud.
-        try:
-            riparato = (creds_raw.strip().strip('"').strip("'")
-                        .replace("\\\\n", "\x00").replace("\\n", "\n")
-                        .replace("\x00", "\\n").replace('\\"', '"'))
-            creds = json.loads(riparato)
-        except ValueError:
-            raise HTTPException(status_code=503,
-                                detail="La chiave del service account non è un JSON valido: ricopiala intera dal pannello")
-    if isinstance(creds, str):
-        # incollata con le virgolette esterne: il primo parse dà una stringa → riparse
-        try:
-            creds = json.loads(creds)
-        except ValueError:
-            raise HTTPException(status_code=503,
-                                detail="La chiave del service account non è un JSON valido: togli le virgolette esterne")
-    if not isinstance(creds, dict) or not creds.get("client_email") or not creds.get("private_key"):
-        raise HTTPException(status_code=503,
-                            detail="La chiave del service account è incompleta (mancano client_email/private_key)")
+    from backend.app.services.google_drive_sa import scarica_pdf_cartella, cartella_cedolini_default
+    folder = str(body.get("folder_id") or cartella_cedolini_default())
+    scaricati, falliti = await scarica_pdf_cartella(folder)
 
-    from jose import jwt as jose_jwt
-    now = int(time.time())
-    assertion = jose_jwt.encode(
-        {"iss": creds.get("client_email"), "scope": "https://www.googleapis.com/auth/drive.readonly",
-         "aud": "https://oauth2.googleapis.com/token", "iat": now, "exp": now + 3600},
-        creds.get("private_key"), algorithm="RS256")
-
-    import httpx
-    risultato = {"trovati_pdf": 0, "archiviati": 0, "duplicati": 0, "non_assegnati": []}
-    async with httpx.AsyncClient(timeout=120) as client:
-        tok = await client.post("https://oauth2.googleapis.com/token", data={
-            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": assertion})
-        if tok.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Autenticazione Google fallita: {tok.text[:200]}")
-        headers = {"Authorization": f"Bearer {tok.json()['access_token']}"}
-
-        async def lista(fid: str):
-            out, page = [], None
-            while True:
-                params = {"q": f"'{fid}' in parents and trashed=false",
-                          "fields": "nextPageToken,files(id,name,mimeType)", "pageSize": 200,
-                          "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"}
-                if page:
-                    params["pageToken"] = page
-                r = await client.get("https://www.googleapis.com/drive/v3/files", params=params, headers=headers)
-                r.raise_for_status()
-                j = r.json()
-                out += j.get("files", [])
-                page = j.get("nextPageToken")
-                if not page:
-                    return out
-
-        # priorità: cartella nel body → env (stessa del GestionaleCloud) → default
-        folder = str(body.get("folder_id") or os.environ.get("DRIVE_CEDOLINI_FOLDER_ID") or DRIVE_FOLDER_CEDOLINI)
-        files = await lista(folder)
-        pdfs = [f for f in files if f.get("mimeType") == "application/pdf"]
-        for sub in [f for f in files if f.get("mimeType") == "application/vnd.google-apps.folder"]:
-            pdfs += [f for f in await lista(sub["id"]) if f.get("mimeType") == "application/pdf"]
-        risultato["trovati_pdf"] = len(pdfs)
-
-        from backend.app.routers.dipendenti_cloud import _archivia_documento_cloud, _indici_dipendenti
-        db = Database.get_db()
-        indici = await _indici_dipendenti(db)
-        for f in pdfs[:500]:
-            r = await client.get(f"https://www.googleapis.com/drive/v3/files/{f['id']}",
-                                 params={"alt": "media", "supportsAllDrives": "true"}, headers=headers)
-            if r.status_code != 200:
-                risultato["non_assegnati"].append(f.get("name"))
-                continue
-            esito, categoria, nome = await _archivia_documento_cloud(
-                db, f.get("name") or "documento.pdf", r.content, contesto="google-drive", indici=indici)
-            if esito == "duplicato":
-                risultato["duplicati"] += 1
-            elif esito == "caricato":
-                risultato["archiviati"] += 1
-            else:
-                risultato["non_assegnati"].append(f.get("name"))
+    risultato = {"trovati_pdf": len(scaricati) + len(falliti), "archiviati": 0,
+                "duplicati": 0, "non_assegnati": list(falliti)}
+    from backend.app.routers.dipendenti_cloud import _archivia_documento_cloud, _indici_dipendenti
+    db = Database.get_db()
+    indici = await _indici_dipendenti(db)
+    for nome, contenuto in scaricati:
+        esito, categoria, nome_dip = await _archivia_documento_cloud(
+            db, nome or "documento.pdf", contenuto, contesto="google-drive", indici=indici)
+        if esito == "duplicato":
+            risultato["duplicati"] += 1
+        elif esito == "caricato":
+            risultato["archiviati"] += 1
+        else:
+            risultato["non_assegnati"].append(nome)
     risultato["non_assegnati"] = risultato["non_assegnati"][:50]
     return risultato
