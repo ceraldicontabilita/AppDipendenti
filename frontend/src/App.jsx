@@ -2689,6 +2689,16 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
     } catch (e) { setRescanMsg("⚠ " + (e?.response?.data?.detail || "Errore riscansione")); }
   };
 
+  const correggiAcconti = async () => {
+    if (!window.confirm("Togliere gli 'acconto dal cedolino' implausibili (poche decine di euro, probabile errore di lettura) e ricalcolare il saldo? Non tocca gli acconti registrati a mano.")) return;
+    setRescanMsg("Correzione acconti in corso…");
+    try {
+      const r = await axios.post(`${API}/paghe/correggi-acconti-cedolino`);
+      setRescanMsg(`✓ Corretti ${r.data.corretti} acconti implausibili (rimossi, saldo ricalcolato sul netto pieno).`);
+      await load();
+    } catch (e) { setRescanMsg("⚠ " + (e?.response?.data?.detail || "Errore correzione acconti")); }
+  };
+
   const handleImportLul = async (e) => {
     const fs = Array.from(e.target.files || []);
     if (!fs.length) return;
@@ -3027,6 +3037,7 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
             value={cercaQ} onChange={e => setCercaQ(e.target.value)} onKeyDown={e => e.key === "Enter" && cercaVoce()} />
           <button className="dc-btn-primary" disabled={cercaBusy} onClick={cercaVoce}>{cercaBusy ? "Cerco…" : "Cerca"}</button>
           <button className="dc-btn" onClick={riscansiona} title="Rilegge i PDF dei cedolini già caricati per popolare la ricerca sullo storico">Riscansiona storico</button>
+          <button className="dc-btn" onClick={correggiAcconti} title="Toglie gli 'acconto dal cedolino' di poche decine di euro (probabile errore del parser) già salvati e ricalcola il saldo">🔧 Correggi acconti cedolino</button>
         </div>
         {rescanMsg && <div className="dc-muted" style={{ marginTop: 8 }}>{rescanMsg}</div>}
         {cercaRes && (

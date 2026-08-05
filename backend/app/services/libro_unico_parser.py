@@ -28,6 +28,19 @@ class ParsingError(Exception):
     pass
 
 
+def _acconto_plausibile(acconto: float, netto_totale: float) -> bool:
+    """Filtro anti-falso-positivo: la riga 'Recupero acconto' in busta a volte
+    combacia per errore con un'altra trattenuta minima (es. quota associativa,
+    conguaglio di pochi euro) che non è un vero acconto già erogato al
+    dipendente. Un acconto reale è una cifra significativa rispetto al netto,
+    non poche decine di euro: sotto questa soglia lo scartiamo invece di
+    mostrare un 'saldo da pagare' sbagliato per pochi euro di differenza."""
+    if acconto <= 0:
+        return False
+    soglia = max(80.0, netto_totale * 0.10)
+    return acconto >= soglia
+
+
 def safe_float(value: str, default: float = 0.0) -> float:
     """Converte stringa in float in modo sicuro."""
     try:
@@ -255,6 +268,9 @@ def parse_amministratore_page(page_text: str) -> Optional[Dict[str, Any]]:
         logger.warning(f"⚠️ No netto found for {employee_name}")
         return None
 
+    if not _acconto_plausibile(acconto, acconto + netto_mese):
+        acconto = 0.0
+
     return {
         "nome": employee_name,
         "netto": acconto + netto_mese,
@@ -436,6 +452,8 @@ def parse_libro_unico_pdf(pdf_bytes: bytes) -> Dict[str, Any]:
 
                     # Salva dati
                     if employee_name and netto_mese is not None:
+                        if not _acconto_plausibile(acconto, acconto + netto_mese):
+                            acconto = 0.0
                         if employee_name not in employees_found:
                             employees_found[employee_name] = {
                                 "nome": employee_name,

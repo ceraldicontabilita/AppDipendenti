@@ -453,6 +453,19 @@ def _lul_acconto(text):
                 tot += _to_float(nums[-1]) or 0
     return round(tot, 2) if tot > 0 else None
 
+def _acconto_cedolino_plausibile(acconto, netto_totale):
+    """Filtro anti-falso-positivo: '_lul_acconto' può intercettare per errore una
+    trattenuta minima non correlata (es. quota associativa, conguaglio di pochi
+    euro) che contiene la parola 'acconto'/'anticipo' ma non è un vero anticipo
+    già erogato al dipendente. Un acconto reale è una cifra significativa
+    rispetto al netto, non poche decine di euro: sotto soglia lo scartiamo
+    invece di mostrare un 'saldo da pagare' sbagliato per pochi euro di
+    differenza (stessa soglia usata in services/libro_unico_parser.py)."""
+    if not acconto or acconto <= 0 or not netto_totale:
+        return False
+    soglia = max(80.0, netto_totale * 0.10)
+    return acconto >= soglia
+
 def _lul_periodo(text):
     m = re.search(r'(Gennaio|Febbraio|Marzo|Aprile|Maggio|Giugno|Luglio|Agosto|Settembre|Ottobre|Novembre|Dicembre)\s+(\d{4})', text, re.I)
     if m:
@@ -885,10 +898,11 @@ async def _importa_documenti(pdf_items, errori_iniziali=None, forza=False):
                 atteso = (esistente or {}).get("netto_atteso")
                 discrep = atteso if (atteso is not None and abs(atteso - netto) > 1) else None
                 acconto = info.get("acconto")
+                acconto_valido = _acconto_cedolino_plausibile(acconto, netto)
                 set_doc = {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
                            "importo_busta": netto, "busta_da_lul": True,
                            "busta_riconciliata": True, "updated_at": now_iso()}
-                if acconto and acconto > 0:
+                if acconto_valido:
                     set_doc["acconto_cedolino"] = acconto
                     set_doc["saldo_residuo"] = round(netto - acconto, 2)
                 await get_db().paghe_mensili.update_one(
@@ -902,7 +916,7 @@ async def _importa_documenti(pdf_items, errori_iniziali=None, forza=False):
                            "netto": netto,
                            "dipendente_nome": f"{dip.get('cognome','')} {dip.get('nome','')}".strip(),
                            "updated_at": now_iso()}
-                if acconto and acconto > 0:
+                if acconto_valido:
                     ced_set["acconto_cedolino"] = acconto
                     ced_set["saldo_residuo"] = round(netto - acconto, 2)
                 # Dati chiave estratti dalla busta (salvati nel cedolino)
@@ -2061,6 +2075,32 @@ async def cerca_voce(codice: Optional[str] = None, testo: Optional[str] = None,
                             "importo": (v.get("valori") or [None])[-1], "valori": v.get("valori")})
     out.sort(key=lambda x: (x.get("anno") or 0, x.get("mese") or 0))
     return {"risultati": out, "totale": len(out)}
+
+
+@router.post("/paghe/correggi-acconti-cedolino")
+async def correggi_acconti_cedolino():
+    """Una tantum: toglie gli 'acconto dal cedolino' già salvati che sono
+    implausibili (poche decine di euro — trattenute minime non correlate
+    intercettate per errore dal parser, non veri anticipi). Ricalcola il saldo
+    residuo di conseguenza. Non tocca gli acconti registrati a mano
+    (acconti_dipendenti) né quelli plausibili."""
+    db = get_db()
+    corretti = []
+    for coll_name in ("paghe_mensili", "cedolini"):
+        async for doc in db[coll_name].find(
+                {"acconto_cedolino": {"$gt": 0}},
+                {"_id": 0, "id": 1, "dipendente_id": 1, "anno": 1, "mese": 1,
+                 "importo_busta": 1, "netto": 1, "acconto_cedolino": 1}):
+            netto = doc.get("importo_busta") if doc.get("importo_busta") is not None else doc.get("netto")
+            if _acconto_cedolino_plausibile(doc.get("acconto_cedolino"), netto):
+                continue
+            filtro = {"id": doc["id"]} if doc.get("id") else \
+                     {"dipendente_id": doc["dipendente_id"], "anno": doc["anno"], "mese": doc["mese"]}
+            await db[coll_name].update_one(filtro, {"$unset": {"acconto_cedolino": "", "saldo_residuo": ""}})
+            corretti.append({"collezione": coll_name, "dipendente_id": doc.get("dipendente_id"),
+                             "anno": doc.get("anno"), "mese": doc.get("mese"),
+                             "acconto_scartato": doc.get("acconto_cedolino")})
+    return {"corretti": len(corretti), "dettaglio": corretti}
 
 
 @router.post("/cedolini/riscansiona")
