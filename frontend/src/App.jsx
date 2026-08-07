@@ -3697,7 +3697,7 @@ function TfrPage({ dipendenti, getDipendente }) {
       `<tr><td>${formatDate(p.data_inizio)}</td><td>${p.data_fine ? formatDate(p.data_fine) : "in corso"}</td>` +
       `<td class="n">€ ${eur(p.importo_settimanale)}</td><td class="n">${p.settimane}</td>` +
       `<td class="n">€ ${eur(p.retribuzione_utile)}</td><td class="n">€ ${eur(p.lordo)}</td>` +
-      `<td class="n">€ ${eur(p.inps)}</td><td class="n">€ ${eur(p.imposte)}</td><td class="n"><b>€ ${eur(p.netto)}</b></td></tr>`).join("");
+      `<td class="n"><b>€ ${eur(p.netto)}</b></td></tr>`).join("");
     const accTfr = acconti?.acconti?.tfr || [];
     const totAcc = acconti?.tfr_acconti || 0;
     const residuo = (sim?.totale_netto || 0) - totAcc;
@@ -3715,9 +3715,9 @@ tfoot td{font-weight:bold;background:#eef1ea}.mini{font-size:11px;color:#6b7669}
 <h1>Report TFR — ${nome}</h1>
 <div class="mini">Ceraldi Group S.r.l. · generato il ${oggi}${liq ? ` · calcolo fino al ${formatDate(liq.calcolato_fino_a)}` : ""}${liq?.cessato ? " · rapporto cessato" : ""}</div>
 <h2>Periodi retributivi</h2>
-<table><thead><tr><th>Dal</th><th>Al</th><th class="n">€/sett.</th><th class="n">Sett.</th><th class="n">Retrib. utile</th><th class="n">Lordo</th><th class="n">INPS 0,50%</th><th class="n">IRPEF</th><th class="n">Netto</th></tr></thead>
+<table><thead><tr><th>Dal</th><th>Al</th><th class="n">€/sett.</th><th class="n">Sett.</th><th class="n">Retrib. utile</th><th class="n">Lordo</th><th class="n">Netto</th></tr></thead>
 <tbody>${righe}</tbody>
-<tfoot><tr><td colspan="5">Totale (incluso il periodo in corso)</td><td class="n">€ ${eur(sim?.totale_lordo)}</td><td class="n">€ ${eur(sim?.totale_inps)}</td><td class="n">€ ${eur(sim?.totale_imposte)}</td><td class="n">€ ${eur(sim?.totale_netto)}</td></tr></tfoot></table>
+<tfoot><tr><td colspan="5">Totale (incluso il periodo in corso)</td><td class="n">€ ${eur(sim?.totale_lordo)}</td><td class="n">€ ${eur(sim?.totale_netto)}</td></tr></tfoot></table>
 ${liq ? `<h2>Liquidazione finale</h2><table>
 <tr><td>Tredicesima maturata (${formatDate(liq.tredicesima.dal)} → ${formatDate(liq.tredicesima.al)})${liq.tredicesima.manuale ? " — inserita a mano" : ""}</td><td class="n">€ ${eur(liq.tredicesima.netto)}</td></tr>
 <tr><td>Quattordicesima maturata (${formatDate(liq.quattordicesima.dal)} → ${formatDate(liq.quattordicesima.al)})${liq.quattordicesima.manuale ? " — inserita a mano" : ""}</td><td class="n">€ ${eur(liq.quattordicesima.netto)}</td></tr>
@@ -3727,8 +3727,6 @@ ${accTfr.length ? `<h2>Acconti TFR già erogati</h2><table><thead><tr><th>Data</
 <tfoot><tr><td>Totale acconti</td><td class="n">€ ${eur(totAcc)}</td><td></td></tr></tfoot></table>` : ""}
 <h2>Riepilogo</h2><table>
 <tr><td>TFR lordo maturato</td><td class="n">€ ${eur(sim?.totale_lordo)}</td></tr>
-<tr><td>− INPS 0,50%</td><td class="n">€ ${eur(sim?.totale_inps)}</td></tr>
-<tr><td>− IRPEF</td><td class="n">€ ${eur(sim?.totale_imposte)}</td></tr>
 <tr><td>= TFR netto simulato</td><td class="n">€ ${eur(sim?.totale_netto)}</td></tr>
 <tr><td>− Acconti TFR erogati</td><td class="n">€ ${eur(totAcc)}</td></tr>
 <tr><td><b>= TFR netto residuo</b></td><td class="n"><b>€ ${eur(residuo)}</b></td></tr>
@@ -3793,12 +3791,12 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
   };
   const cellaInput = { border: "1px solid #d1d5db", borderRadius: 6, padding: "3px 6px", fontSize: 13.5, width: 84, textAlign: "right", boxSizing: "border-box" };
 
-  // Parametri di calcolo globali (divisore 12/13,5 e % IRPEF), modificabili qui.
-  const [parametri, setParametri] = useState({ divisore: "12", irpef_percento: "23" });
+  // Parametro di calcolo globale (divisore 12/13,5), modificabile qui.
+  const [parametri, setParametri] = useState({ divisore: "12" });
   const [salvandoParametri, setSalvandoParametri] = useState(false);
   useEffect(() => {
     axios.get(`${API_TFR}/simulazione-parametri`)
-      .then(r => setParametri({ divisore: String(r.data.divisore), irpef_percento: String(r.data.irpef_percento) }))
+      .then(r => setParametri({ divisore: String(r.data.divisore) }))
       .catch(() => {});
   }, []);
   const salvaParametri = async () => {
@@ -3806,7 +3804,6 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
     try {
       await axios.put(`${API_TFR}/simulazione-parametri`, {
         divisore: Number(parametri.divisore),
-        irpef_percento: Number(parametri.irpef_percento),
       });
       await carica(dipId);
     } catch (e) { setErrore(e?.response?.data?.detail || "Errore nel salvataggio dei parametri"); }
@@ -3871,11 +3868,6 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
                   <option value="13.5">13,5 (art. 2120 c.c.)</option>
                 </select>
               </div>
-              <div>
-                <label className="dc-muted" style={{ fontSize: 12, display: "block" }}>% IRPEF</label>
-                <input type="number" step="0.01" style={{ ...inp, width: 100 }} value={parametri.irpef_percento}
-                  onChange={e => setParametri(pr => ({ ...pr, irpef_percento: e.target.value }))} />
-              </div>
               <button className="dc-btn dc-btn-primary" disabled={salvandoParametri} onClick={salvaParametri}>
                 {salvandoParametri ? "Salvo…" : "Salva e ricalcola"}
               </button>
@@ -3891,10 +3883,9 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
               </button>
             </div>
             <p className="dc-muted" style={{ fontSize: 13, marginTop: -6 }}>
-              Formula: importo settimanale × settimane = retribuzione utile → ÷ divisore = quota lorda → meno
-              INPS 0,50% sulla retribuzione utile → meno IRPEF sul lordo (% globale {parametri.irpef_percento}%,
-              modificabile riga per riga nella colonna IRPEF) = netto. L'ultimo periodo è sempre "in corso" e
-              matura fino ad oggi da solo. Non modifica il TFR ufficiale qui sopra.
+              Formula: importo settimanale × settimane = retribuzione utile → ÷ divisore = quota lorda = netto
+              (nessuna trattenuta: l'accantonamento non è tassato anno per anno). L'ultimo periodo è sempre
+              "in corso" e matura fino ad oggi da solo. Non modifica il TFR ufficiale qui sopra.
             </p>
 
             {sim?.paga_attuale != null && (
@@ -3915,8 +3906,6 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
                       <th style={{ textAlign: "right" }}>Mensile €</th>
                       <th style={{ textAlign: "right" }}>Retrib. utile €</th>
                       <th style={{ textAlign: "right" }}>Lordo €</th>
-                      <th style={{ textAlign: "right" }}>INPS 0,50% €</th>
-                      <th style={{ textAlign: "right" }}>IRPEF % · €</th>
                       <th style={{ textAlign: "right" }}>Netto €</th><th></th>
                     </tr>
                   </thead>
@@ -3936,15 +3925,6 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
                         <td style={{ textAlign: "right" }}>{eur(p.mensile)}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.retribuzione_utile)}</td>
                         <td style={{ textAlign: "right" }}>{eur(p.lordo)}</td>
-                        <td style={{ textAlign: "right" }}>{eur(p.inps)}</td>
-                        <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                          <input type="number" step="0.01" style={{ ...cellaInput, width: 58 }} key={`irp-${p.id}-${p.irpef_percento}`}
-                            defaultValue={p.irpef_percento}
-                            title="% IRPEF solo di questo periodo: modifica e premi Invio per salvare"
-                            onBlur={e => salvaCella(p.id, "irpef_percento", e.target.value, p.irpef_percento)}
-                            onKeyDown={e => e.key === "Enter" && e.target.blur()} />
-                          <span style={{ marginLeft: 6 }}>{eur(p.imposte)}</span>
-                        </td>
                         <td style={{ textAlign: "right", fontWeight: 700 }}>{eur(p.netto)}</td>
                         <td style={{ display: "flex", gap: 4 }}>
                           <button className="dc-btn" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => apriModificaPeriodo(p)} title="Correggi le date">✎</button>
@@ -3957,8 +3937,6 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
                     <tr style={{ fontWeight: 700, borderTop: "2px solid #e6e0d4" }}>
                       <td colSpan={6}>Totale (incluso il periodo in corso, ad oggi)</td>
                       <td style={{ textAlign: "right" }}>{eur(sim.totale_lordo)}</td>
-                      <td style={{ textAlign: "right" }}>{eur(sim.totale_inps)}</td>
-                      <td style={{ textAlign: "right" }}>{eur(sim.totale_imposte)}</td>
                       <td style={{ textAlign: "right" }}>{eur(sim.totale_netto)}</td>
                       <td></td>
                     </tr>
@@ -4138,8 +4116,6 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
                 </p>
                 <div style={{ maxWidth: 460 }}>
                   <div style={riga}><span>TFR lordo maturato (dalla tabella)</span><b>€ {eur(sim?.totale_lordo || 0)}</b></div>
-                  <div style={riga}><span>− INPS 0,50%</span><b>€ {eur(sim?.totale_inps || 0)}</b></div>
-                  <div style={riga}><span>− IRPEF</span><b>€ {eur(sim?.totale_imposte || 0)}</b></div>
                   <div style={riga}><span>= TFR netto</span><b>€ {eur(sim?.totale_netto || 0)}</b></div>
                   <div style={riga}><span>− Acconti già erogati</span><b>€ {eur(acconti?.tfr_acconti || 0)}</b></div>
                   <div style={riga}><span>= TFR netto residuo</span><b>€ {eur(tfrResiduo)}</b></div>

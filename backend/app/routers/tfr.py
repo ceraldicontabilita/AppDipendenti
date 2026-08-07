@@ -1672,36 +1672,35 @@ async def get_storico_tfr(dipendente_id: str) -> Dict[str, Any]:
 #   apre il nuovo, sempre aperto. L'import da Excel (una tantum, per tutti i
 #   dipendenti insieme) fa lo stesso: l'ultima riga di ciascun foglio diventa il
 #   periodo aperto, ignorando la data di fine eventualmente scritta nel file.
-# Formula (con parametri scelti dal titolare nella sezione "Parametri di calcolo"):
+# Formula (con il parametro scelto dal titolare nella sezione "Parametri di calcolo"):
 #   1. retribuzione utile = importo settimanale × settimane lavorate
 #      (es. 220 × 52 = 11.440,00)
 #   2. quota lorda = retribuzione utile ÷ DIVISORE (12 o 13,5, a scelta:
 #      con 12 → 953,33; con 13,5 → 847,41)
-#   3. contributo INPS = retribuzione utile × 0,50% (fondo garanzia)
-#   4. imposte = quota lorda × % IRPEF impostata (es. 23%)
-#   5. accantonamento netto = lordo − INPS − imposte
-# I parametri (divisore, % IRPEF) sono globali, salvati in `impostazioni` e
-# modificabili dalla pagina TFR. 13ª/14ª (liquidazione): importo × settimane ÷ 12.
+#   3. accantonamento netto = lordo (nessuna trattenuta in questa fase: l'INPS
+#      0,50% fondo garanzia è a carico dell'azienda, non riduce il TFR del
+#      dipendente; l'IRPEF sul TFR si applica solo in tassazione separata al
+#      momento della liquidazione, non anno per anno sull'accantonamento)
+# Il parametro (divisore) è globale, salvato in `impostazioni` e modificabile
+# dalla pagina TFR. 13ª/14ª (liquidazione): importo × settimane ÷ 12.
 # I periodi salvano SOLO date e importo: i valori si ricalcolano SEMPRE alla
 # lettura, così una correzione di formula/parametri si riflette subito su tutto
 # lo storico. È un sandbox separato da 'dipendenti.tfr_accantonato' (quello
 # alimentato in automatico dai cedolini): la simulazione non lo tocca.
 
 PARAMETRI_TFR_ID = "tfr_simulazione_parametri"
-PARAMETRI_TFR_DEFAULT = {"divisore": 12.0, "irpef_percento": 23.0}
+PARAMETRI_TFR_DEFAULT = {"divisore": 12.0}
 
 
 async def _parametri_tfr(db) -> Dict[str, float]:
     doc = await db["impostazioni"].find_one({"id": PARAMETRI_TFR_ID}, {"_id": 0}) or {}
     return {
         "divisore": float(doc.get("divisore", PARAMETRI_TFR_DEFAULT["divisore"])),
-        "irpef_percento": float(doc.get("irpef_percento", PARAMETRI_TFR_DEFAULT["irpef_percento"])),
     }
 
 
 class ParametriTfrInput(BaseModel):
     divisore: float          # 12 o 13,5 (o altro valore se serve)
-    irpef_percento: float    # es. 23
 
 
 class PeriodoSimulazioneInput(BaseModel):
@@ -1711,8 +1710,6 @@ class PeriodoSimulazioneInput(BaseModel):
     data_inizio: Optional[str] = None
     # Se omessa: periodo APERTO (tuttora in corso). Se valorizzata: periodo storico chiuso.
     data_fine: Optional[str] = None
-    # % IRPEF SOLO per questo periodo (se omessa vale quella globale dei parametri).
-    irpef_percento: Optional[float] = None
 
 
 class RateSimulazioneInput(BaseModel):
@@ -1737,26 +1734,21 @@ def _settimane_periodo(dal: datetime, al: datetime) -> int:
 
 
 def _calcola_periodo_tfr(data_inizio: datetime, data_fine: datetime, importo_settimanale: float,
-                         divisore: float = 12.0, irpef_percento: float = 23.0) -> Dict[str, Any]:
-    """Formula con i parametri scelti dal titolare (esempio: 220€/sett, anno intero,
-    divisore 12, IRPEF 23%): retribuzione utile = 220×52 = 11.440 → lordo = ÷12 =
-    953,33 → INPS 0,50% = 57,20 → imposte = 953,33×23% = 219,27 → netto = 676,86.
+                         divisore: float = 12.0) -> Dict[str, Any]:
+    """Formula con il parametro scelto dal titolare (esempio: 220€/sett, anno intero,
+    divisore 12): retribuzione utile = 220×52 = 11.440 → lordo = ÷12 = 953,33 = netto
+    (nessuna trattenuta: l'accantonamento non è tassato anno per anno).
     'mensile' è l'importo mensile equivalente (settimanale × 52 ÷ 12)."""
     settimane = _settimane_periodo(data_inizio, data_fine)
     retribuzione_utile = importo_settimanale * settimane
     lordo = retribuzione_utile / divisore if divisore else 0.0
-    inps = retribuzione_utile * 0.005
-    imposte = lordo * irpef_percento / 100
-    netto = lordo - inps - imposte
     return {
         "giorni": max(0, (data_fine - data_inizio).days + 1),
         "settimane": settimane,
         "mensile": round(importo_settimanale * 52 / 12, 2),
         "retribuzione_utile": round(retribuzione_utile, 2),
         "lordo": round(lordo, 2),
-        "inps": round(inps, 2),
-        "imposte": round(imposte, 2),
-        "netto": round(netto, 2),
+        "netto": round(lordo, 2),
     }
 
 
@@ -1776,18 +1768,14 @@ def _fino_a_calcolo(dipendente: Dict[str, Any]) -> datetime:
 def _periodo_con_calcolo_live(p: Dict[str, Any], fino_a: Optional[datetime] = None,
                               parametri: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
     """Ricalcola SEMPRE il periodo alla lettura (chiuso: sulle sue date; aperto:
-    fino a oggi o alla cessazione), con i parametri correnti (divisore, % IRPEF).
+    fino a oggi o alla cessazione), con il parametro corrente (divisore).
     Sul DB restano solo date e importo: così qualsiasi correzione di formula o
-    parametri si riflette subito su tutto lo storico."""
+    parametro si riflette subito su tutto lo storico."""
     prm = parametri or PARAMETRI_TFR_DEFAULT
-    # % IRPEF: quella del singolo periodo se impostata, altrimenti la globale.
-    irpef = p.get("irpef_percento")
-    irpef = prm["irpef_percento"] if irpef is None else float(irpef)
     fine = _parse_data_tfr(p["data_fine"]) if p.get("data_fine") else (fino_a or _oggi_tfr())
     calc = _calcola_periodo_tfr(_parse_data_tfr(p["data_inizio"]), fine, p["importo_settimanale"],
-                                prm["divisore"], irpef)
-    return {**p, **calc, "irpef_percento": round(irpef, 2),
-            "data_fine": p.get("data_fine"), "aperto": not p.get("data_fine")}
+                                prm["divisore"])
+    return {**p, **calc, "data_fine": p.get("data_fine"), "aperto": not p.get("data_fine")}
 
 
 def _periodo_competenza_13(fino_a: datetime):
@@ -1864,8 +1852,6 @@ async def get_simulazione_tfr(dipendente_id: str) -> Dict[str, Any]:
         "dipendente_nome": dipendente.get("nome_completo", ""),
         "periodi": periodi,
         "totale_lordo": round(sum(p["lordo"] for p in periodi), 2),
-        "totale_inps": round(sum(p["inps"] for p in periodi), 2),
-        "totale_imposte": round(sum(p["imposte"] for p in periodi), 2),
         "totale_netto": round(sum(p["netto"] for p in periodi), 2),
         "prossimo_data_inizio": prossimo_inizio,
         "paga_attuale": periodo_aperto["importo_settimanale"] if periodo_aperto else None,
@@ -1879,25 +1865,22 @@ async def get_simulazione_tfr(dipendente_id: str) -> Dict[str, Any]:
 @router.get("/simulazione-parametri")
 @handle_errors
 async def get_parametri_tfr() -> Dict[str, float]:
-    """Parametri di calcolo del simulatore (globali): divisore (12 o 13,5) e % IRPEF."""
+    """Parametro di calcolo del simulatore (globale): divisore (12 o 13,5)."""
     return await _parametri_tfr(Database.get_db())
 
 
 @router.put("/simulazione-parametri")
 @handle_errors
 async def salva_parametri_tfr(input_data: ParametriTfrInput) -> Dict[str, Any]:
-    """Salva i parametri di calcolo del simulatore. Valgono per tutti i dipendenti
+    """Salva il parametro di calcolo del simulatore. Vale per tutti i dipendenti
     e per tutto lo storico: i valori si ricalcolano alla lettura, quindi cambiare
-    un parametro aggiorna subito ogni tabella."""
+    il parametro aggiorna subito ogni tabella."""
     if input_data.divisore <= 0:
         raise HTTPException(status_code=400, detail="Il divisore deve essere maggiore di zero")
-    if not (0 <= input_data.irpef_percento < 100):
-        raise HTTPException(status_code=400, detail="La % IRPEF deve essere tra 0 e 100")
     db = Database.get_db()
     await db["impostazioni"].update_one(
         {"id": PARAMETRI_TFR_ID},
-        {"$set": {"divisore": round(input_data.divisore, 2),
-                  "irpef_percento": round(input_data.irpef_percento, 2)}},
+        {"$set": {"divisore": round(input_data.divisore, 2)}},
         upsert=True)
     return {"success": True, **await _parametri_tfr(db)}
 
@@ -1971,9 +1954,6 @@ async def aggiungi_periodo_simulazione(dipendente_id: str, input_data: PeriodoSi
                 detail=f"Il periodo si sovrappone: l'ultimo periodo finisce il "
                        f"{ultimo['data_fine']}, questo dovrebbe iniziare dopo")
 
-    if input_data.irpef_percento is not None and not (0 <= input_data.irpef_percento < 100):
-        raise HTTPException(status_code=400, detail="La % IRPEF deve essere tra 0 e 100")
-
     periodo = {
         "id": str(uuid4()),
         "dipendente_id": dipendente_id,
@@ -1983,8 +1963,6 @@ async def aggiungi_periodo_simulazione(dipendente_id: str, input_data: PeriodoSi
         "chiuso_automaticamente": False,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    if input_data.irpef_percento is not None:
-        periodo["irpef_percento"] = round(input_data.irpef_percento, 2)
     await db["tfr_simulazione_periodi"].insert_one(periodo.copy())
 
     return {"success": True, "periodo": _periodo_con_calcolo_live(periodo, None, await _parametri_tfr(db))}
@@ -1994,7 +1972,6 @@ class ModificaPeriodoInput(BaseModel):
     importo_settimanale: Optional[float] = None
     data_inizio: Optional[str] = None
     data_fine: Optional[str] = None  # ha effetto solo se il periodo era già chiuso
-    irpef_percento: Optional[float] = None  # % IRPEF solo di questo periodo
 
 
 @router.put("/simulazione/{dipendente_id}/periodi/{periodo_id}")
@@ -2046,18 +2023,16 @@ async def modifica_periodo_simulazione(dipendente_id: str, periodo_id: str,
 
     aggiornamento: Dict[str, Any] = {"data_inizio": nuova_inizio_str,
                                      "importo_settimanale": round(nuovo_importo, 2)}
-    if input_data.irpef_percento is not None:
-        if not (0 <= input_data.irpef_percento < 100):
-            raise HTTPException(status_code=400, detail="La % IRPEF deve essere tra 0 e 100")
-        aggiornamento["irpef_percento"] = round(input_data.irpef_percento, 2)
     if nuova_fine:
         aggiornamento["data_fine"] = nuova_fine_str
     # I valori calcolati non si salvano: ogni lettura ricalcola con la formula corrente.
+    # irpef_percento/imposte: campi legacy rimossi dal calcolo, ripuliti se presenti da prima.
     await db["tfr_simulazione_periodi"].update_one(
         {"id": periodo_id},
         {"$set": aggiornamento,
          "$unset": {"giorni": "", "settimane": "", "mesi": "", "retribuzione_utile": "",
-                    "lordo": "", "tassazione": "", "inps": "", "netto": "", "aliquota_tassazione": ""}})
+                    "lordo": "", "tassazione": "", "inps": "", "netto": "", "aliquota_tassazione": "",
+                    "irpef_percento": "", "imposte": ""}})
 
     dipendente = await db["dipendenti"].find_one({"id": dipendente_id}, {"_id": 0}) or {}
     aggiornato = await db["tfr_simulazione_periodi"].find_one({"id": periodo_id}, {"_id": 0})
@@ -2090,7 +2065,8 @@ async def elimina_periodo_simulazione(dipendente_id: str, periodo_id: str) -> Di
                 {"id": precedente["id"]},
                 {"$set": {"data_fine": None, "chiuso_automaticamente": False},
                  "$unset": {"giorni": "", "settimane": "", "mesi": "", "retribuzione_utile": "",
-                            "lordo": "", "tassazione": "", "inps": "", "netto": "", "aliquota_tassazione": ""}})
+                            "lordo": "", "tassazione": "", "inps": "", "netto": "", "aliquota_tassazione": "",
+                            "irpef_percento": "", "imposte": ""}})
 
     return {"success": True, "messaggio": "Periodo eliminato"}
 
