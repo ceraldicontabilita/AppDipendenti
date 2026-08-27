@@ -202,7 +202,12 @@ class _Cursore:
         return self
 
     async def _materializza(self) -> List[Dict[str, Any]]:
-        docs = [d for d in await self._coll._tutti() if _match(d, self._filtro)]
+        escludi = self._coll._escludibili(self._filtro, self._proj)
+        # Un campo su cui si ordina va letto, anche se la proiezione lo esclude:
+        # l'ordinamento avviene qui, dopo la lettura.
+        chiavi_ordine = {k.split(".")[0] for k, _ in (self._ordina or [])}
+        escludi = [k for k in escludi if k not in chiavi_ordine]
+        docs = [d for d in await self._coll._tutti(escludi) if _match(d, self._filtro)]
         # ordinamenti multipli: si applicano dal meno al piu' significativo
         for chiave, direzione in reversed(self._ordina or []):
             docs.sort(key=lambda d, k=chiave: _chiave_ordine(_get(d, k)),
@@ -251,18 +256,55 @@ class SupabaseCollection:
             )
         self._db._tabelle_pronte.add(self._tab)
 
-    async def _tutti(self) -> List[Dict[str, Any]]:
+    async def _tutti(self, escludi=None) -> List[Dict[str, Any]]:
+        """Legge i documenti, togliendo in SQL i campi che non servono.
+
+        `cedolini` tiene il PDF in base64 dentro il documento: leggere tutta la
+        collection per filtrarla in Python significava trasferire decine di MB e
+        andare in timeout. Con l'esclusione spinta nella query (`doc - 'pdf_data'`)
+        gli elenchi tornano leggeri, e il PDF si legge solo quando serve davvero.
+        """
         await self._assicura_tabella()
+        if escludi:
+            campi = ", ".join("'%s'" % c.replace("'", "''") for c in sorted(escludi))
+            sql = 'SELECT doc - ARRAY[%s] AS doc FROM public."%s"' % (campi, self._tab)
+        else:
+            sql = 'SELECT doc FROM public."%s"' % self._tab
         async with self._db._pool.acquire() as con:
-            righe = await con.fetch('SELECT doc FROM public."%s"' % self._tab)
+            righe = await con.fetch(sql)
         out = []
         for r in righe:
             doc = r["doc"]
             out.append(json.loads(doc) if isinstance(doc, str) else doc)
         return out
 
+    @staticmethod
+    def _escludibili(filtro, proiezione) -> List[str]:
+        """Campi che la proiezione esclude e che il filtro non usa: si possono
+        togliere gia' in SQL senza cambiare il risultato."""
+        if not proiezione:
+            return []
+        esclusi = [k for k, v in proiezione.items() if not v and k != "_id"]
+        if not esclusi:
+            return []
+        usati = set()
+
+        def raccogli(f):
+            if not isinstance(f, dict):
+                return
+            for k, v in f.items():
+                if k in ("$or", "$and"):
+                    for sub in (v or []):
+                        raccogli(sub)
+                elif not k.startswith("$"):
+                    usati.add(k.split(".")[0])
+
+        raccogli(filtro)
+        return [k for k in esclusi if k not in usati]
+
     async def find_one(self, filtro=None, proiezione=None, **_):
-        for d in await self._tutti():
+        escludi = self._escludibili(filtro, proiezione)
+        for d in await self._tutti(escludi):
             if _match(d, filtro):
                 return _proietta(d, proiezione)
         return None
@@ -362,6 +404,6 @@ class SupabaseDatabase:
 
 
 async def crea_database(dsn: str) -> SupabaseDatabase:
-    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5, command_timeout=30)
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5, command_timeout=60)
     logger.info("Supabase/Postgres connesso")
     return SupabaseDatabase(pool)

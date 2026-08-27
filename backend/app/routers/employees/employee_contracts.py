@@ -363,6 +363,23 @@ async def ccnl_retribuzione(ccnl_id: str, livello: str,
         raise HTTPException(422, str(e))
 
 
+@router.get("/profilo-retributivo/{employee_id}")
+@handle_errors
+async def profilo_retributivo(employee_id: str, ccnl: Optional[str] = None) -> Dict[str, Any]:
+    """Cosa sappiamo davvero della paga di un dipendente.
+
+    Unisce le sue buste (livello, lordo, netto), i bonifici realmente usciti dal
+    conto e il minimo tabellare del CCNL, e segnala gli scostamenti. E' il dato
+    con cui precompilare il contratto senza digitare importi a mano.
+    """
+    from backend.app.services.profilo_retributivo import profilo
+    db = Database.get_db()
+    emp = await db[Collections.EMPLOYEES].find_one({"id": employee_id}, {"_id": 0})
+    if not emp:
+        raise HTTPException(404, "Dipendente non trovato")
+    return await profilo(db, emp, ccnl)
+
+
 @router.post("/ccnl/suggerisci")
 @handle_errors
 async def ccnl_suggerisci(data: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
