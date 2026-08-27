@@ -1013,18 +1013,46 @@ function PresenzePage({ dipendenti, reload }) {
     } catch (e) { toast(e?.response?.data?.detail || "Errore consolidamento", "err"); }
   };
 
-  // ---- Pennello con TRASCINAMENTO: seleziona un tipo, tieni premuto e trascina sui giorni ----
+  // ---- Pennello con SELEZIONE A RETTANGOLO ----
+  // Si sceglie un tipo, si preme su una casella e si trascina: la selezione e' il
+  // rettangolo fra la casella di partenza e quella sotto il mouse, quindi copre
+  // insieme piu' giorni E piu' dipendenti. Prima il trascinamento seguiva il
+  // percorso del mouse: in diagonale lasciava buchi e per coprire un blocco
+  // bisognava ripassare riga per riga.
   const keyCell = (dipId, day) => `${dipId}|${day}`;
+  const ancoraRef = useRef(null);   // { riga, giorno } da cui parte il rettangolo
+
+  // Celle del rettangolo fra l'ancora e la casella corrente.
+  // Con "Applica a tutti" le righe non contano: si prendono tutti i dipendenti.
+  const cellsForRect = (a, b) => {
+    if (!a || !b) return [];
+    const g1 = Math.min(a.giorno, b.giorno), g2 = Math.max(a.giorno, b.giorno);
+    const righe = tuttiMode
+      ? dipendenti
+      : dipendenti.slice(Math.min(a.riga, b.riga), Math.max(a.riga, b.riga) + 1);
+    const out = [];
+    righe.forEach(d => { for (let g = g1; g <= g2; g++) out.push(keyCell(d.id, g)); });
+    return out;
+  };
   const cellsForDay = (dipId, day) => (tuttiMode ? dipendenti.map(d => keyCell(d.id, day)) : [keyCell(dipId, day)]);
-  const startPaint = (dipId, day) => {
+
+  const startPaint = (riga, day, estendi = false) => {
     if (!penna) return;
+    // shift+clic: chiude il rettangolo sull'ancora precedente senza trascinare.
+    // Serve sui mesi lunghi, dove trascinare obbligherebbe a scorrere la tabella.
+    if (estendi && ancoraRef.current) {
+      const cells = cellsForRect(ancoraRef.current, { riga, giorno: day });
+      applicaCelle(cells);
+      return;
+    }
     paintingRef.current = true;
-    selRef.current = new Set(cellsForDay(dipId, day));
+    ancoraRef.current = { riga, giorno: day };
+    selRef.current = new Set(cellsForRect(ancoraRef.current, ancoraRef.current));
     setSelVer(v => v + 1);
   };
-  const extendPaint = (dipId, day) => {
-    if (!paintingRef.current) return;
-    cellsForDay(dipId, day).forEach(k => selRef.current.add(k));
+  const extendPaint = (riga, day) => {
+    if (!paintingRef.current || !ancoraRef.current) return;
+    selRef.current = new Set(cellsForRect(ancoraRef.current, { riga, giorno: day }));
     setSelVer(v => v + 1);
   };
   const applicaCelle = async (cells) => {
@@ -1391,12 +1419,20 @@ function PresenzePage({ dipendenti, reload }) {
           </label>
         </div>
         <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 8 }}>
-          Seleziona un tipo, poi <b>tieni premuto e trascina</b> sui giorni per applicarlo (anche più giorni in una volta). Un clic singolo applica una casella; il <b>numero del giorno</b> in cima lo applica a tutti. Per la Malattia chiede il numero di protocollo.
+          Scegli un tipo, poi <b>tieni premuto e trascina</b>: si seleziona il <b>rettangolo</b> fra la casella di partenza e quella sotto il mouse, quindi più giorni e più dipendenti in una volta sola. In alternativa clicca la prima casella e fai <b>shift+clic</b> sull&apos;ultima. Un clic singolo applica una casella; il <b>numero del giorno</b> in cima lo applica a tutti. Per la Malattia chiede il numero di protocollo.
         </div>
+        {selRef.current.size > 0 && (
+          <div style={{ marginTop: 8, fontSize: 13, fontWeight: 700, color: "#3d8168" }}>
+            {selRef.current.size} {selRef.current.size === 1 ? "casella selezionata" : "caselle selezionate"} — rilascia per applicare «{penna}»
+          </div>
+        )}
       </div>
 
       {/* Attendance Grid */}
-      <div className="dc-card dc-presenze-grid-container">
+      {/* Col pennello attivo il testo non si seleziona: trascinando sulle caselle
+          il browser evidenziava i nomi dei dipendenti invece di disegnare. */}
+      <div className="dc-card dc-presenze-grid-container"
+        style={penna ? { userSelect: "none", WebkitUserSelect: "none" } : undefined}>
         <table className="dc-presenze-table">
           <thead>
             <tr>
@@ -1415,7 +1451,7 @@ function PresenzePage({ dipendenti, reload }) {
             </tr>
           </thead>
           <tbody>
-            {dipendenti.map((dip) => (
+            {dipendenti.map((dip, rowIdx) => (
               <tr key={dip.id}>
                 <td className="dc-presenze-td-name">
                   <div className="dc-table-user">
@@ -1442,8 +1478,8 @@ function PresenzePage({ dipendenti, reload }) {
                   const inSel = selRef.current.has(keyCell(dip.id, day));
                   return (
                     <td key={i} className={`dc-presenze-td-day ${isWeekend ? 'weekend' : ''}`}
-                      onMouseDown={(e) => { if (penna) { e.preventDefault(); startPaint(dip.id, day); } }}
-                      onMouseEnter={() => extendPaint(dip.id, day)}
+                      onMouseDown={(e) => { if (penna) { e.preventDefault(); startPaint(rowIdx, day, e.shiftKey); } }}
+                      onMouseEnter={() => extendPaint(rowIdx, day)}
                       onTouchStart={() => { if (penna) applicaCelle(cellsForDay(dip.id, day)); }}
                       style={{ cursor: penna ? "cell" : "default", position: "relative", userSelect: "none",
                         outline: inSel ? "2px solid #5b7a6b" : "none", background: inSel ? "#e8efe9" : undefined }}
