@@ -4939,11 +4939,62 @@ function AssunzionePage({ dipendenti, reload }) {
   const [nuovo, setNuovo] = useState(NUOVO0);
   const setN = (k, v) => setNuovo(n => ({ ...n, [k]: v }));
 
+  // --- Assistente CCNL: il livello e la paga si ricavano a vicenda ---------
+  // Le tabelle stanno nel backend (services/ccnl.py) e non qui: erano gia'
+  // duplicate nel frontend, e due copie di un minimo retributivo si
+  // disallineano al primo rinnovo.
+  const [ccnlElenco, setCcnlElenco] = useState([]);
+  const [ccnlSel, setCcnlSel] = useState("turismo_pubblici_esercizi");
+  const [ccnlCalc, setCcnlCalc] = useState(null);      // esito livello -> paga
+  const [ccnlTarget, setCcnlTarget] = useState("");    // lordo mensile desiderato
+  const [ccnlSugg, setCcnlSugg] = useState(null);      // esito paga -> livello
+  const [ccnlErr, setCcnlErr] = useState("");
+
   const loadTemplates = () => axios.get(`${C}/templates`).then(r => setTemplates(r.data || [])).catch(() => {});
   useEffect(() => {
     axios.get(`${C}/types`).then(r => { setTipi(r.data || []); if (r.data?.[0]) setTipo(r.data[0].id); }).catch(() => {});
+    axios.get(`${C}/ccnl`).then(r => {
+      const l = (r.data || []).filter(c => c.tabelle_caricate);
+      setCcnlElenco(l);
+      if (l.length && !l.some(c => c.id === ccnlSel)) setCcnlSel(l[0].id);
+    }).catch(() => {});
     loadTemplates();
   }, []);
+  // Livello -> paga: compila i campi economici con i minimi del CCNL scelto.
+  const applicaLivello = async (livello) => {
+    setCcnlErr(""); setCcnlSugg(null);
+    if (!livello) { setCcnlCalc(null); return; }
+    try {
+      const ore = extra.ore_settimanali || 40;
+      const r = await axios.get(`${C}/ccnl/${ccnlSel}/livello/${encodeURIComponent(livello)}`,
+        { params: { ore_settimanali: ore } });
+      setCcnlCalc(r.data);
+      set("livello", r.data.livello);
+      set("stipendio_orario", String(r.data.oraria).replace(".", ","));
+      if (r.data.periodo_prova) set("periodo_prova", r.data.periodo_prova);
+      if (r.data.ferie_giorni) set("ferie_giorni", String(r.data.ferie_giorni));
+    } catch (e) {
+      setCcnlCalc(null);
+      setCcnlErr(e?.response?.data?.detail || "Livello non calcolabile");
+    }
+  };
+
+  // Paga -> livello: dall'importo che si vuole riconoscere, il livello coerente.
+  const suggerisciLivello = async () => {
+    setCcnlErr(""); setCcnlCalc(null);
+    try {
+      const r = await axios.post(`${C}/ccnl/suggerisci`, {
+        importo_mensile: String(ccnlTarget).replace(",", "."),
+        ccnl: ccnlSel,
+        ore_settimanali: extra.ore_settimanali || 40,
+      });
+      setCcnlSugg(r.data);
+    } catch (e) {
+      setCcnlSugg(null);
+      setCcnlErr(e?.response?.data?.detail || "Importo non valutabile");
+    }
+  };
+
   const loadContratti = (id) => { if (id) axios.get(`${C}/employee/${id}`).then(r => setContratti(r.data || [])).catch(() => setContratti([])); else setContratti([]); };
   useEffect(() => {
     loadContratti(dipId);
@@ -5190,6 +5241,83 @@ function AssunzionePage({ dipendenti, reload }) {
           <label style={full}>Indirizzo di residenza<input className="dc-input" value={extra.indirizzo} onChange={(e) => set("indirizzo", e.target.value)} placeholder="Via/Piazza, n. civico, CAP, Comune" /></label>
 
           <div style={secTitle}>Inquadramento</div>
+          <div style={{ ...full, background: "#f4f1ea", border: "1px solid #e6e0d4", borderRadius: 8, padding: 12 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>
+              Assistente CCNL <span className="dc-muted" style={{ fontWeight: 400, fontSize: 11 }}>
+                — scegli il livello e la paga si compila, oppure scrivi quanto vuoi
+                riconoscere e ti dico che livello e&apos;
+              </span>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
+              <label style={{ fontSize: 12, fontWeight: 600 }}>Contratto collettivo
+                <select className="dc-input" value={ccnlSel}
+                  onChange={(e) => { setCcnlSel(e.target.value); setCcnlCalc(null); setCcnlSugg(null); }}>
+                  {ccnlElenco.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
+                </select>
+              </label>
+              <label style={{ fontSize: 12, fontWeight: 600 }}>Livello
+                <select className="dc-input" value={extra.livello || ""}
+                  onChange={(e) => applicaLivello(e.target.value)}>
+                  <option value="">— scegli —</option>
+                  {(ccnlElenco.find(c => c.id === ccnlSel)?.livelli || []).map(l =>
+                    <option key={l} value={l}>{l}</option>)}
+                </select>
+              </label>
+              <span className="dc-muted" style={{ fontSize: 12, paddingBottom: 8 }}>oppure</span>
+              <label style={{ fontSize: 12, fontWeight: 600 }}>Lordo mensile che vuoi riconoscere (€)
+                <input className="dc-input" value={ccnlTarget} placeholder="es. 1600"
+                  onChange={(e) => setCcnlTarget(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); suggerisciLivello(); } }} />
+              </label>
+              <button type="button" className="dc-btn" onClick={suggerisciLivello}
+                disabled={!ccnlTarget} style={{ marginBottom: 2 }}>Suggerisci livello</button>
+            </div>
+
+            {ccnlErr && <div style={{ marginTop: 8, fontSize: 12, color: "#d35f4e" }}>{ccnlErr}</div>}
+
+            {ccnlCalc && (
+              <div style={{ marginTop: 10, fontSize: 13 }}>
+                <b>Livello {ccnlCalc.livello}</b> · {ccnlCalc.mensile_lordo.toLocaleString("it-IT",
+                  { minimumFractionDigits: 2 })} €/mese ·{" "}
+                {ccnlCalc.giornaliera.toLocaleString("it-IT", { minimumFractionDigits: 2 })} €/giorno ·{" "}
+                {ccnlCalc.oraria.toLocaleString("it-IT", { minimumFractionDigits: 2 })} €/ora
+                {ccnlCalc.part_time && <span className="dc-muted"> (part-time {ccnlCalc.percentuale_part_time}%)</span>}
+                {ccnlCalc.descrizione && <div className="dc-muted" style={{ fontSize: 12, marginTop: 3 }}>{ccnlCalc.descrizione}</div>}
+              </div>
+            )}
+
+            {ccnlSugg && (
+              <div style={{ marginTop: 10, fontSize: 13 }}>
+                {ccnlSugg.sotto_minimo ? (
+                  <div style={{ color: "#d35f4e", fontWeight: 700 }}>
+                    {ccnlSugg.importo_richiesto.toLocaleString("it-IT", { minimumFractionDigits: 2 })} € è sotto
+                    il livello più basso del contratto ({ccnlSugg.minimo_assoluto.toLocaleString("it-IT",
+                      { minimumFractionDigits: 2 })} €). Non è inquadrabile così.
+                  </div>
+                ) : (
+                  <div>
+                    Livello suggerito: <b>{ccnlSugg.livello_suggerito}</b> ·{" "}
+                    {ccnlSugg.giornaliera.toLocaleString("it-IT", { minimumFractionDigits: 2 })} €/giorno ·{" "}
+                    {ccnlSugg.oraria.toLocaleString("it-IT", { minimumFractionDigits: 2 })} €/ora
+                    <span style={{ color: ccnlSugg.copre_il_minimo ? "#3d8168" : "#d35f4e", marginLeft: 8 }}>
+                      ({ccnlSugg.scarto >= 0 ? "+" : ""}{ccnlSugg.scarto.toLocaleString("it-IT",
+                        { minimumFractionDigits: 2 })} € sul tabellare)
+                    </span>
+                  </div>
+                )}
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+                  {ccnlSugg.classifica.slice(0, 4).map(c => (
+                    <button key={c.livello} type="button" className="dc-btn dc-btn-ghost"
+                      onClick={() => applicaLivello(c.livello)}
+                      title={c.descrizione || `Applica il livello ${c.livello}`}
+                      style={{ fontSize: 12, padding: "3px 8px" }}>
+                      {c.livello}: {c.mensile_lordo.toLocaleString("it-IT", { minimumFractionDigits: 2 })} €
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
           <label style={lbl}>Mansione<input list="mansioni-list" className="dc-input" value={extra.mansione} onChange={(e) => set("mansione", e.target.value)} placeholder="scegli o scrivi" /></label>
           <label style={lbl}>Qualifica<input className="dc-input" value={extra.qualifica} onChange={(e) => set("qualifica", e.target.value)} placeholder="se diversa dalla mansione" /></label>
           <label style={lbl}>Livello CCNL<input className="dc-input" value={extra.livello} onChange={(e) => set("livello", e.target.value)} /></label>

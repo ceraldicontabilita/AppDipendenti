@@ -63,6 +63,38 @@ _TERZIARIO_PROVA = {
     "6": "45 giorni di lavoro effettivo", "7": "45 giorni di lavoro effettivo",
 }
 
+# --------------------------------------------------------------------------
+# CCNL Pubblici Esercizi / Turismo (H05Y) — e' il contratto del bar e della
+# pasticceria. Stessa struttura: (paga base + contingenza = totale mensile).
+# I valori erano gia' nel frontend (CCNL_LIVELLI_2026): qui diventano l'unica
+# fonte, cosi' non esistono due tabelle da tenere allineate a mano.
+# --------------------------------------------------------------------------
+_TURISMO_LIVELLI = {
+    "QA": (542.70, 1920.26, 2462.96),
+    "QB": (537.59, 1734.02, 2271.61),
+    "1":  (536.71, 1570.97, 2107.68),
+    "2":  (531.59, 1384.76, 1916.35),
+    "3":  (528.26, 1272.47, 1800.73),
+    "4":  (524.94, 1167.75, 1692.69),
+    "5":  (522.37, 1057.72, 1580.09),
+    "6S": (520.64,  994.19, 1514.83),
+    "6":  (520.51,  971.06, 1491.57),
+    "7":  (518.45,  871.75, 1390.20),
+}
+
+_TURISMO_MANSIONI = {
+    "QA": "Quadri direttivi.",
+    "QB": "Quadri.",
+    "1":  "Direttore, capo servizi.",
+    "2":  "Capo cuoco, capo barista.",
+    "3":  "Cuoco unico, primo pasticciere, barman unico.",
+    "4":  "Cuoco tavola calda/capo partita, secondo pasticciere, rosticciere, barman.",
+    "5":  "Barista, cameriere (anche tavola calda), banconiere pasticceria/gelateria.",
+    "6S": "Operai qualificati super.",
+    "6":  "Commis cucina/sala/bar, secondo banconiere pasticceria.",
+    "7":  "Personale di fatica / primo ingresso.",
+}
+
 # Divisore orario per orario settimanale contrattuale
 _DIVISORI_ORARI = {40: 168, 42: 182, 45: 195}
 DIVISORE_GIORNALIERO = 26
@@ -100,11 +132,19 @@ CCNL = {
         "id": "turismo_pubblici_esercizi",
         "nome": "Pubblici Esercizi, Ristorazione e Turismo",
         "codice_cnel": "H05Y",
-        "parti": "Fipe/Confcommercio · Filcams · Fisascat · Uiltucs",
-        "tabelle_caricate": False,
-        "livelli": {},
-        "nota": "Tabelle retributive non caricate: serve l'informativa D.Lgs. 152/1997 "
-                "o le tabelle ufficiali del CCNL Pubblici Esercizi.",
+        "parti": "Fipe/Confcommercio · Filcams Cgil · Fisascat Cisl · Uiltucs Uil",
+        "stipula": "2024-06-05",
+        "fonte": "Minimi Confcommercio-FIPE, rinnovo 05/06/2024, terza tranche dal "
+                 "01/06/2026 (fonte Confcommercio Milano). Da ricontrollare a ogni rinnovo.",
+        "tabelle_caricate": True,
+        "livelli": _TURISMO_LIVELLI,
+        "descrizioni": _TURISMO_MANSIONI,
+        "scatti": {},              # scatti non caricati: restano a zero
+        "periodo_prova": {},
+        "ore_settimanali_std": 40,
+        "ferie_giorni": 26,
+        "mensilita": 14,
+        "terzo_elemento": 0.0,
     },
     "panificazione_pasticceria": {
         "id": "panificazione_pasticceria",
@@ -136,9 +176,25 @@ def _get(ccnl_id: Optional[str]) -> Dict[str, Any]:
 
 
 def _norm_livello(livello: Any) -> str:
-    """'3', '3°', 'III', ' q ' -> '3' / 'Q'. I documenti li scrivono in mille modi."""
-    s = str(livello or "").strip().upper().replace("°", "").replace("^", "")
+    """Riporta alla chiave di tabella le mille grafie dei documenti.
+
+    '3', '3°', 'III' -> '3' · 'Quadro A', 'q a' -> 'QA' · '6° S', 'VI S' -> '6S'
+    """
+    s = str(livello or "").strip().upper()
+    for ch in ("°", "º", "^", "."):
+        s = s.replace(ch, "")
+    s = " ".join(s.split())
+    if s.startswith("QUADRO"):
+        coda = s.replace("QUADRO", "").strip()
+        return ("Q" + coda) if coda in ("A", "B") else "Q"
     romani = {"I": "1", "II": "2", "III": "3", "IV": "4", "V": "5", "VI": "6", "VII": "7"}
+    parti = s.split()
+    if len(parti) == 2 and parti[1] == "S":                 # '6 S' / 'VI S'
+        return romani.get(parti[0], parti[0]) + "S"
+    s = s.replace(" ", "")
+    if s.endswith("S") and len(s) > 1:                      # '6S' / 'VIS'
+        base = s[:-1]
+        return romani.get(base, base) + "S"
     return romani.get(s, s)
 
 
@@ -162,7 +218,14 @@ def lista_ccnl() -> List[Dict[str, Any]]:
 
 
 def _ordine_livello(l: str) -> tuple:
-    return (0, 0) if l == "Q" else (1, int(l)) if l.isdigit() else (2, 0)
+    """Dal piu' alto al piu' basso: quadri, poi i numeri, col 'super' prima del
+    livello pieno di pari numero (6S viene prima di 6)."""
+    if l in ("Q", "QA"):
+        return (0, 0, 0)
+    if l == "QB":
+        return (0, 1, 0)
+    base, sup = (l[:-1], 0) if l.endswith("S") else (l, 1)
+    return (1, int(base), sup) if base.isdigit() else (2, 0, 0)
 
 
 # --------------------------------------------------------------------------
