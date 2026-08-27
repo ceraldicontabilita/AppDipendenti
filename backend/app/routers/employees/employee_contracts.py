@@ -339,6 +339,46 @@ async def get_contract_types() -> List[Dict[str, str]]:
     return CONTRACT_TYPES
 
 
+# ---------------------------------------------------------------------------
+# CCNL: livelli e retribuzioni. Servono all'anagrafica per non far digitare a
+# mano gli importi e per accorgersi subito se una paga sta sotto il minimo.
+# ---------------------------------------------------------------------------
+@router.get("/ccnl")
+@handle_errors
+async def elenco_ccnl() -> List[Dict[str, Any]]:
+    """CCNL disponibili. `tabelle_caricate` dice se si puo' gia' calcolare."""
+    from backend.app.services.ccnl import lista_ccnl
+    return lista_ccnl()
+
+
+@router.get("/ccnl/{ccnl_id}/livello/{livello}")
+@handle_errors
+async def ccnl_retribuzione(ccnl_id: str, livello: str,
+                            ore_settimanali: float = 40, scatti: int = 0) -> Dict[str, Any]:
+    """Livello -> retribuzione mensile, giornaliera e oraria (part-time incluso)."""
+    from backend.app.services.ccnl import retribuzione_per_livello, CCNLNonDisponibile
+    try:
+        return retribuzione_per_livello(livello, ccnl_id, ore_settimanali, scatti)
+    except CCNLNonDisponibile as e:
+        raise HTTPException(422, str(e))
+
+
+@router.post("/ccnl/suggerisci")
+@handle_errors
+async def ccnl_suggerisci(data: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Importo -> livello suggerito, con la classifica per scarto.
+
+    Body: {"importo_mensile": 1600, "ccnl": "terziario", "ore_settimanali": 40}
+    """
+    from backend.app.services.ccnl import suggerisci_livello, CCNLNonDisponibile
+    try:
+        return suggerisci_livello(data.get("importo_mensile"),
+                                  data.get("ccnl"),
+                                  data.get("ore_settimanali"))
+    except CCNLNonDisponibile as e:
+        raise HTTPException(422, str(e))
+
+
 @router.get("/templates")
 @handle_errors
 async def list_templates() -> List[Dict[str, Any]]:

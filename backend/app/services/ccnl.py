@@ -1,0 +1,270 @@
+"""Motore CCNL: livelli, minimi retributivi e conversioni.
+
+A cosa serve
+------------
+La generazione dei contratti sapeva gia' riempire i template .docx, ma i valori
+economici andavano scritti a mano: nessuna tabella diceva quanto vale un livello.
+Qui stanno le tabelle ufficiali e le due domande che l'anagrafica deve poter fare:
+
+    livello  -> quanto gli spetta      (retribuzione_per_livello)
+    importo  -> che livello e'         (suggerisci_livello)
+
+Da dove vengono i numeri
+------------------------
+CCNL Terziario, Distribuzione e Servizi (CNEL H011), Confcommercio / Filcams
+Cgil / Fisascat Cisl / Uiltucs Uil: tabelle prese dall'informativa D.Lgs.
+152/1997 fornita dall'azienda (accordo di rinnovo 22 marzo 2024, scadenza
+31 marzo 2027). Ogni riga e' verificata: contingenza + minimo = retribuzione.
+
+ATTENZIONE — nessun numero e' inventato. I CCNL di cui non abbiamo il testo
+ufficiale sono dichiarati con `tabelle_caricate = False` e le funzioni si
+rifiutano di calcolare: meglio un errore esplicito che una busta paga sbagliata.
+"""
+from typing import Any, Dict, List, Optional
+
+
+# --------------------------------------------------------------------------
+# Tabelle
+# --------------------------------------------------------------------------
+# Per ogni livello: (contingenza+EDR, minimo contrattuale, retribuzione mensile)
+_TERZIARIO_LIVELLI = {
+    "Q":  (540.37, 2070.25, 2610.62),
+    "1":  (537.52, 1864.88, 2402.40),
+    "2":  (532.54, 1613.11, 2145.65),
+    "3":  (527.90, 1378.78, 1906.68),
+    "4":  (524.22, 1192.46, 1716.68),
+    "5":  (521.94, 1077.35, 1599.29),
+    "6":  (519.76,  967.22, 1486.98),
+    "7":  (517.51,  828.08, 1345.59),
+}
+
+_TERZIARIO_DESCRIZIONI = {
+    "Q": "Quadri: funzioni direttive con poteri di discrezionalita' decisionale.",
+    "1": "Impiegati con funzioni ad alto contenuto professionale e direzione esecutiva.",
+    "2": "Impiegati di concetto con compiti autonomi, coordinamento e controllo.",
+    "3": "Impiegati di concetto; operai specializzati provetti.",
+    "4": "Impiegati con compiti operativi anche di vendita; operai con conoscenze tecniche.",
+    "5": "Impiegati e operai che eseguono lavori qualificati.",
+    "6": "Operai con semplici conoscenze pratiche.",
+    "7": "Operai adibiti a mansioni di pulizia o equivalenti.",
+}
+
+# Scatti di anzianita': importo mensile per scatto (massimo 10, cadenza triennale)
+_TERZIARIO_SCATTI = {
+    "Q": 25.46, "1": 24.84, "2": 22.83, "3": 21.95,
+    "4": 20.66, "5": 20.30, "6": 19.73, "7": 19.47,
+}
+
+# Periodo di prova per livello
+_TERZIARIO_PROVA = {
+    "Q": "6 mesi di calendario", "1": "6 mesi di calendario",
+    "2": "60 giorni di lavoro effettivo", "3": "60 giorni di lavoro effettivo",
+    "4": "60 giorni di lavoro effettivo", "5": "60 giorni di lavoro effettivo",
+    "6": "45 giorni di lavoro effettivo", "7": "45 giorni di lavoro effettivo",
+}
+
+# Divisore orario per orario settimanale contrattuale
+_DIVISORI_ORARI = {40: 168, 42: 182, 45: 195}
+DIVISORE_GIORNALIERO = 26
+
+CCNL = {
+    "terziario": {
+        "id": "terziario",
+        "nome": "Terziario, Distribuzione e Servizi",
+        "codice_cnel": "H011",
+        "parti": "Confcommercio · Filcams Cgil · Fisascat Cisl · Uiltucs Uil",
+        "stipula": "2024-03-22",
+        "scadenza": "2027-03-31",
+        "fonte": "Informativa D.Lgs. 152/1997 aziendale (accordo di rinnovo 22/03/2024)",
+        "tabelle_caricate": True,
+        "livelli": _TERZIARIO_LIVELLI,
+        "descrizioni": _TERZIARIO_DESCRIZIONI,
+        "scatti": _TERZIARIO_SCATTI,
+        "periodo_prova": _TERZIARIO_PROVA,
+        "ore_settimanali_std": 40,
+        "ferie_giorni": 26,
+        "mensilita": 14,
+        "terzo_elemento": 11.36,          # mensile, per 14 mensilita', tutti i livelli
+        "maggiorazioni": {
+            "straordinario_41_48": 0.15,
+            "straordinario_oltre_48": 0.20,
+            "straordinario_festivo": 0.30,
+            "straordinario_notturno": 0.50,
+            "supplementare": 0.35,
+        },
+    },
+    # I due CCNL richiesti per bar/pasticceria. Le tabelle NON sono nel materiale
+    # fornito: finche' non arrivano, l'anagrafica puo' elencarli ma i calcoli si
+    # fermano con un errore esplicito.
+    "turismo_pubblici_esercizi": {
+        "id": "turismo_pubblici_esercizi",
+        "nome": "Pubblici Esercizi, Ristorazione e Turismo",
+        "codice_cnel": "H05Y",
+        "parti": "Fipe/Confcommercio · Filcams · Fisascat · Uiltucs",
+        "tabelle_caricate": False,
+        "livelli": {},
+        "nota": "Tabelle retributive non caricate: serve l'informativa D.Lgs. 152/1997 "
+                "o le tabelle ufficiali del CCNL Pubblici Esercizi.",
+    },
+    "panificazione_pasticceria": {
+        "id": "panificazione_pasticceria",
+        "nome": "Panificazione e Pasticceria",
+        "codice_cnel": "",
+        "parti": "",
+        "tabelle_caricate": False,
+        "livelli": {},
+        "nota": "Tabelle retributive non caricate: serve il testo ufficiale del CCNL "
+                "applicato alla pasticceria (artigiano o industria: sono diversi).",
+    },
+}
+
+CCNL_DEFAULT = "terziario"
+
+
+class CCNLNonDisponibile(Exception):
+    """Il CCNL esiste in anagrafica ma non abbiamo le sue tabelle retributive."""
+
+
+# --------------------------------------------------------------------------
+# Helper
+# --------------------------------------------------------------------------
+def _get(ccnl_id: Optional[str]) -> Dict[str, Any]:
+    c = CCNL.get((ccnl_id or CCNL_DEFAULT).strip().lower())
+    if not c:
+        raise CCNLNonDisponibile(f"CCNL sconosciuto: {ccnl_id!r}")
+    return c
+
+
+def _norm_livello(livello: Any) -> str:
+    """'3', '3°', 'III', ' q ' -> '3' / 'Q'. I documenti li scrivono in mille modi."""
+    s = str(livello or "").strip().upper().replace("°", "").replace("^", "")
+    romani = {"I": "1", "II": "2", "III": "3", "IV": "4", "V": "5", "VI": "6", "VII": "7"}
+    return romani.get(s, s)
+
+
+def divisore_orario(ore_settimanali: Any) -> int:
+    """Divisore per il calcolo della quota oraria. Fuori tabella si riproporziona
+    sul rapporto standard 168/40, che e' quello previsto per le 40 ore."""
+    try:
+        ore = int(round(float(ore_settimanali)))
+    except (TypeError, ValueError):
+        ore = 40
+    if ore in _DIVISORI_ORARI:
+        return _DIVISORI_ORARI[ore]
+    return max(1, int(round(ore * 168 / 40)))
+
+
+def lista_ccnl() -> List[Dict[str, Any]]:
+    return [{"id": c["id"], "nome": c["nome"], "codice_cnel": c.get("codice_cnel", ""),
+             "tabelle_caricate": c["tabelle_caricate"], "nota": c.get("nota", ""),
+             "livelli": sorted(c["livelli"].keys(), key=_ordine_livello)}
+            for c in CCNL.values()]
+
+
+def _ordine_livello(l: str) -> tuple:
+    return (0, 0) if l == "Q" else (1, int(l)) if l.isdigit() else (2, 0)
+
+
+# --------------------------------------------------------------------------
+# livello -> retribuzione
+# --------------------------------------------------------------------------
+def retribuzione_per_livello(livello: Any, ccnl_id: Optional[str] = None,
+                             ore_settimanali: Any = None, scatti: int = 0) -> Dict[str, Any]:
+    """Quanto spetta a un livello: mensile, giornaliera e oraria.
+
+    Il part-time e' riproporzionato sulle ore rispetto all'orario pieno del CCNL.
+    `scatti` e' il numero di scatti di anzianita' maturati (il CCNL ne prevede
+    al massimo 10, e oltre quel tetto non maturano piu').
+    """
+    c = _get(ccnl_id)
+    if not c["tabelle_caricate"]:
+        raise CCNLNonDisponibile(c.get("nota") or f"Tabelle non caricate per {c['nome']}")
+    lv = _norm_livello(livello)
+    if lv not in c["livelli"]:
+        raise CCNLNonDisponibile(f"Livello {livello!r} non previsto dal CCNL {c['nome']}")
+
+    contingenza, minimo, retribuzione = c["livelli"][lv]
+    std = c["ore_settimanali_std"]
+    ore = float(ore_settimanali) if ore_settimanali else std
+    quota = min(1.0, ore / std) if std else 1.0
+
+    n_scatti = max(0, min(int(scatti or 0), 10))
+    imp_scatti = round(c["scatti"].get(lv, 0.0) * n_scatti, 2)
+
+    mensile_pieno = retribuzione + imp_scatti + c.get("terzo_elemento", 0.0)
+    mensile = round(mensile_pieno * quota, 2)
+    div_ore = divisore_orario(ore if ore in _DIVISORI_ORARI else std)
+
+    return {
+        "ccnl": c["id"], "ccnl_nome": c["nome"], "livello": lv,
+        "descrizione": c.get("descrizioni", {}).get(lv, ""),
+        "contingenza_edr": contingenza,
+        "minimo_contrattuale": minimo,
+        "retribuzione_tabellare": retribuzione,
+        "scatti_numero": n_scatti,
+        "scatti_importo": imp_scatti,
+        "terzo_elemento": c.get("terzo_elemento", 0.0),
+        "ore_settimanali": ore,
+        "part_time": quota < 1.0,
+        "percentuale_part_time": round(quota * 100, 1),
+        "mensile_lordo": mensile,
+        "giornaliera": round(mensile / DIVISORE_GIORNALIERO, 2),
+        "oraria": round(mensile_pieno / div_ore, 2),
+        "mensilita": c.get("mensilita", 14),
+        "annuo_lordo": round(mensile * c.get("mensilita", 14), 2),
+        "ferie_giorni": c.get("ferie_giorni"),
+        "periodo_prova": c.get("periodo_prova", {}).get(lv, ""),
+    }
+
+
+# --------------------------------------------------------------------------
+# importo -> livello
+# --------------------------------------------------------------------------
+def suggerisci_livello(importo_mensile: Any, ccnl_id: Optional[str] = None,
+                       ore_settimanali: Any = None) -> Dict[str, Any]:
+    """Dato quanto si vuole pagare, quale livello ci corrisponde.
+
+    Restituisce il livello piu' vicino e la classifica completa per scarto, cosi'
+    in anagrafica si vede anche la seconda scelta. `sotto_minimo` segnala quando
+    l'importo non raggiunge nemmeno il livello piu' basso: e' il caso che va
+    fermato prima di firmare, non dopo.
+    """
+    c = _get(ccnl_id)
+    if not c["tabelle_caricate"]:
+        raise CCNLNonDisponibile(c.get("nota") or f"Tabelle non caricate per {c['nome']}")
+    try:
+        importo = float(str(importo_mensile).replace(",", "."))
+    except (TypeError, ValueError):
+        raise CCNLNonDisponibile(f"Importo non valido: {importo_mensile!r}")
+
+    candidati = []
+    for lv in sorted(c["livelli"], key=_ordine_livello):
+        r = retribuzione_per_livello(lv, c["id"], ore_settimanali)
+        scarto = importo - r["mensile_lordo"]
+        candidati.append({
+            "livello": lv,
+            "descrizione": r["descrizione"],
+            "mensile_lordo": r["mensile_lordo"],
+            "giornaliera": r["giornaliera"],
+            "oraria": r["oraria"],
+            "scarto": round(scarto, 2),
+            "scarto_percentuale": round(scarto / r["mensile_lordo"] * 100, 1) if r["mensile_lordo"] else 0.0,
+        })
+
+    per_vicinanza = sorted(candidati, key=lambda x: abs(x["scarto"]))
+    migliore = per_vicinanza[0]
+    piu_basso = min(candidati, key=lambda x: x["mensile_lordo"])
+
+    return {
+        "ccnl": c["id"], "ccnl_nome": c["nome"],
+        "importo_richiesto": round(importo, 2),
+        "ore_settimanali": float(ore_settimanali) if ore_settimanali else c["ore_settimanali_std"],
+        "livello_suggerito": migliore["livello"],
+        "scarto": migliore["scarto"],
+        "copre_il_minimo": migliore["scarto"] >= 0,
+        "sotto_minimo": importo < piu_basso["mensile_lordo"],
+        "minimo_assoluto": piu_basso["mensile_lordo"],
+        "giornaliera": migliore["giornaliera"],
+        "oraria": migliore["oraria"],
+        "classifica": per_vicinanza,
+    }
