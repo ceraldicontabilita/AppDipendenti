@@ -4421,7 +4421,6 @@ function BonificiDaAssociarePage({ dipendenti }) {
   const [loading, setLoading] = useState(true);
   const [scelte, setScelte] = useState({});   // id -> { dipendente_id, mese, anno }
   const [busy, setBusy] = useState(null);
-  const [importBusy, setImportBusy] = useState(false);
 
   const eur = (n) => (Number(n) || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const dipOrdinati = [...(dipendenti || [])].sort((a, b) => (a.nome_completo || "").localeCompare(b.nome_completo || ""));
@@ -4472,31 +4471,12 @@ function BonificiDaAssociarePage({ dipendenti }) {
     finally { setBusy(null); }
   };
 
-  const importaDaDrive = async () => {
-    setImportBusy(true);
-    try {
-      const r = await axios.post(`${API}/paghe/importa-bonifici-drive`, {});
-      const d = r.data || {};
-      toast(`Bonifici Drive: ${d.importati || 0} associati automaticamente, ${d.in_coda_da_associare || 0} finiti qui da associare a mano`);
-      await load();
-    } catch (e) { toast(e?.response?.data?.detail || "Errore import da Drive", "err"); }
-    finally { setImportBusy(false); }
-  };
-
   return (
     <div className="dc-page">
       <div className="dc-page-header">
         <div>
           <h1>Bonifici da associare</h1>
-          <p>{righe.length} bonifici cumulativi ("beneficiari diversi") in attesa di essere assegnati a un dipendente</p>
-        </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button className="dc-btn" disabled={importBusy} onClick={importaDaDrive} title="Legge i PDF nuovi dalla cartella Drive bonifici">
-            {importBusy ? "Importo…" : "📥 Importa da Drive"}
-          </button>
-          <a href={DRIVE_BONIFICI_URL} target="_blank" rel="noreferrer" className="dc-btn">
-            📁 Apri cartella Drive
-          </a>
+          <p>{righe.length} bonifici cumulativi ("beneficiari diversi") in attesa di essere assegnati a un dipendente. L'import dalla cartella Drive si fa da "Cedolini &amp; Bonifici" — arrivano qui solo quelli che non si possono assegnare da soli.</p>
         </div>
       </div>
 
