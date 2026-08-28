@@ -248,6 +248,15 @@ async def sincronizza_bonifici_storici():
          "assegnato_da_bonifico_diversi": {"$exists": False}},
         {"_id": 0}).to_list(5000)
 
+    # Prefetch in blocco (stesso motivo delle altre correzioni in questo file):
+    # un find_one per bonifico dentro il ciclo, su una tabella non indicizzata,
+    # è di nuovo un incrocio N×M — con ~800 bonifici storici è la stessa causa
+    # dei 502 già visti in produzione. pdf_data escluso: qui serve solo la
+    # tripletta dipendente/data/importo per il controllo duplicati.
+    pagamenti_esistenti = set()
+    async for p in db.pagamenti_esiti.find({}, {"_id": 0, "pdf_data": 0, "causale": 0, "beneficiario": 0}):
+        pagamenti_esistenti.add((p.get("dipendente_id"), p.get("data"), p.get("importo")))
+
     affected = set()
     importati = duplicati = 0
     for b in bonifici:
@@ -264,20 +273,20 @@ async def sincronizza_bonifici_storici():
         # Difesa aggiuntiva: stesso dipendente/data/importo già presente in
         # pagamenti_esiti (da CSV, da un'altra corsa di questo stesso ponte, o
         # da un altro percorso) -> non è un nuovo pagamento, salta.
-        gia_presente = await db.pagamenti_esiti.find_one(
-            {"dipendente_id": dip_id, "data": data_pag, "importo": importo})
-        if gia_presente:
+        if (dip_id, data_pag, importo) in pagamenti_esistenti:
             duplicati += 1
             continue
+        pagamenti_esistenti.add((dip_id, data_pag, importo))
         key = f"bonifici-coll:{b.get('id')}"
-        await db.pagamenti_esiti.update_one(
-            {"key": key},
-            {"$set": {"key": key, "cro": None, "dipendente_id": dip_id,
-                      "data": data_pag, "importo": importo,
-                      "causale": b.get("fonte") or "Archivio bonifici PDF",
-                      "beneficiario": b.get("dipendente_nome"),
-                      "mese": mese, "anno": anno, "origine": "bonifici-storico"}},
-            upsert=True)
+        doc = {"key": key, "cro": None, "dipendente_id": dip_id,
+               "data": data_pag, "importo": importo,
+               "causale": b.get("fonte") or "Archivio bonifici PDF",
+               "beneficiario": b.get("dipendente_nome"),
+               "mese": mese, "anno": anno, "origine": "bonifici-storico"}
+        if b.get("pdf_data"):
+            doc["pdf_data"] = b["pdf_data"]
+            doc["ha_pdf"] = True
+        await db.pagamenti_esiti.update_one({"key": key}, {"$set": doc}, upsert=True)
         await db.paghe_mensili.update_one(
             {"dipendente_id": dip_id, "anno": anno, "mese": mese},
             {"$set": {"dipendente_id": dip_id, "anno": anno, "mese": mese,
@@ -375,6 +384,20 @@ async def lista_bonifici_da_associare():
         {"stato": "da_associare"}, {"_id": 0, "pdf_data": 0}).to_list(500)
     righe.sort(key=lambda r: r.get("data") or "", reverse=True)
     return righe
+
+
+@router.get("/paghe/pagamento-esito/{key}/pdf")
+async def pdf_pagamento_esito(key: str):
+    """PDF sorgente di un bonifico già associato a una busta (pagamenti_esiti),
+    per verificarlo prima di premere Conferma — solo se è stato importato con
+    l'allegato (Drive o ponte bonifici storici; i CSV banca non hanno PDF)."""
+    doc = await get_db().pagamenti_esiti.find_one(
+        {"key": key}, {"_id": 0, "pdf_data": 1})
+    if not doc or not doc.get("pdf_data"):
+        raise HTTPException(404, "PDF non disponibile per questo pagamento")
+    pdf_bytes = base64.b64decode(doc["pdf_data"])
+    return Response(content=pdf_bytes, media_type="application/pdf",
+                    headers={"Content-Disposition": 'inline; filename="bonifico.pdf"'})
 
 
 @router.get("/bonifici-da-associare/{bonifico_id}/pdf")
@@ -548,7 +571,14 @@ def _parse_bonifico_pdf(text: str, filename: str) -> Dict[str, Any]:
     # necessariamente il suo stipendio (potrebbe essere un prelievo personale
     # del titolare, un rimborso...). Senza questa parola non si associa da
     # solo: va in coda, decide una persona.
-    causale_stipendio = bool(re.search(r"stipend|\bstip\b|\bstip\.", t, re.IGNORECASE))
+    # ATTENZIONE: NON cercare "stipend" in tutto il testo — l'intestazione
+    # "N. stipendi: 1" (marcatore già usato per n_beneficiari) è presente su
+    # OGNI distinta di questo tipo, causale vera o no, e farebbe scattare il
+    # segnale sempre. Si guarda solo il titolo del documento ("Distinta
+    # Stipendi", vero per costruzione su quel template) o la causale estratta
+    # per l'altro formato.
+    causale_stipendio = (bool(re.search(r"distinta\s+stipend", t, re.IGNORECASE))
+                         or bool(re.search(r"stipend|\bstip\b|\bstip\.", causale or "", re.IGNORECASE)))
 
     return {"importo": importo_val, "data": data_val, "causale": causale or filename,
             "mese": mese_comp, "anno": anno_comp, "n_beneficiari": n_benef,
@@ -570,14 +600,33 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
     dipendente ma senza quella parola (es. un prelievo personale del titolare) non si
     associa da solo. Tutto il resto (distinta cumulativa, dipendente non univoco, nessun
     segnale di stipendio, PDF illeggibile) finisce nella coda "Bonifici da associare"
-    per l'assegnazione manuale — mai indovinato."""
-    from backend.app.services.google_drive_sa import scarica_pdf_cartella
+    per l'assegnazione manuale — mai indovinato. Il PDF sorgente viene sempre allegato
+    (pagamenti_esiti.pdf_data o bonifici_da_associare.pdf_data) così si può riaprire e
+    verificare prima di confermare.
+
+    A LOTTI: questa cartella può avere centinaia di PDF (mutui, fornitori, tasse...
+    non solo stipendi) — scaricarli e leggerli tutti in una sola richiesta HTTP è
+    già andato in timeout in produzione (573s, 502). Ogni chiamata processa al più
+    `limit` file MAI VISTI PRIMA (default 120, tracciati in drive_bonifici_visti per
+    id Drive, non per contenuto: anche un file scartato come non-stipendio non viene
+    riletto al giro successivo). Se `restanti > 0` nella risposta, richiamare di
+    nuovo lo stesso endpoint per continuare (il frontend lo fa in automatico)."""
+    from backend.app.services.google_drive_sa import elenca_pdf_cartella, scarica_per_id
 
     folder = str(body.get("folder_id") or os.environ.get("DRIVE_BONIFICI_FOLDER_ID")
                 or "1yl55742cu9i-AFLxu2s0QnMvXG6kVkJC")
-    scaricati, falliti = await scarica_pdf_cartella(folder)
+    limite = int(body.get("limit") or 120)
 
     db = get_db()
+    tutti = await elenca_pdf_cartella(folder)
+    visti = set()
+    async for v in db.drive_bonifici_visti.find({}, {"_id": 0, "id": 1}):
+        visti.add(v.get("id"))
+    da_fare = [f for f in tutti if f.get("id") not in visti]
+    lotto = da_fare[:limite]
+    scaricati, falliti_id = await scarica_per_id([f["id"] for f in lotto])
+    id_per_nome = {f["id"]: f.get("name") for f in lotto}
+
     indici = await _indici_dipendenti(db)
     by_nome, by_cogn = indici["nome"], indici["cogn"]
 
@@ -604,16 +653,12 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
                 candidati[lst[0]["id"]] = lst[0]
         return next(iter(candidati.values())) if len(candidati) == 1 else None
 
-    # Hash già visti, letti una volta sola: l'adattatore Supabase non ha indici,
-    # un find_one per file (qui la cartella può avere centinaia di PDF, non più
-    # i ~44 della vecchia cartella dedicata) rifarebbe la stessa scansione
-    # completa delle due tabelle ad ogni giro — lo stesso bug di prestazioni
-    # appena corretto altrove in questo file.
-    # Proiezioni "ad esclusione" (le uniche che l'adattatore ottimizza in SQL):
-    # bonifici_da_associare porta pdf_data (il PDF in base64) — un'inclusione
-    # qui trasferirebbe comunque ogni allegato per intero.
+    # Hash già visti, letti una volta sola (non un find_one per file nel ciclo):
+    # stesso motivo delle altre correzioni in questo file, l'adattatore non ha
+    # indici. Proiezioni ad esclusione: pdf_data può essere grande su entrambe
+    # le collezioni ora che i bonifici stipendio lo portano con sé.
     hash_esistenti = set()
-    async for e in db.pagamenti_esiti.find({}, {"_id": 0, "beneficiario": 0, "causale": 0}):
+    async for e in db.pagamenti_esiti.find({}, {"_id": 0, "pdf_data": 0, "beneficiario": 0, "causale": 0}):
         if e.get("hash"):
             hash_esistenti.add(e["hash"])
     async for b in db.bonifici_da_associare.find({}, {"_id": 0, "pdf_data": 0}):
@@ -622,15 +667,17 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
 
     importati, in_coda, duplicati, esclusi_non_stipendio, falliti_lettura = 0, 0, 0, 0, []
     affected = set()
-    for nome_file, raw in scaricati:
+    for drive_id, nome_file, raw in scaricati:
+        async def segna_visto():
+            await db.drive_bonifici_visti.update_one(
+                {"id": drive_id}, {"$set": {"id": drive_id, "nome": nome_file, "visto_il": now_iso()}},
+                upsert=True)
+
         if not raw or raw[:4] != b"%PDF":
             falliti_lettura.append(nome_file)
+            await segna_visto()
             continue
         h = hashlib.sha256(raw).hexdigest()
-        if h in hash_esistenti:
-            duplicati += 1
-            continue
-        hash_esistenti.add(h)
         try:
             import pdfplumber
             testo = ""
@@ -641,11 +688,18 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
             testo = ""
         if _e_movimento_non_stipendio(testo) or _e_movimento_non_stipendio(nome_file):
             esclusi_non_stipendio += 1
+            await segna_visto()
             continue
+        if h in hash_esistenti:
+            duplicati += 1
+            await segna_visto()
+            continue
+        hash_esistenti.add(h)
         dati = _parse_bonifico_pdf(testo, nome_file)
         dip = None
         if dati["n_beneficiari"] == 1:
             dip = trova_dipendente(testo, nome_file)
+        pdf_b64 = base64.b64encode(raw).decode()
 
         if dip and dati["importo"] and dati["mese"] and dati["anno"] and dati["causale_stipendio"]:
             key = f"drive:{h[:24]}"
@@ -655,7 +709,8 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
                           "data": dati["data"].strftime("%Y-%m-%d") if dati["data"] else None,
                           "importo": dati["importo"], "causale": dati["causale"],
                           "beneficiario": dip.get("nome_completo") or f"{dip.get('cognome','')} {dip.get('nome','')}".strip(),
-                          "mese": dati["mese"], "anno": dati["anno"], "origine": "drive-pdf"}},
+                          "mese": dati["mese"], "anno": dati["anno"], "origine": "drive-pdf",
+                          "pdf_data": pdf_b64, "ha_pdf": True}},
                 upsert=True)
             await db.paghe_mensili.update_one(
                 {"dipendente_id": dip["id"], "anno": dati["anno"], "mese": dati["mese"]},
@@ -668,14 +723,15 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
                 "id": str(uuid.uuid4()), "hash": h,
                 "data": dati["data"].strftime("%Y-%m-%d") if dati["data"] else None,
                 "importo": dati["importo"], "causale": dati["causale"] or nome_file,
-                "pdf_filename": nome_file, "pdf_data": base64.b64encode(raw).decode(),
+                "pdf_filename": nome_file, "pdf_data": pdf_b64,
                 "fonte": "drive-pdf", "stato": "da_associare", "created_at": now_iso(),
             })
             in_coda += 1
+        await segna_visto()
 
     for dip_id, mese, anno in affected:
         tot = 0.0
-        async for p in db.pagamenti_esiti.find({"dipendente_id": dip_id, "mese": mese, "anno": anno}, {"_id": 0, "importo": 1}):
+        async for p in db.pagamenti_esiti.find({"dipendente_id": dip_id, "mese": mese, "anno": anno}, {"_id": 0, "importo": 1, "pdf_data": 0}):
             tot += p.get("importo") or 0
         await db.paghe_mensili.update_one(
             {"dipendente_id": dip_id, "anno": anno, "mese": mese},
@@ -683,10 +739,12 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
                       "bonifico_da_esiti": True, "updated_at": now_iso()}})
         await _ricalcola_stato_paga(db, dip_id, anno, mese)
 
-    return {"trovati_pdf": len(scaricati) + len(falliti), "importati": importati,
-            "in_coda_da_associare": in_coda, "duplicati": duplicati,
+    falliti_nomi = [id_per_nome.get(fid, fid) for fid in falliti_id]
+    return {"trovati_totale": len(tutti), "lavorati_ora": len(lotto),
+            "restanti": max(0, len(da_fare) - len(lotto)),
+            "importati": importati, "in_coda_da_associare": in_coda, "duplicati": duplicati,
             "esclusi_non_stipendio": esclusi_non_stipendio,
-            "falliti_download": falliti[:50], "falliti_lettura": falliti_lettura[:50]}
+            "falliti_download": falliti_nomi[:50], "falliti_lettura": falliti_lettura[:50]}
 
 
 @router.delete("/paghe")
@@ -3308,8 +3366,11 @@ async def _calcola_associazioni_bonifici(db, anno: Optional[int] = None, mese: O
     # a decine o centinaia di secondi (e in produzione ha saturato il pool di
     # connessioni, con 502 a cascata anche su endpoint scollegati). Qui si legge
     # ogni tabella una sola volta e si indicizza in memoria.
+    # pdf_data escluso qui per lo stesso motivo dei cedolini più sotto: alcuni
+    # pagamenti (import da Drive, ponte bonifici storici) ora portano il PDF
+    # allegato, un'inclusione lo trasferirebbe comunque per intero per ogni riga.
     esiti_idx: Dict[tuple, List[Dict[str, Any]]] = {}
-    async for e in db.pagamenti_esiti.find({}, {"_id": 0}):
+    async for e in db.pagamenti_esiti.find({}, {"_id": 0, "pdf_data": 0}):
         esiti_idx.setdefault((e.get("dipendente_id"), e.get("mese"), e.get("anno")), []).append(e)
     for lst in esiti_idx.values():
         lst.sort(key=lambda e: e.get("data") or "")
@@ -3361,6 +3422,7 @@ async def _calcola_associazioni_bonifici(db, anno: Optional[int] = None, mese: O
             "causale": e.get("causale") or "",
             "beneficiario": e.get("beneficiario") or "",
             "riferimento": e.get("cro") or e.get("key") or "",
+            "pdf_key": e.get("key") if e.get("ha_pdf") else None,
         } for e in esiti_idx.get((dip_id, p.get("mese"), p.get("anno")), [])]
 
         erogato = bon + acc
