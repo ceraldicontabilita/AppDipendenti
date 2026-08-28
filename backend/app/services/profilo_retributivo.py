@@ -99,7 +99,22 @@ async def profilo(db, dipendente: Dict[str, Any], ccnl_id: Optional[str] = None,
             r = retribuzione_per_livello(livello, ccnl_id, ore)
             out["ccnl"] = r
             atteso = r["mensile_lordo"]          # gia' riproporzionato sulle ore
-            if ore_note and lordo_medio is not None and atteso:
+            # Il confronto regge solo se le buste sono confrontabili con la
+            # tabella: i minimi caricati sono dell'ultima tranche, e la media di
+            # pochi cedolini o di mesi parziali (assunzione o cessazione a meta'
+            # mese) sta sotto il mensile pieno senza che nessuno sia sottopagato.
+            anno_ultima = int(ultimo.get("anno") or 0) if ultimo else 0
+            attendibile = len(recenti) >= 6 and anno_ultima >= 2025
+            out["confronto_attendibile"] = attendibile
+            if not attendibile and lordo_medio is not None:
+                out["avvisi"].append({
+                    "tipo": "confronto_non_attendibile",
+                    "messaggio": (f"Solo {len(recenti)} buste utili, l'ultima del "
+                                  f"{anno_ultima or '?'}: la media comprende mesi parziali "
+                                  "e i minimi caricati sono dell'ultima tranche. "
+                                  "Il confronto col tabellare non fa testo."),
+                })
+            if attendibile and ore_note and lordo_medio is not None and atteso:
                 # Le ore contrattuali le sappiamo (arrivano dal Libro Unico):
                 # il minimo e' calcolato su quelle, quindi lo scarto e' reale e
                 # non c'e' piu' nulla da attribuire a un part-time ignoto.
