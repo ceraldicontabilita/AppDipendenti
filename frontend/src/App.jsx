@@ -4409,7 +4409,7 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
 // URL della cartella Drive con gli originali dei bonifici: da qui si prende
 // il documento se durante un controllo serve l'originale, non solo il PDF
 // gia' allegato al bonifico in app.
-const DRIVE_BONIFICI_URL = "https://drive.google.com/drive/u/1/folders/1Kf2dTocluRj05Hr2lZSIhVP3kzSwfUgf";
+const DRIVE_BONIFICI_URL = "https://drive.google.com/drive/u/1/folders/1yl55742cu9i-AFLxu2s0QnMvXG6kVkJC";
 
 // Bonifici bancari "BENEFICIARI DIVERSI": la banca li emette come un unico
 // addebito cumulativo su piu' persone, senza nominarne nessuna nel PDF —
