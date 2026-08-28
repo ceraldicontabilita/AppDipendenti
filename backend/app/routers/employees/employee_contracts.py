@@ -398,6 +398,24 @@ async def importa_libro_unico(file: UploadFile = File(...)) -> Dict[str, Any]:
     return await dividi_e_registra(db, pdf_bytes, file.filename or "")
 
 
+@router.get("/acconti-tfr/{employee_id}")
+@handle_errors
+async def acconti_tfr_dipendente(employee_id: str) -> Dict[str, Any]:
+    """Acconti sulla retribuzione e anticipi TFR di un dipendente, per anno."""
+    from backend.app.services.acconti_tfr import riepilogo_dipendente
+    db = Database.get_db()
+    return await riepilogo_dipendente(db, employee_id)
+
+
+@router.get("/acconti-tfr")
+@handle_errors
+async def acconti_tfr_azienda(anno: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Stessa cosa per tutti i dipendenti. `anno` per filtrare un anno solo."""
+    from backend.app.services.acconti_tfr import riepilogo_azienda
+    db = Database.get_db()
+    return await riepilogo_azienda(db, anno)
+
+
 @router.get("/profilo-retributivo/{employee_id}")
 @handle_errors
 async def profilo_retributivo(employee_id: str, ccnl: Optional[str] = None) -> Dict[str, Any]:
