@@ -1007,6 +1007,8 @@ def parse_busta_paga_multi(pdf_path: str) -> Dict[str, Any]:
     _verifica_netto(result, cedolino_text)
     _elementi_retributivi(result, cedolino_text)
     _acconti_e_anticipazioni(result, cedolino_text)
+    if result.get("periodo", {}).get("giorni_lavorati"):
+        result["giorni_lavorati"] = result["periodo"]["giorni_lavorati"]
     return result
 
 

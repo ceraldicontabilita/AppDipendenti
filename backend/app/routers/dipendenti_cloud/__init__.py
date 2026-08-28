@@ -119,7 +119,10 @@ class DocumentoCloud(BaseModel):
 async def get_dipendenti():
     """Legge dalla collezione 'dipendenti' esistente nel database Gestionale"""
     dipendenti = await get_db().dipendenti.find({}, {"_id": 0}).to_list(1000)
-    # Normalizza i campi per compatibilità con il frontend
+    # Normalizza i campi per compatibilità con il frontend.
+    # ruolo/contratto: prima il valore inserito a mano, poi quello letto
+    # dall'UNILAV (qualifica_unilav / tipo_contratto) — MAI un default fisso:
+    # "Indeterminato" per chi non lo sappiamo e' un dato inventato, non ignoto.
     result = []
     for d in dipendenti:
         result.append({
@@ -128,14 +131,17 @@ async def get_dipendenti():
             "cognome": d.get("cognome", ""),
             "codice_fiscale": d.get("codice_fiscale", ""),
             "stato": d.get("stato", "attivo"),
-            "ruolo": d.get("ruolo", ""),
+            "ruolo": d.get("ruolo") or d.get("qualifica_unilav") or d.get("mansione") or "",
             "iban": d.get("iban", ""),
             "email": d.get("email", ""),
             "telefono": d.get("telefono", ""),
-            "contratto": d.get("contratto", "Indeterminato"),
+            "contratto": d.get("contratto") or d.get("tipo_contratto") or "",
             "data_assunzione": d.get("data_assunzione", ""),
+            "data_cessazione": d.get("data_cessazione", ""),
             "luogo_lavoro": d.get("luogo_lavoro", ""),
             "importo_stipendio": d.get("importo_stipendio", 0),
+            "livello": d.get("livello", ""),
+            "ore_settimanali": d.get("ore_settimanali"),
             "created_at": d.get("created_at", "")
         })
     return result
@@ -211,6 +217,15 @@ async def set_ordine_dipendenti(data: dict):
     return {"ok": True}
 
 # ============ PAGHE MENSILI (importo busta + bonifico + acconti) ============
+
+@router.post("/paghe/sincronizza")
+async def sincronizza_paghe_da_cedolini(anno: Optional[int] = None):
+    """Popola il registro paghe dai cedolini e dai bonifici reali gia' in
+    archivio, invece di lasciarlo alla compilazione manuale. Non tocca un mese
+    che qualcuno ha gia' modificato a mano."""
+    from backend.app.services.sincronizza_paghe_mensili import sincronizza
+    return await sincronizza(get_db(), anno)
+
 
 @router.get("/paghe")
 async def get_paghe(anno: int, mese: int):

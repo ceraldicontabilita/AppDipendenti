@@ -1,0 +1,104 @@
+"""Popola `paghe_mensili` (il registro che alimenta la pagina Buste Paga) dai
+cedolini e dai bonifici reali, invece di lasciarlo alla compilazione manuale.
+
+La pagina Buste Paga dell'app non legge affatto la collection `cedolini`: legge
+`paghe_mensili`, un registro pensato per l'inserimento a mano (importo busta,
+bonifico ricevuto, acconti). Con 1466 cedolini importati e 203 bonifici gia'
+riconciliati, non ha senso ricopiarli a mano — questo modulo lo fa una volta
+per tutti i mesi in archivio, e resta richiamabile a ogni nuovo import.
+
+Scelta prudente sul saldo: `bonifico_importo` viene SOLO dai bonifici bancari
+davvero abbinati al cedolino (tabella `bonifici`, campo `cedolino_id`, gia'
+verificato: 85 abbinamenti su 107 coincidono col netto al centesimo). Gli
+acconti letti sulla busta (`cedolino.acconti.acconto_erogato`) vengono esposti
+come campo informativo a parte, non sommati dentro `acconti[]`: sommarli al
+bonifico rischierebbe di contare due volte la stessa somma, se il bonifico e'
+gia' al netto dell'acconto trattenuto in busta. Il saldo del registro resta
+quindi "netto dovuto meno bonifico ricevuto", il confronto piu' sicuro.
+
+Non tocca un mese che un umano ha gia' modificato a mano (`origine` diverso da
+"cedolino"): l'inserimento manuale vince sempre sulla sincronizzazione.
+"""
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
+
+from backend.app.database import Collections
+
+
+def _num(v: Any) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _stato_e_saldo(busta: float, bonifico: float) -> Dict[str, Any]:
+    if busta <= 0 and bonifico <= 0:
+        stato = "vuoto"
+    elif bonifico <= 0:
+        stato = "in_attesa_pagamento"
+    elif bonifico + 0.5 >= busta:
+        stato = "pagato"
+    else:
+        stato = "parziale"
+    return {"stato_pagamento": stato, "saldo": round(busta - bonifico, 2)}
+
+
+async def sincronizza(db, anno: int = None) -> Dict[str, Any]:
+    filtro_ced: Dict[str, Any] = {"tipo_cedolino": {"$in": ["ordinario", None]}}
+    if anno:
+        filtro_ced["anno"] = anno
+    cedolini = await db[Collections.PAYSLIPS].find(filtro_ced, {"_id": 0, "pdf_data": 0}).to_list(3000)
+    cedolini = [c for c in cedolini if c.get("dipendente_id") and c.get("anno") and c.get("mese")
+               and c.get("netto") is not None]
+
+    bonifici = await db["bonifici"].find({"cedolino_id": {"$ne": None}}, {"_id": 0}).to_list(1000)
+    per_cedolino: Dict[str, list] = {}
+    for b in bonifici:
+        per_cedolino.setdefault(b["cedolino_id"], []).append(b)
+
+    adesso = datetime.now(timezone.utc).isoformat()
+    creati = aggiornati = saltati_manuali = 0
+
+    for c in cedolini:
+        dip, anno_c, mese_c = c["dipendente_id"], int(c["anno"]), int(c["mese"])
+        esistente = await db["paghe_mensili"].find_one(
+            {"dipendente_id": dip, "anno": anno_c, "mese": mese_c}, {"_id": 0})
+        if esistente and esistente.get("origine") not in (None, "cedolino"):
+            saltati_manuali += 1
+            continue
+
+        bon = per_cedolino.get(c.get("id"), [])
+        bonifico_importo = round(sum(_num(b.get("importo")) or 0 for b in bon), 2)
+        bonifico_data = max((b.get("data") for b in bon), default=None)
+
+        acconti_busta = (c.get("acconti") or {}).get("acconto_erogato")
+
+        doc = {
+            "dipendente_id": dip, "anno": anno_c, "mese": mese_c,
+            "importo_busta": c["netto"],
+            "bonifico_ricevuto": bonifico_importo > 0,
+            "bonifico_importo": bonifico_importo or None,
+            "bonifico_data": bonifico_data,
+            "acconti": esistente.get("acconti", []) if esistente else [],
+            "giorni_lavorati": (c.get("periodo") or {}).get("giorni_lavorati") or c.get("giorni_lavorati"),
+            "acconto_da_cedolino": acconti_busta,
+            "livello": c.get("livello"),
+            "cedolino_id": c.get("id"),
+            "origine": "cedolino",
+            "updated_at": adesso,
+        }
+        doc.update(_stato_e_saldo(c["netto"], bonifico_importo))
+        doc = {k: v for k, v in doc.items() if v is not None or k in ("acconti",)}
+
+        await db["paghe_mensili"].update_one(
+            {"dipendente_id": dip, "anno": anno_c, "mese": mese_c}, {"$set": doc}, upsert=True)
+        if esistente:
+            aggiornati += 1
+        else:
+            creati += 1
+
+    return {"cedolini_considerati": len(cedolini), "creati": creati,
+            "aggiornati": aggiornati, "saltati_manuali": saltati_manuali}

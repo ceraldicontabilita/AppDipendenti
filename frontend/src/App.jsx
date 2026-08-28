@@ -623,7 +623,9 @@ function AnagraficaPage({ dipendenti, reload }) {
     nome: "", cognome: "", ruolo: "", email: "", telefono: "",
     codice_fiscale: "", contratto: "Indeterminato", iban: "", stato: "attivo"
   });
-  const [filter, setFilter] = useState("tutti");
+  // Default "attivi": i cessati restano cercabili dal filtro ma non
+  // affollano la vista di apertura, che e' quella che si guarda ogni giorno.
+  const [filter, setFilter] = useState("attivi");
   const anagRef = useRef(null);
   const [anagBusy, setAnagBusy] = useState(false);
   const handleImportAnagrafica = async (e) => {
