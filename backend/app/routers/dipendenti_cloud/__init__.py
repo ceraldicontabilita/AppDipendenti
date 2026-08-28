@@ -3,6 +3,7 @@ Dipendenti in Cloud - Router Module
 Sistema HR completo per gestione personale
 """
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Body
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import uuid
@@ -289,6 +290,84 @@ async def _ricalcola_stato_paga(db, dip, anno, mese):
         upd["bonifico_ricevuto"] = bonifico > 0
     await db.paghe_mensili.update_one({"dipendente_id": dip, "anno": anno, "mese": mese}, {"$set": upd})
     return stato
+
+# ============ BONIFICI DA ASSOCIARE ============
+# Bonifici bancari "BENEFICIARI DIVERSI": la banca li emette come un unico
+# addebito cumulativo su piu' persone, senza nominarne nessuna nel documento.
+# Non c'e' modo di attribuirli automaticamente: qui restano in coda, con
+# menu a tendina dipendente + periodo, finche' qualcuno non li assegna a mano.
+
+@router.get("/bonifici-da-associare")
+async def lista_bonifici_da_associare():
+    """Elenco leggero (senza il PDF) di chi aspetta un'assegnazione manuale."""
+    righe = await get_db().bonifici_da_associare.find(
+        {"stato": "da_associare"}, {"_id": 0, "pdf_data": 0}).to_list(500)
+    righe.sort(key=lambda r: r.get("data") or "", reverse=True)
+    return righe
+
+
+@router.get("/bonifici-da-associare/{bonifico_id}/pdf")
+async def pdf_bonifico_da_associare(bonifico_id: str):
+    doc = await get_db().bonifici_da_associare.find_one(
+        {"id": bonifico_id}, {"_id": 0, "pdf_data": 1, "pdf_filename": 1})
+    if not doc or not doc.get("pdf_data"):
+        raise HTTPException(404, "PDF non trovato")
+    pdf_bytes = base64.b64decode(doc["pdf_data"])
+    fname = doc.get("pdf_filename") or "bonifico.pdf"
+    return Response(content=pdf_bytes, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{fname}"'})
+
+
+@router.post("/bonifici-da-associare/{bonifico_id}/associa")
+async def associa_bonifico(bonifico_id: str, data: Dict[str, Any] = Body(...)):
+    """Assegna un bonifico in coda a un dipendente e a un periodo, scelti a
+    mano. Lo trasforma in un bonifico vero (stessa collezione degli altri,
+    stessa logica di riconciliazione) col PDF portato dietro come prova, e lo
+    toglie dalla coda."""
+    dipendente_id = data.get("dipendente_id")
+    mese = data.get("mese")
+    anno = data.get("anno")
+    if not dipendente_id or not mese or not anno:
+        raise HTTPException(400, "dipendente_id, mese, anno obbligatori")
+
+    db = get_db()
+    in_coda = await db.bonifici_da_associare.find_one({"id": bonifico_id}, {"_id": 0})
+    if not in_coda:
+        raise HTTPException(404, "Bonifico non trovato in coda")
+    dip = await db.dipendenti.find_one({"id": dipendente_id}, {"_id": 0})
+    if not dip:
+        raise HTTPException(404, "Dipendente non trovato")
+
+    nuovo = {
+        "id": str(uuid.uuid4()), "dipendente_id": dipendente_id,
+        "dipendente_nome": dip.get("nome_completo"),
+        "data": in_coda.get("data"), "importo": in_coda.get("importo"),
+        "competenza": "%s-%02d" % (int(anno), int(mese)),
+        "categoria": "DIPENDENTE",
+        "pdf_filename": in_coda.get("pdf_filename"), "pdf_data": in_coda.get("pdf_data"),
+        "fonte": in_coda.get("fonte"),
+        "assegnato_manualmente": True,
+        "assegnato_da_bonifico_diversi": bonifico_id,
+        "created_at": now_iso(),
+    }
+    await db.bonifici.insert_one(nuovo)
+    await db.bonifici_da_associare.update_one(
+        {"id": bonifico_id},
+        {"$set": {"stato": "associato", "associato_a": dipendente_id,
+                  "associato_competenza": nuovo["competenza"], "associato_il": now_iso()}})
+    return {"ok": True, "bonifico": nuovo}
+
+
+@router.post("/bonifici-da-associare/{bonifico_id}/ignora")
+async def ignora_bonifico_da_associare(bonifico_id: str):
+    """Non e' un pagamento a un dipendente (es. lotto di fornitori): esce
+    dalla coda senza creare nulla."""
+    res = await get_db().bonifici_da_associare.update_one(
+        {"id": bonifico_id}, {"$set": {"stato": "ignorato", "ignorato_il": now_iso()}})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Bonifico non trovato in coda")
+    return {"ok": True}
+
 
 @router.delete("/paghe")
 async def delete_pagha(dipendente_id: str, anno: int, mese: int):

@@ -175,6 +175,7 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     { id: "timbrature", label: "Timbrature", icon: Clock, section: "DIPENDENTI" },
     { id: "buste-paga", label: "Buste Paga", icon: Euro, section: "DIPENDENTI" },
     { id: "paghe-bonifici", label: "Cedolini & Bonifici", icon: Link2, section: "DIPENDENTI" },
+    { id: "bonifici-da-associare", label: "Bonifici da associare", icon: Inbox, section: "DIPENDENTI" },
     { id: "tfr", label: "TFR", icon: Wallet, section: "DIPENDENTI" },
     { id: "documenti", label: "Documenti", icon: FolderOpen, section: "DIPENDENTI" },
     { id: "assunzione", label: "Assunzione & Contratti", icon: Briefcase, section: "DIPENDENTI" },
@@ -191,6 +192,7 @@ export default function DipendentiCloudApp({ page: pageProp }) {
     timbrature: "Timbrature",
     "buste-paga": "Buste Paga",
     "paghe-bonifici": "Cedolini & Bonifici",
+    "bonifici-da-associare": "Bonifici da associare",
     tfr: "TFR",
     missioni: "Missioni",
     documenti: "Documenti",
@@ -227,6 +229,8 @@ export default function DipendentiCloudApp({ page: pageProp }) {
         return <BustePagaPage dipendenti={activeDipendenti} reload={loadData} getDipendente={getDipendente} />;
       case "paghe-bonifici":
         return <PagheBonificiPage />;
+      case "bonifici-da-associare":
+        return <BonificiDaAssociarePage dipendenti={dipendenti} />;
       case "tfr":
         return <TfrPage dipendenti={activeDipendenti} getDipendente={getDipendente} />;
       case "missioni":
@@ -4402,6 +4406,148 @@ ${rate?.rate?.length ? `<h2>Piano di pagamento in ${rate.numero_rate} rate</h2>
 }
 
 // Cedolini & Bonifici — vista unica associazione busta ↔ bonifico pagato
+// URL della cartella Drive con gli originali dei bonifici: da qui si prende
+// il documento se durante un controllo serve l'originale, non solo il PDF
+// gia' allegato al bonifico in app.
+const DRIVE_BONIFICI_URL = "https://drive.google.com/drive/u/1/folders/1Kf2dTocluRj05Hr2lZSIhVP3kzSwfUgf";
+
+// Bonifici bancari "BENEFICIARI DIVERSI": la banca li emette come un unico
+// addebito cumulativo su piu' persone, senza nominarne nessuna nel PDF —
+// nessun algoritmo puo' indovinare a chi vanno. Qui si guarda il documento
+// (importo, data, causale) e si assegna a mano dipendente + mese.
+function BonificiDaAssociarePage({ dipendenti }) {
+  const mesi = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
+  const [righe, setRighe] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [scelte, setScelte] = useState({});   // id -> { dipendente_id, mese, anno }
+  const [busy, setBusy] = useState(null);
+
+  const eur = (n) => (Number(n) || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const dipOrdinati = [...(dipendenti || [])].sort((a, b) => (a.nome_completo || "").localeCompare(b.nome_completo || ""));
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const r = await axios.get(`${API}/bonifici-da-associare`);
+      setRighe(r.data || []);
+      // precompila mese/anno col mese del pagamento stesso: e' la scelta di
+      // default, l'utente puo' cambiarla prima di confermare
+      const iniziale = {};
+      for (const b of (r.data || [])) {
+        const [a, m] = (b.data || "").split("-");
+        iniziale[b.id] = { dipendente_id: "", anno: a ? Number(a) : new Date().getFullYear(),
+                           mese: m ? Number(m) : new Date().getMonth() + 1 };
+      }
+      setScelte(iniziale);
+    } catch (e) { console.error(e); setRighe([]); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const setScelta = (id, campo, valore) =>
+    setScelte(s => ({ ...s, [id]: { ...s[id], [campo]: valore } }));
+
+  const associa = async (id) => {
+    const sc = scelte[id];
+    if (!sc?.dipendente_id) { toast("Scegli prima il dipendente", "err"); return; }
+    setBusy(id);
+    try {
+      await axios.post(`${API}/bonifici-da-associare/${id}/associa`, {
+        dipendente_id: sc.dipendente_id, mese: sc.mese, anno: sc.anno,
+      });
+      toast("Associato: salvato nella scheda del dipendente con il PDF allegato");
+      setRighe(r => r.filter(x => x.id !== id));
+    } catch (e) { console.error(e); toast(e?.response?.data?.detail || "Errore nell'associazione", "err"); }
+    finally { setBusy(null); }
+  };
+
+  const ignora = async (id) => {
+    if (!window.confirm("Non e' un pagamento a un dipendente? Esce dalla coda senza creare nulla.")) return;
+    setBusy(id);
+    try {
+      await axios.post(`${API}/bonifici-da-associare/${id}/ignora`);
+      setRighe(r => r.filter(x => x.id !== id));
+    } catch (e) { console.error(e); toast("Errore", "err"); }
+    finally { setBusy(null); }
+  };
+
+  return (
+    <div className="dc-page">
+      <div className="dc-page-header">
+        <div>
+          <h1>Bonifici da associare</h1>
+          <p>{righe.length} bonifici cumulativi ("beneficiari diversi") in attesa di essere assegnati a un dipendente</p>
+        </div>
+        <a href={DRIVE_BONIFICI_URL} target="_blank" rel="noreferrer" className="dc-btn">
+          📁 Apri cartella Drive
+        </a>
+      </div>
+
+      <div className="dc-card" style={{ marginBottom: 12, padding: 12, fontSize: 13, color: "#6b7669" }}>
+        Questi bonifici la banca li emette come un unico addebito su piu' persone insieme:
+        il PDF non nomina nessuno, quindi non si possono assegnare da soli. Guarda importo e data
+        (apri il PDF se serve), scegli il dipendente e il mese di competenza, poi conferma:
+        il bonifico entra nella scheda del dipendente con il documento allegato, come tutti gli altri.
+      </div>
+
+      {loading ? <div className="dc-card" style={{ padding: 20 }}>Carico…</div> :
+       righe.length === 0 ? <div className="dc-card" style={{ padding: 20 }}>Nessun bonifico in attesa.</div> :
+      <div className="dc-card" style={{ padding: 0 }}>
+        <table className="dc-table">
+          <thead>
+            <tr>
+              <th>Data</th><th>Importo</th><th>Causale</th><th>PDF</th>
+              <th>Dipendente</th><th>Periodo</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {righe.map(b => {
+              const sc = scelte[b.id] || {};
+              return (
+                <tr key={b.id}>
+                  <td>{b.data ? b.data.split("-").reverse().join("/") : "—"}</td>
+                  <td>€ {eur(b.importo)}</td>
+                  <td className="dc-muted" style={{ fontSize: 12, maxWidth: 220 }}>{b.causale || "—"}</td>
+                  <td>
+                    <a href={`${API}/bonifici-da-associare/${b.id}/pdf`} target="_blank" rel="noreferrer" className="dc-btn dc-btn-ghost" style={{ fontSize: 12, padding: "3px 8px" }}>
+                      Apri
+                    </a>
+                  </td>
+                  <td>
+                    <select className="dc-input" value={sc.dipendente_id || ""} onChange={e => setScelta(b.id, "dipendente_id", e.target.value)} style={{ minWidth: 160 }}>
+                      <option value="">— scegli —</option>
+                      {dipOrdinati.map(d => <option key={d.id} value={d.id}>{d.nome_completo}</option>)}
+                    </select>
+                  </td>
+                  <td>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      <select className="dc-input" value={sc.mese || 1} onChange={e => setScelta(b.id, "mese", Number(e.target.value))} style={{ width: 100 }}>
+                        {mesi.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
+                      </select>
+                      <input type="number" className="dc-input" value={sc.anno || new Date().getFullYear()}
+                        onChange={e => setScelta(b.id, "anno", Number(e.target.value))} style={{ width: 70 }} />
+                    </div>
+                  </td>
+                  <td>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button className="dc-btn" disabled={busy === b.id} onClick={() => associa(b.id)}>
+                        {busy === b.id ? "…" : "Associa"}
+                      </button>
+                      <button className="dc-btn dc-btn-ghost" disabled={busy === b.id} onClick={() => ignora(b.id)} title="Non e' un pagamento a un dipendente">
+                        Ignora
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>}
+    </div>
+  );
+}
+
 function PagheBonificiPage() {
   const mesi = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
   const annoCorr = new Date().getFullYear();
@@ -4468,12 +4614,17 @@ function PagheBonificiPage() {
 
   return (
     <div style={{ maxWidth: 1280 }}>
-      <div style={{ marginBottom: 16 }}>
-        <h2 style={{ margin: 0, color: "#2a3329" }}>Cedolini &amp; Bonifici</h2>
-        <p className="dc-muted" style={{ marginTop: 4 }}>
-          Per ogni busta vedi se il <b>bonifico è stato effettuato</b> e a quale cedolino è associato.
-          Dati dal sistema unico paghe (busta) + pagamenti reali della banca (bonifici).
-        </p>
+      <div style={{ marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h2 style={{ margin: 0, color: "#2a3329" }}>Cedolini &amp; Bonifici</h2>
+          <p className="dc-muted" style={{ marginTop: 4 }}>
+            Per ogni busta vedi se il <b>bonifico è stato effettuato</b> e a quale cedolino è associato.
+            Dati dal sistema unico paghe (busta) + pagamenti reali della banca (bonifici).
+          </p>
+        </div>
+        <a href={DRIVE_BONIFICI_URL} target="_blank" rel="noreferrer" className="dc-btn" title="Cartella Drive con gli originali dei bonifici">
+          📁 Cartella Drive bonifici
+        </a>
       </div>
 
       {/* Filtri */}

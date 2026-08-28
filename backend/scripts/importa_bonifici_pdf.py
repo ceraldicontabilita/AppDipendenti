@@ -35,6 +35,24 @@ RE_IMPORTO_INV = re.compile(r"([\d.]+,\d{2})\s*EUR")
 RE_DATA = re.compile(r"(\d{2})/(\d{2})/(\d{4})")
 RE_IBAN = re.compile(r"\b([A-Z]{2}\d{2}[A-Z0-9]{11,30})\b")
 RE_CAUSALE_MESE = re.compile(r"(" + "|".join(MESI) + r")\.?\s*(\d{4})", re.I)
+_ETICHETTE_CAUSALE = {"causale", "iban beneficiario", "importo", "valuta", "data",
+                      "data valuta", "eur", "causale aggiuntiva",
+                      "che contabilizziamo come segue:"}
+
+
+def estrai_causale_riepilogativa(testo):
+    """La CAUSALE vera segue l'etichetta "CAUSALE", ma sui bonifici cumulativi
+    ("BENEFICIARI DIVERSI") in mezzo c'e' anche l'etichetta "IBAN BENEFICIARIO"
+    (vuota, nessun IBAN da mostrare per un lotto): senza saltarla si prendeva
+    l'etichetta invece del testo."""
+    righe = [r.strip() for r in testo.split("\n")]
+    for i, r in enumerate(righe):
+        if r.upper() == "CAUSALE":
+            for j in range(i + 1, min(i + 5, len(righe))):
+                cand = righe[j].strip()
+                if cand and cand.lower() not in _ETICHETTE_CAUSALE and not re.fullmatch(r"[\d.,]+", cand):
+                    return cand
+    return None
 
 
 def normalizza(s):
@@ -100,12 +118,12 @@ def estrai(testo):
 
 
 def competenza_stimata(data_iso):
-    """Un mese prima del pagamento: e' cosi' che paga quest'azienda quando la
-    causale non lo dice esplicitamente (verificato sui bonifici gia' noti)."""
-    anno, mese = int(data_iso[:4]), int(data_iso[5:7])
-    if mese == 1:
-        return "%d-12" % (anno - 1)
-    return "%d-%02d" % (anno, mese - 1)
+    """Quando la causale non dice il mese esplicitamente: il mese del
+    pagamento stesso (bonifico del 3 maggio -> competenza maggio), per
+    istruzione diretta di Vincenzo. E' una stima, non il dato letto — quando
+    la causale nomina il mese (es. "Ariante stipendio luglio"), quello vince
+    sempre su questa."""
+    return data_iso[:7]
 
 
 def main():
