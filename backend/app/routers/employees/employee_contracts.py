@@ -363,6 +363,25 @@ async def ccnl_retribuzione(ccnl_id: str, livello: str,
         raise HTTPException(422, str(e))
 
 
+@router.get("/ccnl/verifica-tranche")
+@handle_errors
+async def ccnl_verifica_tranche(ccnl: str = "turismo_pubblici_esercizi",
+                                mesi: int = 12) -> Dict[str, Any]:
+    """Confronta la paga base applicata (dalle buste) col tabellare, per livello.
+
+    Risponde alla domanda "che tranche di rinnovo stiamo applicando": uno
+    scarto comune a piu' livelli e' una tranche precedente, uno scarto isolato
+    su un livello o una persona e' il caso da controllare col consulente.
+    """
+    from backend.app.services.verifica_tranche import verifica_tranche
+    from backend.app.services.ccnl import CCNLNonDisponibile
+    db = Database.get_db()
+    try:
+        return await verifica_tranche(db, ccnl, mesi)
+    except CCNLNonDisponibile as e:
+        raise HTTPException(422, str(e))
+
+
 @router.get("/profilo-retributivo/{employee_id}")
 @handle_errors
 async def profilo_retributivo(employee_id: str, ccnl: Optional[str] = None) -> Dict[str, Any]:

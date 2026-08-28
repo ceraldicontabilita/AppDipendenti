@@ -1002,7 +1002,48 @@ def parse_busta_paga_multi(pdf_path: str) -> Dict[str, Any]:
         result["parse_error"] = "Nessun importo estratto"
 
     _verifica_netto(result)
+    _elementi_retributivi(result, text)
     return result
+
+
+def _elementi_retributivi(result: Dict[str, Any], text: str) -> None:
+    """Legge paga base, contingenza e scatti dal corpo della busta.
+
+    Sono su ogni cedolino, ma come tariffa ORARIA a cinque decimali
+    (`PAGA BASE 5,93890 ... CONTING. 3,03703`); il Libro Unico scrive invece gli
+    stessi elementi in forma mensile (`PAGA BASE 1.396,08000`). Qui si prendono
+    entrambe le forme e si distingue dal valore: sopra i 100 euro e' un mensile,
+    sotto e' una tariffa oraria.
+
+    Serve per sapere quale tranche di rinnovo e' stata applicata: la paga base
+    che risulta dalla busta, confrontata con la tabella in vigore, dice se lo
+    scarto e' comune a tutti i livelli (tranche vecchia) o riguarda una sola
+    persona (allora e' un caso da guardare).
+    """
+    # Ogni studio paghe scrive le stesse voci a modo suo: CONTING. o CONTINGENZA,
+    # SCATTI o SCATTI ANZIANITA'. L'importo deve avere i decimali, cosi' le
+    # intestazioni di colonna ("SCATTI N. % G.G") non vengono scambiate per dati.
+    voci = {
+        "paga_base": r"PAGA\s+BASE\s+([\d.]+,\d{2,6})",
+        "contingenza": r"CONTING(?:ENZA)?\.?\s+([\d.]+,\d{2,6})",
+        "scatti": r"SCATTI(?:\s+ANZIANITA'?)?\s+([\d.]+,\d{2,6})",
+        "superminimo": r"SUPERMINIMO(?:\s+ASSOR\.?)?\s+([\d.]+,\d{2,6})",
+    }
+    out: Dict[str, Any] = {}
+    alto = text.upper()
+    for nome, pattern in voci.items():
+        m = re.search(pattern, alto)
+        if not m:
+            continue
+        try:
+            val = float(m.group(1).replace(".", "").replace(",", "."))
+        except ValueError:
+            continue
+        if val <= 0:
+            continue
+        out[nome + ("_mensile" if val >= 100 else "_oraria")] = round(val, 5)
+    if out:
+        result.setdefault("retribuzione", {}).update(out)
 
 
 def _verifica_netto(result: Dict[str, Any]) -> None:

@@ -114,6 +114,7 @@ CCNL = {
         "scatti": _TERZIARIO_SCATTI,
         "periodo_prova": _TERZIARIO_PROVA,
         "ore_settimanali_std": 40,
+        "divisore_orario": 168,
         "ferie_giorni": 26,
         "mensilita": 14,
         "terzo_elemento": 11.36,          # mensile, per 14 mensilita', tutti i livelli
@@ -142,6 +143,7 @@ CCNL = {
         "scatti": {},              # scatti non caricati: restano a zero
         "periodo_prova": {},
         "ore_settimanali_std": 40,
+        "divisore_orario": 172,   # ricavato dalle buste, non da manuale
         "ferie_giorni": 26,
         "mensilita": 14,
         "terzo_elemento": 0.0,
@@ -211,16 +213,22 @@ def _norm_livello(livello: Any) -> str:
     return romani.get(s, s)
 
 
-def divisore_orario(ore_settimanali: Any) -> int:
-    """Divisore per il calcolo della quota oraria. Fuori tabella si riproporziona
-    sul rapporto standard 168/40, che e' quello previsto per le 40 ore."""
+def divisore_orario(ore_settimanali: Any, ccnl_id: Optional[str] = None) -> int:
+    """Divisore per il calcolo della quota oraria.
+
+    Non e' lo stesso per tutti i contratti: il Terziario usa 168 per le 40 ore,
+    il Turismo 172. Il 172 non e' preso da un manuale ma ricavato dalle buste
+    Ceraldi: la contingenza mensile di tabella diviso quella oraria stampata sul
+    cedolino da' 172 su 115 buste su 115.
+    """
     try:
         ore = int(round(float(ore_settimanali)))
     except (TypeError, ValueError):
         ore = 40
-    if ore in _DIVISORI_ORARI:
+    base = (CCNL.get(ccnl_id or CCNL_DEFAULT) or {}).get("divisore_orario", 168)
+    if base == 168 and ore in _DIVISORI_ORARI:
         return _DIVISORI_ORARI[ore]
-    return max(1, int(round(ore * 168 / 40)))
+    return base if ore == 40 else max(1, int(round(ore * base / 40)))
 
 
 def lista_ccnl() -> List[Dict[str, Any]]:
@@ -269,7 +277,7 @@ def retribuzione_per_livello(livello: Any, ccnl_id: Optional[str] = None,
 
     mensile_pieno = retribuzione + imp_scatti + c.get("terzo_elemento", 0.0)
     mensile = round(mensile_pieno * quota, 2)
-    div_ore = divisore_orario(ore if ore in _DIVISORI_ORARI else std)
+    div_ore = divisore_orario(ore if ore in _DIVISORI_ORARI else std, c["id"])
 
     return {
         "ccnl": c["id"], "ccnl_nome": c["nome"], "livello": lv,
