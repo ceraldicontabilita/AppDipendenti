@@ -38,9 +38,17 @@ async def verifica_tranche(db, ccnl_id: str = "turismo_pubblici_esercizi",
     if not c or not c["tabelle_caricate"]:
         raise CCNLNonDisponibile(f"Tabelle non caricate per {ccnl_id!r}")
 
+    # Solo i dipendenti attivi: la paga di chi e' cessato smette di essere
+    # aggiornata quando finisce il rapporto, non prima. Mescolarli agli attivi
+    # nella stessa media fa sembrare un livello "indietro sulla tranche" quando
+    # in realta' e' solo pieno di ex-dipendenti fermi alla loro ultima busta.
+    attivi = {d["id"] for d in await db[Collections.EMPLOYEES].find(
+        {"stato": "attivo"}, {"_id": 0, "id": 1}).to_list(500)}
+
     cedolini = await db[Collections.PAYSLIPS].find(
         {"tipo_cedolino": {"$in": ["ordinario", None]}},
         {"_id": 0, "pdf_data": 0}).to_list(3000)
+    cedolini = [x for x in cedolini if x.get("dipendente_id") in attivi]
 
     competenze = sorted({(int(x.get("anno") or 0), int(x.get("mese") or 0))
                          for x in cedolini if x.get("anno")}, reverse=True)
