@@ -382,6 +382,22 @@ async def ccnl_verifica_tranche(ccnl: str = "turismo_pubblici_esercizi",
         raise HTTPException(422, str(e))
 
 
+@router.post("/cedolini/importa-libro-unico")
+@handle_errors
+async def importa_libro_unico(file: UploadFile = File(...)) -> Dict[str, Any]:
+    """Carica un Libro Unico multi-dipendente: lo divide per persona e registra
+    i cedolini nuovi. Non duplica un mese gia' presente per lo stesso dipendente.
+
+    E' il flusso normale con cui arrivano le buste dal consulente: un PDF unico
+    con tutti i dipendenti del mese, pagine di presenze e di elementi
+    retributivi in coppia per persona.
+    """
+    from backend.app.services.libro_unico_bundle import dividi_e_registra
+    pdf_bytes = await file.read()
+    db = Database.get_db()
+    return await dividi_e_registra(db, pdf_bytes, file.filename or "")
+
+
 @router.get("/profilo-retributivo/{employee_id}")
 @handle_errors
 async def profilo_retributivo(employee_id: str, ccnl: Optional[str] = None) -> Dict[str, Any]:
