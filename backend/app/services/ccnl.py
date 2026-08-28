@@ -146,19 +146,32 @@ CCNL = {
         "mensilita": 14,
         "terzo_elemento": 0.0,
     },
+    # Tenuto solo come promemoria: in Ceraldi Group la pasticceria e' inquadrata
+    # nel Turismo (il pasticciere sta al 3º/4º di quella tabella), quindi questo
+    # contratto non serve. Servirebbe se l'attivita' passasse a impresa artigiana
+    # iscritta all'albo — e allora andrebbe scelto fra le quattro varianti
+    # esistenti (Confartigianato/CNA/Casartigiani/CLAAI, Confsal-Conflavoro,
+    # Confsal-Unilavoro, e quella 2024 per le imprese sotto i 15 dipendenti),
+    # che hanno minimi diversi fra loro.
     "panificazione_pasticceria": {
         "id": "panificazione_pasticceria",
-        "nome": "Panificazione e Pasticceria",
+        "nome": "Panificazione e Pasticceria (artigianato)",
         "codice_cnel": "",
         "parti": "",
         "tabelle_caricate": False,
         "livelli": {},
-        "nota": "Tabelle retributive non caricate: serve il testo ufficiale del CCNL "
-                "applicato alla pasticceria (artigiano o industria: sono diversi).",
+        "nota": "Non applicato in azienda: la pasticceria e' inquadrata nel CCNL "
+                "Turismo. Da caricare solo se il consulente del lavoro indica un "
+                "CCNL artigiano, precisando quale delle varianti esistenti.",
     },
 }
 
-CCNL_DEFAULT = "terziario"
+# Il contratto realmente applicato in azienda e' il Turismo/Pubblici Esercizi,
+# non il Terziario: nei Libri Unici la voce CONTING. vale 536,71 (1º), 524,94
+# (4º) e 520,51 (6º), che sono esattamente i valori della tabella Turismo e non
+# corrispondono a nessun livello del Terziario. Verificato su 45 LUL, 85
+# occorrenze, zero corrispondenze col Terziario.
+CCNL_DEFAULT = "turismo_pubblici_esercizi"
 
 
 class CCNLNonDisponibile(Exception):
