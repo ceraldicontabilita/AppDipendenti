@@ -1001,7 +1001,7 @@ def parse_busta_paga_multi(pdf_path: str) -> Dict[str, Any]:
         result["parse_success"] = False
         result["parse_error"] = "Nessun importo estratto"
 
-    _verifica_netto(result)
+    _verifica_netto(result, text)
     _elementi_retributivi(result, text)
     return result
 
@@ -1046,7 +1046,7 @@ def _elementi_retributivi(result: Dict[str, Any], text: str) -> None:
         result.setdefault("retribuzione", {}).update(out)
 
 
-def _verifica_netto(result: Dict[str, Any]) -> None:
+def _verifica_netto(result: Dict[str, Any], text: str = "") -> None:
     """Controlla il netto con l'aritmetica della busta: competenze - trattenute.
 
     Nel template zucchetti_classic il netto veniva letto dalla zona delle
@@ -1061,6 +1061,14 @@ def _verifica_netto(result: Dict[str, Any]) -> None:
     """
     t = result.get("totali") or {}
     if result.get("tipo_documento") == "foglio_presenze":
+        return
+    if re.search(r"COMPENSO\s+AMMINISTRATORE|CO\.CO\.CO", text.upper()):
+        # Cedolino di compenso amministratore (Co.Co.Co.), non busta paga
+        # dipendente: "competenze" e "trattenute" qui intercettano campi del
+        # tutto diversi (residui, arrotondamenti), non i totali del documento.
+        # Il controllo aritmetico li confronterebbe a vuoto e sovrascriverebbe
+        # un netto letto correttamente con un valore inventato — visto su
+        # Ceraldi Valerio maggio 2026: netto vero 2.000,00, "ricostruito" 38,21.
         return
     competenze = t.get("competenze", t.get("lordo"))
     trattenute = t.get("trattenute")
