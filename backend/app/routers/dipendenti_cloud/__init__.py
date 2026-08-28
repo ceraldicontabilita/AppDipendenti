@@ -459,6 +459,22 @@ async def ignora_bonifico_da_associare(bonifico_id: str):
     return {"ok": True}
 
 
+_MOVIMENTO_NON_STIPENDIO_RE = re.compile(
+    r"MUTUO|FINANZIAMENTO|QUIETANZA DI PAGAMENTO|CONTABILE DI FILIALE|"
+    r"VERSAMENTO|UFFICIO SERVIZI VARI|AGENZIA DELLE ENTRATE|REGIONE \w+|"
+    r"COMUNE DI |SPESE LIBR|ADDEBITO DIRETTO|SDD\b|INC\.?POS|"
+    r"COMM\.?\s*SU BONIFICI|\bS\.?R\.?L\.?\b|\bS\.?P\.?A\.?\b|\bS\.?N\.?C\.?\b|\bS\.?A\.?S\.?\b",
+    re.IGNORECASE)
+
+
+def _e_movimento_non_stipendio(text: str) -> bool:
+    """La cartella Drive dei bonifici (estratto conto aziendale) contiene di tutto:
+    mutui, fornitori, tasse, versamenti contanti, utenze — non solo stipendi. Questi
+    movimenti non vanno importati né messi in coda di revisione: inquinerebbero
+    "Bonifici da associare" con roba che non è mai stata uno stipendio."""
+    return bool(_MOVIMENTO_NON_STIPENDIO_RE.search(text or ""))
+
+
 def _parse_bonifico_pdf(text: str, filename: str) -> Dict[str, Any]:
     """Estrae importo/data/causale da un PDF di bonifico (distinta stipendi banca o
     contabile bonifico singolo — layout diversi, best-effort). Ritorna anche
@@ -526,24 +542,39 @@ def _parse_bonifico_pdf(text: str, filename: str) -> Dict[str, Any]:
     if not mese_comp and data_val:
         mese_comp, anno_comp = data_val.month, data_val.year
 
+    # Segnale esplicito "è uno stipendio": nella cartella (estratto conto
+    # aziendale generico) c'è anche, per es., "CAUSALE vincenzo ceraldi" senza
+    # la parola stipendio — un bonifico al nome di un dipendente ma non
+    # necessariamente il suo stipendio (potrebbe essere un prelievo personale
+    # del titolare, un rimborso...). Senza questa parola non si associa da
+    # solo: va in coda, decide una persona.
+    causale_stipendio = bool(re.search(r"stipend|\bstip\b|\bstip\.", t, re.IGNORECASE))
+
     return {"importo": importo_val, "data": data_val, "causale": causale or filename,
-            "mese": mese_comp, "anno": anno_comp, "n_beneficiari": n_benef}
+            "mese": mese_comp, "anno": anno_comp, "n_beneficiari": n_benef,
+            "causale_stipendio": causale_stipendio}
 
 
 @router.post("/paghe/importa-bonifici-drive")
 async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
     """Importa i PDF dei bonifici stipendi dalla cartella Google Drive (service account,
     vedi services/google_drive_sa.py — stessa cartella del link "Cartella Drive bonifici").
-    Per ogni PDF: estrae beneficiario (dal testo o dal nome file, stesso indice
-    nome/cognome degli altri importer), importo e mese di competenza. Se il dipendente
-    è univoco e i dati sono leggibili → entra direttamente nei pagamenti reali
-    (pagamenti_esiti, motore unico paghe). Se è una distinta cumulativa su più persone,
-    o il dipendente non è univoco, o il PDF non si legge → finisce nella coda
-    "Bonifici da associare" per l'assegnazione manuale (mai indovinato)."""
+    ATTENZIONE: quella cartella è l'estratto conto aziendale generico (mutui, fornitori,
+    tasse, versamenti, utenze, oltre agli stipendi), non solo bonifici stipendi — i
+    movimenti chiaramente non salariali vengono scartati subito (_e_movimento_non_stipendio),
+    mai messi in coda.
+    Per ogni PDF residuo: estrae beneficiario (dal testo o dal nome file, stesso indice
+    nome/cognome degli altri importer), importo e mese di competenza. Entra direttamente
+    nei pagamenti reali (pagamenti_esiti, motore unico paghe) SOLO se il dipendente è
+    univoco E la causale dice esplicitamente "stipendio" — un bonifico intestato a un
+    dipendente ma senza quella parola (es. un prelievo personale del titolare) non si
+    associa da solo. Tutto il resto (distinta cumulativa, dipendente non univoco, nessun
+    segnale di stipendio, PDF illeggibile) finisce nella coda "Bonifici da associare"
+    per l'assegnazione manuale — mai indovinato."""
     from backend.app.services.google_drive_sa import scarica_pdf_cartella
 
     folder = str(body.get("folder_id") or os.environ.get("DRIVE_BONIFICI_FOLDER_ID")
-                or "1Kf2dTocluRj05Hr2lZSIhVP3kzSwfUgf")
+                or "1yl55742cu9i-AFLxu2s0QnMvXG6kVkJC")
     scaricati, falliti = await scarica_pdf_cartella(folder)
 
     db = get_db()
@@ -573,16 +604,33 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
                 candidati[lst[0]["id"]] = lst[0]
         return next(iter(candidati.values())) if len(candidati) == 1 else None
 
-    importati, in_coda, duplicati, falliti_lettura = 0, 0, 0, []
+    # Hash già visti, letti una volta sola: l'adattatore Supabase non ha indici,
+    # un find_one per file (qui la cartella può avere centinaia di PDF, non più
+    # i ~44 della vecchia cartella dedicata) rifarebbe la stessa scansione
+    # completa delle due tabelle ad ogni giro — lo stesso bug di prestazioni
+    # appena corretto altrove in questo file.
+    # Proiezioni "ad esclusione" (le uniche che l'adattatore ottimizza in SQL):
+    # bonifici_da_associare porta pdf_data (il PDF in base64) — un'inclusione
+    # qui trasferirebbe comunque ogni allegato per intero.
+    hash_esistenti = set()
+    async for e in db.pagamenti_esiti.find({}, {"_id": 0, "beneficiario": 0, "causale": 0}):
+        if e.get("hash"):
+            hash_esistenti.add(e["hash"])
+    async for b in db.bonifici_da_associare.find({}, {"_id": 0, "pdf_data": 0}):
+        if b.get("hash"):
+            hash_esistenti.add(b["hash"])
+
+    importati, in_coda, duplicati, esclusi_non_stipendio, falliti_lettura = 0, 0, 0, 0, []
     affected = set()
     for nome_file, raw in scaricati:
         if not raw or raw[:4] != b"%PDF":
             falliti_lettura.append(nome_file)
             continue
         h = hashlib.sha256(raw).hexdigest()
-        if await db.pagamenti_esiti.find_one({"hash": h}) or await db.bonifici_da_associare.find_one({"hash": h}):
+        if h in hash_esistenti:
             duplicati += 1
             continue
+        hash_esistenti.add(h)
         try:
             import pdfplumber
             testo = ""
@@ -591,12 +639,15 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
                     testo += (p.extract_text() or "") + "\n"
         except Exception:
             testo = ""
+        if _e_movimento_non_stipendio(testo) or _e_movimento_non_stipendio(nome_file):
+            esclusi_non_stipendio += 1
+            continue
         dati = _parse_bonifico_pdf(testo, nome_file)
         dip = None
         if dati["n_beneficiari"] == 1:
             dip = trova_dipendente(testo, nome_file)
 
-        if dip and dati["importo"] and dati["mese"] and dati["anno"]:
+        if dip and dati["importo"] and dati["mese"] and dati["anno"] and dati["causale_stipendio"]:
             key = f"drive:{h[:24]}"
             await db.pagamenti_esiti.update_one(
                 {"key": key},
@@ -634,6 +685,7 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
 
     return {"trovati_pdf": len(scaricati) + len(falliti), "importati": importati,
             "in_coda_da_associare": in_coda, "duplicati": duplicati,
+            "esclusi_non_stipendio": esclusi_non_stipendio,
             "falliti_download": falliti[:50], "falliti_lettura": falliti_lettura[:50]}
 
 
