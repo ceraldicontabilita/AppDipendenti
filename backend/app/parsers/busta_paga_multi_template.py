@@ -1001,7 +1001,42 @@ def parse_busta_paga_multi(pdf_path: str) -> Dict[str, Any]:
         result["parse_success"] = False
         result["parse_error"] = "Nessun importo estratto"
 
+    _verifica_netto(result)
     return result
+
+
+def _verifica_netto(result: Dict[str, Any]) -> None:
+    """Controlla il netto con l'aritmetica della busta: competenze - trattenute.
+
+    Nel template zucchetti_classic il netto veniva letto dalla zona delle
+    coordinate bancarie, dove accanto all'importo vero stanno numeri piccoli:
+    usciva 0,00 o 0,48 al posto di 1.354,00, e su tutto il 2021 il netto
+    risultava nullo pur avendo il lordo corretto.
+
+    Il netto di una busta e' competenze meno trattenute, a meno
+    dell'arrotondamento all'euro. Quando il valore letto si scosta di piu' di un
+    euro da quel conto — o e' assente, o supera le competenze — vince il calcolo,
+    e il documento resta marcato per sapere che il numero e' ricostruito.
+    """
+    t = result.get("totali") or {}
+    if result.get("tipo_documento") == "foglio_presenze":
+        return
+    competenze = t.get("competenze", t.get("lordo"))
+    trattenute = t.get("trattenute")
+    if competenze is None or trattenute is None:
+        return
+    try:
+        calcolato = round(float(competenze) - float(trattenute), 2)
+    except (TypeError, ValueError):
+        return
+    if calcolato <= 0:
+        return                  # sospensioni e mesi a saldo negativo: lasciati stare
+    letto = t.get("netto")
+    if (letto is None or abs(float(letto) - calcolato) > 1.0
+            or float(letto) > float(competenze)):
+        t["netto_letto"] = letto
+        t["netto"] = calcolato
+        t["netto_ricostruito"] = True
 
 
 def parse_page2_ore_lavorate(text: str) -> Dict[str, Any]:
