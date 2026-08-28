@@ -92,18 +92,33 @@ async def profilo(db, dipendente: Dict[str, Any], ccnl_id: Optional[str] = None,
     }
 
     # --- confronto col CCNL -------------------------------------------------
+    ore_note = _num(dipendente.get("ore_settimanali")) is not None
     ore = _num(dipendente.get("ore_settimanali")) or 40
     if livello:
         try:
             r = retribuzione_per_livello(livello, ccnl_id, ore)
             out["ccnl"] = r
-            pieno = r["mensile_lordo"]
-            if lordo_medio is not None and pieno and lordo_medio < pieno - 1:
+            atteso = r["mensile_lordo"]          # gia' riproporzionato sulle ore
+            if ore_note and lordo_medio is not None and atteso:
+                # Le ore contrattuali le sappiamo (arrivano dal Libro Unico):
+                # il minimo e' calcolato su quelle, quindi lo scarto e' reale e
+                # non c'e' piu' nulla da attribuire a un part-time ignoto.
+                out["percentuale_sul_minimo"] = round(lordo_medio / atteso * 100, 1)
+                if lordo_medio < atteso - 1:
+                    out["avvisi"].append({
+                        "tipo": "sotto_tabellare",
+                        "messaggio": (f"Lordo medio {lordo_medio:.2f} € contro un minimo di "
+                                      f"{atteso:.2f} € per il livello {r['livello']} a "
+                                      f"{ore:g} ore settimanali: mancano "
+                                      f"{atteso - lordo_medio:.2f} €."),
+                    })
+            elif lordo_medio is not None and atteso and lordo_medio < atteso - 1:
                 # Un lordo sotto il tabellare quasi sempre vuol dire part-time, non
                 # sottopaga: senza le ore contrattuali non possiamo distinguerli, e
                 # gridare "sotto il minimo" su ogni part-time renderebbe l'avviso
                 # inutile. Si segnala la percentuale e si alza la voce solo quando
                 # il divario e' piccolo, cioe' incompatibile con un part-time vero.
+                pieno = atteso
                 perc = round(lordo_medio / pieno * 100, 1)
                 out["percentuale_su_tempo_pieno"] = perc
                 if perc >= 90:
