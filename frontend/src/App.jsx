@@ -4421,6 +4421,7 @@ function BonificiDaAssociarePage({ dipendenti }) {
   const [loading, setLoading] = useState(true);
   const [scelte, setScelte] = useState({});   // id -> { dipendente_id, mese, anno }
   const [busy, setBusy] = useState(null);
+  const [importBusy, setImportBusy] = useState(false);
 
   const eur = (n) => (Number(n) || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const dipOrdinati = [...(dipendenti || [])].sort((a, b) => (a.nome_completo || "").localeCompare(b.nome_completo || ""));
@@ -4471,6 +4472,17 @@ function BonificiDaAssociarePage({ dipendenti }) {
     finally { setBusy(null); }
   };
 
+  const importaDaDrive = async () => {
+    setImportBusy(true);
+    try {
+      const r = await axios.post(`${API}/paghe/importa-bonifici-drive`, {});
+      const d = r.data || {};
+      toast(`Bonifici Drive: ${d.importati || 0} associati automaticamente, ${d.in_coda_da_associare || 0} finiti qui da associare a mano`);
+      await load();
+    } catch (e) { toast(e?.response?.data?.detail || "Errore import da Drive", "err"); }
+    finally { setImportBusy(false); }
+  };
+
   return (
     <div className="dc-page">
       <div className="dc-page-header">
@@ -4478,9 +4490,14 @@ function BonificiDaAssociarePage({ dipendenti }) {
           <h1>Bonifici da associare</h1>
           <p>{righe.length} bonifici cumulativi ("beneficiari diversi") in attesa di essere assegnati a un dipendente</p>
         </div>
-        <a href={DRIVE_BONIFICI_URL} target="_blank" rel="noreferrer" className="dc-btn">
-          📁 Apri cartella Drive
-        </a>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="dc-btn" disabled={importBusy} onClick={importaDaDrive} title="Legge i PDF nuovi dalla cartella Drive bonifici">
+            {importBusy ? "Importo…" : "📥 Importa da Drive"}
+          </button>
+          <a href={DRIVE_BONIFICI_URL} target="_blank" rel="noreferrer" className="dc-btn">
+            📁 Apri cartella Drive
+          </a>
+        </div>
       </div>
 
       <div className="dc-card" style={{ marginBottom: 12, padding: 12, fontSize: 13, color: "#6b7669" }}>
@@ -4558,6 +4575,8 @@ function PagheBonificiPage() {
   const [loading, setLoading] = useState(false);
   const [aperta, setAperta] = useState(null); // chiave riga espansa
   const [busy, setBusy] = useState(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
 
   const eur = (n) => (Number(n) || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const keyOf = (r) => `${r.dipendente_id}_${r.anno}_${r.mese}`;
@@ -4587,6 +4606,33 @@ function PagheBonificiPage() {
       await load();
     } catch (e) { toast(e?.response?.data?.detail || "Errore conferma", "err"); }
     finally { setBusy(null); }
+  };
+
+  const importaDaDrive = async () => {
+    setImportBusy(true);
+    try {
+      const r = await axios.post(`${API}/paghe/importa-bonifici-drive`, {});
+      const d = r.data || {};
+      toast(`Bonifici Drive: ${d.importati || 0} associati, ${d.in_coda_da_associare || 0} da associare a mano, ${d.duplicati || 0} già importati`);
+      await load();
+    } catch (e) { toast(e?.response?.data?.detail || "Errore import da Drive", "err"); }
+    finally { setImportBusy(false); }
+  };
+
+  const esportaExcel = async () => {
+    setExportBusy(true);
+    try {
+      const params = new URLSearchParams();
+      if (anno) params.set("anno", anno);
+      if (mese) params.set("mese", mese);
+      if (filtroStato) params.set("stato", filtroStato);
+      const r = await axios.get(`${API}/paghe/associazioni-bonifici/export-excel?${params.toString()}`, { responseType: "blob" });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(r.data);
+      a.download = `cedolini_bonifici${anno ? `_${anno}` : ""}${mese ? `_${String(mese).padStart(2, '0')}` : ""}.xlsx`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    } catch (e) { toast("Errore generazione Excel", "err"); }
+    finally { setExportBusy(false); }
   };
 
   const t = data.totali || {};
@@ -4622,9 +4668,17 @@ function PagheBonificiPage() {
             Dati dal sistema unico paghe (busta) + pagamenti reali della banca (bonifici).
           </p>
         </div>
-        <a href={DRIVE_BONIFICI_URL} target="_blank" rel="noreferrer" className="dc-btn" title="Cartella Drive con gli originali dei bonifici">
-          📁 Cartella Drive bonifici
-        </a>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="dc-btn" disabled={importBusy} onClick={importaDaDrive} title="Legge i PDF nuovi dalla cartella Drive bonifici e li abbina ai cedolini">
+            {importBusy ? "Importo…" : "📥 Importa bonifici da Drive"}
+          </button>
+          <button className="dc-btn" disabled={exportBusy} onClick={esportaExcel}>
+            {exportBusy ? "Esporto…" : "📊 Esporta Excel"}
+          </button>
+          <a href={DRIVE_BONIFICI_URL} target="_blank" rel="noreferrer" className="dc-btn" title="Cartella Drive con gli originali dei bonifici">
+            📁 Cartella Drive bonifici
+          </a>
+        </div>
       </div>
 
       {/* Filtri */}
