@@ -1001,8 +1001,12 @@ def parse_busta_paga_multi(pdf_path: str) -> Dict[str, Any]:
         result["parse_success"] = False
         result["parse_error"] = "Nessun importo estratto"
 
-    _verifica_netto(result, text)
-    _elementi_retributivi(result, text)
+    # cedolino_text copre tutte le pagine del cedolino (netto, elementi
+     # retributivi e anticipi TFR spesso stanno sulla seconda pagina, non
+     # sulla prima usata per riconoscere il template)
+    _verifica_netto(result, cedolino_text)
+    _elementi_retributivi(result, cedolino_text)
+    _acconti_e_anticipazioni(result, cedolino_text)
     return result
 
 
@@ -1189,3 +1193,44 @@ def extract_summary(parsed_data: Dict[str, Any]) -> Dict[str, Any]:
         "cessazione_diciture": cessazione.get("diciture_trovate", []),
         "data_cessazione_rilevata": cessazione.get("data_cessazione_rilevata"),
     }
+
+
+def _acconti_e_anticipazioni(result: Dict[str, Any], text: str) -> None:
+    """Legge acconti sulla retribuzione e anticipi TFR erogati o recuperati.
+
+    Il campo "TFR a fondi / Anticipi" e' presente su quasi ogni busta ma quasi
+    sempre vicino allo zero (mediana 0,50 su 425 buste controllate): e' un
+    residuo tecnico, non un anticipo del mese. Un anticipo TFR vero fa
+    schizzare quel valore molto piu' in alto (undici casi sopra i 50 euro,
+    fino a 5.300) — la soglia di 50 euro separa il rumore dall'evento reale.
+
+    "ACCONTO TRATT. RETRIB." e "Recupero acconto" sono voci distinte e ben
+    popolate (21 e 47 occorrenze, importi tondi: 500, 600, 1.000...): il primo
+    e' l'acconto erogato nel mese, il secondo la sua restituzione trattenuta
+    in busta un mese successivo.
+    """
+    U = text.upper()
+    out: Dict[str, Any] = {}
+
+    m = re.search(r"ACCONTO\s+TRATT\.?\s*RETRIB\.?\s+([\d.]+,\d{2})", U)
+    if m:
+        out["acconto_erogato"] = parse_importo(m.group(1))
+
+    m = re.search(r"RECUPERO\s+ACCONTO\s+([\d.]+,\d{2})", U)
+    if m:
+        out["acconto_recuperato"] = parse_importo(m.group(1))
+
+    m = re.search(r"TFR\s+A\s+FONDI\s+ANTICIPI\s+([\d.]+,\d{2})", U)
+    if not m:
+        m = re.search(r"\bANTICIPI\s+([\d.]+,\d{2})", U)
+    if m:
+        valore = parse_importo(m.group(1))
+        out["tfr_anticipi_residuo"] = valore
+        if valore >= 50:
+            out["tfr_anticipo_erogato"] = valore
+
+    if result.get("tipo_cedolino") == "acconto":
+        out["intero_cedolino_acconto"] = True
+
+    if out:
+        result["acconti"] = out
