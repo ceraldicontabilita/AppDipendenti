@@ -4578,6 +4578,7 @@ function PagheBonificiPage() {
   const [importBusy, setImportBusy] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
+  const [cedSyncBusy, setCedSyncBusy] = useState(false);
 
   const eur = (n) => (Number(n) || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const keyOf = (r) => `${r.dipendente_id}_${r.anno}_${r.mese}`;
@@ -4631,6 +4632,17 @@ function PagheBonificiPage() {
     finally { setSyncBusy(false); }
   };
 
+  const sincronizzaDaCedolini = async () => {
+    setCedSyncBusy(true);
+    try {
+      const r = await axios.post(`${API}/paghe/sincronizza`, {});
+      const d = r.data || {};
+      toast(`Registro paghe popolato dai cedolini: ${d.creati || 0} nuovi, ${d.aggiornati || 0} aggiornati, ${d.saltati_manuali || 0} lasciati (già modificati a mano)`);
+      await load();
+    } catch (e) { toast(e?.response?.data?.detail || "Errore sincronizzazione dai cedolini", "err"); }
+    finally { setCedSyncBusy(false); }
+  };
+
   const esportaExcel = async () => {
     setExportBusy(true);
     try {
@@ -4681,6 +4693,9 @@ function PagheBonificiPage() {
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="dc-btn" disabled={cedSyncBusy} onClick={sincronizzaDaCedolini} title="Popola questo registro dai cedolini in archivio (senza questo passo la tabella resta vuota anche con le buste già caricate)">
+            {cedSyncBusy ? "Sincronizzo…" : "🔄 Sincronizza da cedolini"}
+          </button>
           <button className="dc-btn" disabled={syncBusy} onClick={recuperaStorici} title="Collega alla busta i bonifici storici già archiviati (PDF già letti in passato) ma non ancora agganciati qui">
             {syncBusy ? "Collego…" : "🔗 Recupera bonifici storici"}
           </button>

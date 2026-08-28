@@ -75,8 +75,16 @@ async def get_situazione_tfr(dipendente_id: str) -> Dict[str, Any]:
     if not dipendente:
         raise HTTPException(status_code=404, detail="Dipendente non trovato")
     
-    # TFR accantonato totale
-    tfr_accantonato = float(dipendente.get("tfr_accantonato", 0))
+    # TFR accantonato totale: somma i due percorsi di accantonamento che questa
+    # app scrive. `tfr_accantonato` (piatto) e' l'accantonamento manuale annuale
+    # (POST /accantonamento). `progressivi.tfr_accantonato` e' l'accantonamento
+    # automatico per cedolino (services/handlers/cedolino_handlers.py, quota TFR
+    # di ogni busta paga importata) — sono due campi DIVERSI: senza sommarli qui,
+    # chi ha solo TFR maturato dai cedolini (il caso comune, mai inserito a mano)
+    # risultava sempre a zero in questa pagina pur avendo le buste in archivio.
+    tfr_manuale = float(dipendente.get("tfr_accantonato", 0) or 0)
+    tfr_da_cedolini = float((dipendente.get("progressivi") or {}).get("tfr_accantonato", 0) or 0)
+    tfr_accantonato = tfr_manuale + tfr_da_cedolini
     
     # Storico accantonamenti
     accantonamenti = await db["tfr_accantonamenti"].find(
@@ -96,6 +104,12 @@ async def get_situazione_tfr(dipendente_id: str) -> Dict[str, Any]:
         "dipendente_id": dipendente_id,
         "dipendente_nome": dipendente.get("nome_completo", ""),
         "tfr_accantonato": round(tfr_accantonato, 2),
+        # Nota: la liquidazione (POST /liquidazione) oggi attinge SOLO dalla quota
+        # manuale (tfr_manuale), non da questo totale sommato — un dipendente con
+        # TFR solo da cedolini vede qui il totale corretto ma non può ancora
+        # liquidarlo/anticiparlo dalla stessa cifra. Da allineare separatamente.
+        "tfr_manuale": round(tfr_manuale, 2),
+        "tfr_da_cedolini": round(tfr_da_cedolini, 2),
         "tfr_disponibile": round(tfr_accantonato - totale_liquidato, 2),
         "totale_liquidato": round(totale_liquidato, 2),
         "num_accantonamenti": len(accantonamenti),
