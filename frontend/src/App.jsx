@@ -4577,6 +4577,7 @@ function PagheBonificiPage() {
   const [busy, setBusy] = useState(null);
   const [importBusy, setImportBusy] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
+  const [syncBusy, setSyncBusy] = useState(false);
 
   const eur = (n) => (Number(n) || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const keyOf = (r) => `${r.dipendente_id}_${r.anno}_${r.mese}`;
@@ -4617,6 +4618,17 @@ function PagheBonificiPage() {
       await load();
     } catch (e) { toast(e?.response?.data?.detail || "Errore import da Drive", "err"); }
     finally { setImportBusy(false); }
+  };
+
+  const recuperaStorici = async () => {
+    setSyncBusy(true);
+    try {
+      const r = await axios.post(`${API}/paghe/sincronizza-bonifici-storici`, {});
+      const d = r.data || {};
+      toast(`Bonifici storici collegati: ${d.importati_in_pagamenti_esiti || 0} su ${d.mesi_aggiornati || 0} mesi aggiornati`);
+      await load();
+    } catch (e) { toast(e?.response?.data?.detail || "Errore sincronizzazione", "err"); }
+    finally { setSyncBusy(false); }
   };
 
   const esportaExcel = async () => {
@@ -4669,6 +4681,9 @@ function PagheBonificiPage() {
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="dc-btn" disabled={syncBusy} onClick={recuperaStorici} title="Collega alla busta i bonifici storici già archiviati (PDF già letti in passato) ma non ancora agganciati qui">
+            {syncBusy ? "Collego…" : "🔗 Recupera bonifici storici"}
+          </button>
           <button className="dc-btn" disabled={importBusy} onClick={importaDaDrive} title="Legge i PDF nuovi dalla cartella Drive bonifici e li abbina ai cedolini">
             {importBusy ? "Importo…" : "📥 Importa bonifici da Drive"}
           </button>

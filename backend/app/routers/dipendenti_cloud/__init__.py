@@ -228,6 +228,63 @@ async def sincronizza_paghe_da_cedolini(anno: Optional[int] = None):
     return await sincronizza(get_db(), anno)
 
 
+@router.post("/paghe/sincronizza-bonifici-storici")
+async def sincronizza_bonifici_storici():
+    """Ponte una tantum (ma ripetibile: idempotente) tra la collezione `bonifici`
+    (dove un import passato dei PDF storici ha salvato ~800 bonifici reali con
+    dipendente_id + competenza "YYYY-MM", ma NESSUN cedolino_id) e il motore unico
+    di "Cedolini & Bonifici" / stato paga, che legge solo `pagamenti_esiti`.
+    Senza questo ponte quei bonifici — già nell'archivio, già con il PDF allegato —
+    restavano invisibili nella pagina di riconciliazione e le buste corrispondenti
+    risultavano ancora "da pagare". Non tocca i pagamenti "una_tantum" (TFR/
+    transazioni di fine rapporto: competenza non è un mese di stipendio)."""
+    db = get_db()
+    bonifici = await db.bonifici.find(
+        {"categoria": "DIPENDENTE", "dipendente_id": {"$ne": None}, "competenza": {"$ne": None}},
+        {"_id": 0}).to_list(5000)
+
+    affected = set()
+    importati = 0
+    for b in bonifici:
+        competenza = str(b.get("competenza") or "")
+        m = re.match(r"^(\d{4})-(\d{1,2})$", competenza)
+        if not m:
+            continue
+        anno, mese = int(m.group(1)), int(m.group(2))
+        dip_id = b.get("dipendente_id")
+        importo = b.get("importo")
+        if not dip_id or not importo:
+            continue
+        key = f"bonifici-coll:{b.get('id')}"
+        await db.pagamenti_esiti.update_one(
+            {"key": key},
+            {"$set": {"key": key, "cro": None, "dipendente_id": dip_id,
+                      "data": b.get("data"), "importo": importo,
+                      "causale": b.get("fonte") or "Archivio bonifici PDF",
+                      "beneficiario": b.get("dipendente_nome"),
+                      "mese": mese, "anno": anno, "origine": "bonifici-storico"}},
+            upsert=True)
+        await db.paghe_mensili.update_one(
+            {"dipendente_id": dip_id, "anno": anno, "mese": mese},
+            {"$set": {"dipendente_id": dip_id, "anno": anno, "mese": mese,
+                      "updated_at": now_iso()}}, upsert=True)
+        affected.add((dip_id, mese, anno))
+        importati += 1
+
+    for dip_id, mese, anno in affected:
+        tot = 0.0
+        async for p in db.pagamenti_esiti.find({"dipendente_id": dip_id, "mese": mese, "anno": anno}, {"_id": 0, "importo": 1}):
+            tot += p.get("importo") or 0
+        await db.paghe_mensili.update_one(
+            {"dipendente_id": dip_id, "anno": anno, "mese": mese},
+            {"$set": {"bonifico_importo": round(tot, 2), "bonifico_ricevuto": tot > 0,
+                      "bonifico_da_esiti": True, "updated_at": now_iso()}})
+        await _ricalcola_stato_paga(db, dip_id, anno, mese)
+
+    return {"bonifici_esaminati": len(bonifici), "importati_in_pagamenti_esiti": importati,
+            "mesi_aggiornati": len(affected)}
+
+
 @router.get("/paghe")
 async def get_paghe(anno: int, mese: int):
     return await get_db().paghe_mensili.find(

@@ -7,7 +7,17 @@ App HR di **Ceraldi Group** (Napoli, titolare Enzo/Vincenzo Ceraldi). Attività:
 > il focus. Aggiornalo quando aggiungi funzioni importanti.
 
 ## Stack & deploy
-- Backend **FastAPI + Motor + MongoDB** (DB `Gestionale`) in `backend/app`.
+- Backend **FastAPI** in `backend/app`. Il cluster MongoDB **non esiste più**: il
+  database vero è **Postgres/Supabase** (env `SUPABASE_DB_URL`), con un adattatore
+  Mongo→Postgres (`backend/app/db_supabase.py`) che riespone la stessa API di motor
+  usata nei 269 punti che chiamano `Database.get_db()` — ogni collection è una
+  tabella `app_<nome>` con colonna `doc jsonb`. Copre find/find_one/insert_one/
+  update_one (con upsert)/delete_one/count_documents, `.sort()`/`.limit()`/
+  `.to_list()`, operatori `$ne $exists $in $nin $gt $gte $lt $lte $or $and`,
+  `$set $setOnInsert $unset $inc`. **NON copre**: `aggregate`, indici, `$push`,
+  `find_one_and_*`, bulk write — non usarli nel codice nuovo. (`MONGO_URL`/Motor
+  restano come fallback in `database.py` se `SUPABASE_DB_URL` non è impostata, ma
+  in produzione oggi è sempre il ramo Supabase.)
 - Frontend **React + Vite** in `frontend/src` (`App.jsx` = gestione desktop,
   `PortaleDipendente.jsx` = portale mobile dipendenti).
 - Deploy su **Render** (`appdipendenti.onrender.com`), auto-deploy dal branch **`main`**.
