@@ -228,6 +228,77 @@ async def sincronizza_paghe_da_cedolini(anno: Optional[int] = None):
     return await sincronizza(get_db(), anno)
 
 
+@router.post("/paghe/sincronizza-bonifici-storici")
+async def sincronizza_bonifici_storici():
+    """Ponte una tantum (ma ripetibile: idempotente) tra la collezione `bonifici`
+    (dove un import passato dei PDF storici ha salvato ~800 bonifici reali con
+    dipendente_id + competenza "YYYY-MM", ma NESSUN cedolino_id) e il motore unico
+    di "Cedolini & Bonifici" / stato paga, che legge solo `pagamenti_esiti`.
+    Senza questo ponte quei bonifici — già nell'archivio, già con il PDF allegato —
+    restavano invisibili nella pagina di riconciliazione e le buste corrispondenti
+    risultavano ancora "da pagare". Non tocca i pagamenti "una_tantum" (TFR/
+    transazioni di fine rapporto: competenza non è un mese di stipendio)."""
+    db = get_db()
+    # Esclude i bonifici già scritti a mano dalla coda "Bonifici da associare"
+    # (associa_bonifico li ha già messi in pagamenti_esiti con la chiave
+    # "beneficiari-diversi:*"): reimportarli qui creerebbe una seconda riga in
+    # pagamenti_esiti per lo stesso pagamento, raddoppiando il bonifico del mese.
+    bonifici = await db.bonifici.find(
+        {"categoria": "DIPENDENTE", "dipendente_id": {"$ne": None}, "competenza": {"$ne": None},
+         "assegnato_da_bonifico_diversi": {"$exists": False}},
+        {"_id": 0}).to_list(5000)
+
+    affected = set()
+    importati = duplicati = 0
+    for b in bonifici:
+        competenza = str(b.get("competenza") or "")
+        m = re.match(r"^(\d{4})-(\d{1,2})$", competenza)
+        if not m:
+            continue
+        anno, mese = int(m.group(1)), int(m.group(2))
+        dip_id = b.get("dipendente_id")
+        importo = b.get("importo")
+        data_pag = b.get("data")
+        if not dip_id or not importo:
+            continue
+        # Difesa aggiuntiva: stesso dipendente/data/importo già presente in
+        # pagamenti_esiti (da CSV, da un'altra corsa di questo stesso ponte, o
+        # da un altro percorso) -> non è un nuovo pagamento, salta.
+        gia_presente = await db.pagamenti_esiti.find_one(
+            {"dipendente_id": dip_id, "data": data_pag, "importo": importo})
+        if gia_presente:
+            duplicati += 1
+            continue
+        key = f"bonifici-coll:{b.get('id')}"
+        await db.pagamenti_esiti.update_one(
+            {"key": key},
+            {"$set": {"key": key, "cro": None, "dipendente_id": dip_id,
+                      "data": data_pag, "importo": importo,
+                      "causale": b.get("fonte") or "Archivio bonifici PDF",
+                      "beneficiario": b.get("dipendente_nome"),
+                      "mese": mese, "anno": anno, "origine": "bonifici-storico"}},
+            upsert=True)
+        await db.paghe_mensili.update_one(
+            {"dipendente_id": dip_id, "anno": anno, "mese": mese},
+            {"$set": {"dipendente_id": dip_id, "anno": anno, "mese": mese,
+                      "updated_at": now_iso()}}, upsert=True)
+        affected.add((dip_id, mese, anno))
+        importati += 1
+
+    for dip_id, mese, anno in affected:
+        tot = 0.0
+        async for p in db.pagamenti_esiti.find({"dipendente_id": dip_id, "mese": mese, "anno": anno}, {"_id": 0, "importo": 1}):
+            tot += p.get("importo") or 0
+        await db.paghe_mensili.update_one(
+            {"dipendente_id": dip_id, "anno": anno, "mese": mese},
+            {"$set": {"bonifico_importo": round(tot, 2), "bonifico_ricevuto": tot > 0,
+                      "bonifico_da_esiti": True, "updated_at": now_iso()}})
+        await _ricalcola_stato_paga(db, dip_id, anno, mese)
+
+    return {"bonifici_esaminati": len(bonifici), "importati_in_pagamenti_esiti": importati,
+            "duplicati_saltati": duplicati, "mesi_aggiornati": len(affected)}
+
+
 @router.get("/paghe")
 async def get_paghe(anno: int, mese: int):
     return await get_db().paghe_mensili.find(
@@ -355,6 +426,25 @@ async def associa_bonifico(bonifico_id: str, data: Dict[str, Any] = Body(...)):
         {"id": bonifico_id},
         {"$set": {"stato": "associato", "associato_a": dipendente_id,
                   "associato_competenza": nuovo["competenza"], "associato_il": now_iso()}})
+
+    # Aggancia anche al MOTORE UNICO paghe (pagamenti_esiti + paghe_mensili):
+    # senza questo passo l'associazione restava confinata alla collezione
+    # `bonifici` e non si vedeva mai né in "Cedolini & Bonifici" né sulla busta
+    # come pagata, perché quella vista/lo stato paga leggono solo pagamenti_esiti.
+    anno_i, mese_i = int(anno), int(mese)
+    key = f"beneficiari-diversi:{bonifico_id}"
+    await db.pagamenti_esiti.update_one(
+        {"key": key},
+        {"$set": {"key": key, "cro": None, "dipendente_id": dipendente_id,
+                  "data": in_coda.get("data"), "importo": in_coda.get("importo") or 0,
+                  "causale": in_coda.get("causale") or "Bonifico beneficiari diversi",
+                  "beneficiario": dip.get("nome_completo"),
+                  "mese": mese_i, "anno": anno_i}}, upsert=True)
+    await db.paghe_mensili.update_one(
+        {"dipendente_id": dipendente_id, "anno": anno_i, "mese": mese_i},
+        {"$set": {"dipendente_id": dipendente_id, "anno": anno_i, "mese": mese_i,
+                  "updated_at": now_iso()}}, upsert=True)
+    await _ricalcola_stato_paga(db, dipendente_id, anno_i, mese_i)
     return {"ok": True, "bonifico": nuovo}
 
 
@@ -367,6 +457,184 @@ async def ignora_bonifico_da_associare(bonifico_id: str):
     if res.matched_count == 0:
         raise HTTPException(404, "Bonifico non trovato in coda")
     return {"ok": True}
+
+
+def _parse_bonifico_pdf(text: str, filename: str) -> Dict[str, Any]:
+    """Estrae importo/data/causale da un PDF di bonifico (distinta stipendi banca o
+    contabile bonifico singolo — layout diversi, best-effort). Ritorna anche
+    n_beneficiari: se >1 (distinta cumulativa su più persone) chi chiama deve
+    mettere il bonifico in coda manuale, MAI indovinare a chi appartiene."""
+    t = text or ""
+
+    n_benef = 1
+    m = re.search(r"n\.?\s*stipendi\s*:?\s*(\d+)", t, re.IGNORECASE)
+    if m:
+        n_benef = int(m.group(1))
+
+    importo = None
+    m = re.search(r"tot\.?\s*distinta\s*:?\s*([\d.,]+)\s*eur", t, re.IGNORECASE)
+    if m:
+        importo = m.group(1)
+    if importo is None:
+        m = re.search(r"eur\s*([\d.,]+)\s*\d{2}/\d{2}/\d{4}", t, re.IGNORECASE)
+        if m:
+            importo = m.group(1)
+    if importo is None:
+        m = re.search(r"importo\s*:?\s*([\d.,]+)\s*(?:eur|€)", t, re.IGNORECASE)
+        if m:
+            importo = m.group(1)
+    importo_val = None
+    if importo:
+        try:
+            importo_val = float(importo.replace(".", "").replace(",", "."))
+        except ValueError:
+            importo_val = None
+
+    data_val = None
+    m = re.search(r"data\s+esecuzione\s*:?\s*(\d{2}/\d{2}/\d{4})", t, re.IGNORECASE)
+    if not m:
+        m = re.search(r"\b(\d{2}/\d{2}/\d{4})\s+data\b", t, re.IGNORECASE)
+    if not m:
+        m = re.search(r"\b(\d{2}/\d{2}/20\d{2})\b", t)
+    if m:
+        try:
+            data_val = datetime.strptime(m.group(1), "%d/%m/%Y")
+        except ValueError:
+            data_val = None
+
+    causale = None
+    m = re.search(r"causale\s*:?\s*\n?\s*([^\n]{4,80})", t, re.IGNORECASE)
+    if m:
+        causale = m.group(1).strip()
+
+    # Mese di competenza: quasi sempre nel nome file/causale ("bonifico marzo…",
+    # "stip giugno 2022"), NON nella data di esecuzione (il bonifico parte
+    # qualche giorno dopo la fine del mese di competenza).
+    haystack = re.sub(r"\s+", " ", f"{filename} {causale or ''}").lower()
+    mese_comp, anno_comp = None, None
+    for nome, num in _MESI_IT.items():
+        if nome in haystack:
+            mese_comp = num
+            break
+    anno_m = re.search(r"(20\d{2})", haystack)
+    if anno_m:
+        anno_comp = int(anno_m.group(1))
+    if mese_comp and not anno_comp and data_val:
+        anno_comp = data_val.year
+        if mese_comp == 12 and data_val.month == 1:
+            anno_comp -= 1
+    if not mese_comp and data_val:
+        mese_comp, anno_comp = data_val.month, data_val.year
+
+    return {"importo": importo_val, "data": data_val, "causale": causale or filename,
+            "mese": mese_comp, "anno": anno_comp, "n_beneficiari": n_benef}
+
+
+@router.post("/paghe/importa-bonifici-drive")
+async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
+    """Importa i PDF dei bonifici stipendi dalla cartella Google Drive (service account,
+    vedi services/google_drive_sa.py — stessa cartella del link "Cartella Drive bonifici").
+    Per ogni PDF: estrae beneficiario (dal testo o dal nome file, stesso indice
+    nome/cognome degli altri importer), importo e mese di competenza. Se il dipendente
+    è univoco e i dati sono leggibili → entra direttamente nei pagamenti reali
+    (pagamenti_esiti, motore unico paghe). Se è una distinta cumulativa su più persone,
+    o il dipendente non è univoco, o il PDF non si legge → finisce nella coda
+    "Bonifici da associare" per l'assegnazione manuale (mai indovinato)."""
+    from backend.app.services.google_drive_sa import scarica_pdf_cartella
+
+    folder = str(body.get("folder_id") or os.environ.get("DRIVE_BONIFICI_FOLDER_ID")
+                or "1Kf2dTocluRj05Hr2lZSIhVP3kzSwfUgf")
+    scaricati, falliti = await scarica_pdf_cartella(folder)
+
+    db = get_db()
+    indici = await _indici_dipendenti(db)
+    by_nome, by_cogn = indici["nome"], indici["cogn"]
+
+    def norm(s):
+        return re.sub(r"\s+", " ", str(s or "").strip()).lower()
+
+    def trova_dipendente(testo, filename):
+        haystack = norm(f"{testo} {filename}")
+        # Nomi completi citati nel testo: se ne compare più di uno (es. layout
+        # con più beneficiari che il marcatore "n. stipendi" non ha intercettato),
+        # è ambiguo — meglio la coda manuale che indovinare la persona sbagliata
+        # su un documento che vale come prova di pagamento.
+        per_nome = {}
+        for nome_n, d in by_nome.items():
+            if nome_n in haystack:
+                per_nome[d["id"]] = d
+        if len(per_nome) == 1:
+            return next(iter(per_nome.values()))
+        if len(per_nome) > 1:
+            return None
+        candidati = {}
+        for cogn, lst in by_cogn.items():
+            if cogn in haystack and len(lst) == 1:
+                candidati[lst[0]["id"]] = lst[0]
+        return next(iter(candidati.values())) if len(candidati) == 1 else None
+
+    importati, in_coda, duplicati, falliti_lettura = 0, 0, 0, []
+    affected = set()
+    for nome_file, raw in scaricati:
+        if not raw or raw[:4] != b"%PDF":
+            falliti_lettura.append(nome_file)
+            continue
+        h = hashlib.sha256(raw).hexdigest()
+        if await db.pagamenti_esiti.find_one({"hash": h}) or await db.bonifici_da_associare.find_one({"hash": h}):
+            duplicati += 1
+            continue
+        try:
+            import pdfplumber
+            testo = ""
+            with pdfplumber.open(io.BytesIO(raw)) as pdf:
+                for p in pdf.pages[:3]:
+                    testo += (p.extract_text() or "") + "\n"
+        except Exception:
+            testo = ""
+        dati = _parse_bonifico_pdf(testo, nome_file)
+        dip = None
+        if dati["n_beneficiari"] == 1:
+            dip = trova_dipendente(testo, nome_file)
+
+        if dip and dati["importo"] and dati["mese"] and dati["anno"]:
+            key = f"drive:{h[:24]}"
+            await db.pagamenti_esiti.update_one(
+                {"key": key},
+                {"$set": {"key": key, "hash": h, "cro": None, "dipendente_id": dip["id"],
+                          "data": dati["data"].strftime("%Y-%m-%d") if dati["data"] else None,
+                          "importo": dati["importo"], "causale": dati["causale"],
+                          "beneficiario": dip.get("nome_completo") or f"{dip.get('cognome','')} {dip.get('nome','')}".strip(),
+                          "mese": dati["mese"], "anno": dati["anno"], "origine": "drive-pdf"}},
+                upsert=True)
+            await db.paghe_mensili.update_one(
+                {"dipendente_id": dip["id"], "anno": dati["anno"], "mese": dati["mese"]},
+                {"$set": {"dipendente_id": dip["id"], "anno": dati["anno"], "mese": dati["mese"],
+                          "updated_at": now_iso()}}, upsert=True)
+            affected.add((dip["id"], dati["mese"], dati["anno"]))
+            importati += 1
+        else:
+            await db.bonifici_da_associare.insert_one({
+                "id": str(uuid.uuid4()), "hash": h,
+                "data": dati["data"].strftime("%Y-%m-%d") if dati["data"] else None,
+                "importo": dati["importo"], "causale": dati["causale"] or nome_file,
+                "pdf_filename": nome_file, "pdf_data": base64.b64encode(raw).decode(),
+                "fonte": "drive-pdf", "stato": "da_associare", "created_at": now_iso(),
+            })
+            in_coda += 1
+
+    for dip_id, mese, anno in affected:
+        tot = 0.0
+        async for p in db.pagamenti_esiti.find({"dipendente_id": dip_id, "mese": mese, "anno": anno}, {"_id": 0, "importo": 1}):
+            tot += p.get("importo") or 0
+        await db.paghe_mensili.update_one(
+            {"dipendente_id": dip_id, "anno": anno, "mese": mese},
+            {"$set": {"bonifico_importo": round(tot, 2), "bonifico_ricevuto": tot > 0,
+                      "bonifico_da_esiti": True, "updated_at": now_iso()}})
+        await _ricalcola_stato_paga(db, dip_id, anno, mese)
+
+    return {"trovati_pdf": len(scaricati) + len(falliti), "importati": importati,
+            "in_coda_da_associare": in_coda, "duplicati": duplicati,
+            "falliti_download": falliti[:50], "falliti_lettura": falliti_lettura[:50]}
 
 
 @router.delete("/paghe")
@@ -2966,7 +3234,11 @@ async def associazioni_bonifici(anno: Optional[int] = None, mese: Optional[int] 
     Inoltre indica la 'fonte' del bonifico (banca/prima_nota/manuale), la 'qualita' del match
     (esatto/per_importo/aggregato/da_verificare) e se esiste il PDF del cedolino.
     Sorgente dati = sistema vivo paghe_mensili + pagamenti_esiti (nessun sistema parallelo)."""
-    db = get_db()
+    return await _calcola_associazioni_bonifici(get_db(), anno, mese, stato)
+
+
+async def _calcola_associazioni_bonifici(db, anno: Optional[int] = None, mese: Optional[int] = None,
+                                         stato: Optional[str] = None):
     q = {}
     if anno:
         q["anno"] = int(anno)
@@ -3099,6 +3371,72 @@ async def associazioni_bonifici(anno: Optional[int] = None, mese: Optional[int] 
     for k in ("buste", "bonifici", "acconti", "saldo"):
         tot[k] = round(tot[k], 2)
     return {"righe": righe, "totali": tot, "count": len(righe)}
+
+
+@router.get("/paghe/associazioni-bonifici/export-excel")
+async def associazioni_bonifici_export_excel(anno: Optional[int] = None, mese: Optional[int] = None,
+                                              stato: Optional[str] = None):
+    """Esporta in Excel la stessa vista di /paghe/associazioni-bonifici: una riga per
+    dipendente/periodo con dipendente, periodo cedolino, importo cedolino, importo bonifico
+    e stato dell'associazione. Stessa fonte dati (nessun sistema parallelo)."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+
+    dati = await _calcola_associazioni_bonifici(get_db(), anno, mese, stato)
+    mesi = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", "Luglio",
+            "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Cedolini e Bonifici"
+    intestazioni = ["Dipendente", "Periodo", "Importo Cedolino", "Importo Bonifico",
+                    "Acconti", "Erogato", "Saldo", "Stato", "Qualità match", "Fonte",
+                    "N. Bonifici", "Data ultimo bonifico", "PDF Cedolino"]
+    ws.append(intestazioni)
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="5B7A6B", end_color="5B7A6B", fill_type="solid")
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    stati_lbl = {"pagato": "Pagato", "parziale": "Parziale", "da_pagare": "Da pagare",
+                 "bonifico_senza_busta": "Bonifico senza busta"}
+    qualita_lbl = {"esatto": "Match esatto", "per_importo": "Match per importo",
+                   "aggregato": "Più bonifici", "da_verificare": "Da verificare"}
+    for r in dati["righe"]:
+        periodo = f"{mesi[r['mese'] - 1]} {r['anno']}" if r.get("mese") and 1 <= r["mese"] <= 12 else f"{r.get('mese')}/{r.get('anno')}"
+        # "Data ultimo bonifico": paghe_mensili.bonifico_data non viene mai
+        # popolato dagli import via pagamenti_esiti (CSV, Drive, ponte storico) —
+        # la data vera sta sui singoli pagamenti (r["bonifici"], già ordinati per
+        # data), non sul campo aggregato della busta.
+        date_bonifici = [b.get("data") for b in (r.get("bonifici") or []) if b.get("data")]
+        data_ultimo = max(date_bonifici) if date_bonifici else (r.get("bonifico_data") or "")
+        ws.append([
+            r.get("dipendente"), periodo,
+            r.get("busta") or 0, r.get("bonifico") or 0, r.get("acconti") or 0,
+            r.get("erogato") or 0, r.get("saldo") or 0,
+            stati_lbl.get(r.get("stato"), r.get("stato")),
+            qualita_lbl.get(r.get("qualita"), r.get("qualita") or ""),
+            r.get("fonte") or "", r.get("n_bonifici") or 0,
+            data_ultimo, "Sì" if r.get("cedolino_pdf") else "No",
+        ])
+    for col in ws.columns:
+        larghezza = max((len(str(c.value)) if c.value is not None else 0) for c in col) + 2
+        ws.column_dimensions[col[0].column_letter].width = min(max(larghezza, 10), 40)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nome_file = "cedolini_bonifici"
+    if anno:
+        nome_file += f"_{anno}"
+    if mese:
+        nome_file += f"_{int(mese):02d}"
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{nome_file}.xlsx"'})
 
 
 @router.post("/paghe/conferma-associazione")

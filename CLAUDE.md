@@ -7,7 +7,17 @@ App HR di **Ceraldi Group** (Napoli, titolare Enzo/Vincenzo Ceraldi). Attività:
 > il focus. Aggiornalo quando aggiungi funzioni importanti.
 
 ## Stack & deploy
-- Backend **FastAPI + Motor + MongoDB** (DB `Gestionale`) in `backend/app`.
+- Backend **FastAPI** in `backend/app`. Il cluster MongoDB **non esiste più**: il
+  database vero è **Postgres/Supabase** (env `SUPABASE_DB_URL`), con un adattatore
+  Mongo→Postgres (`backend/app/db_supabase.py`) che riespone la stessa API di motor
+  usata nei 269 punti che chiamano `Database.get_db()` — ogni collection è una
+  tabella `app_<nome>` con colonna `doc jsonb`. Copre find/find_one/insert_one/
+  update_one (con upsert)/delete_one/count_documents, `.sort()`/`.limit()`/
+  `.to_list()`, operatori `$ne $exists $in $nin $gt $gte $lt $lte $or $and`,
+  `$set $setOnInsert $unset $inc`. **NON copre**: `aggregate`, indici, `$push`,
+  `find_one_and_*`, bulk write — non usarli nel codice nuovo. (`MONGO_URL`/Motor
+  restano come fallback in `database.py` se `SUPABASE_DB_URL` non è impostata, ma
+  in produzione oggi è sempre il ramo Supabase.)
 - Frontend **React + Vite** in `frontend/src` (`App.jsx` = gestione desktop,
   `PortaleDipendente.jsx` = portale mobile dipendenti).
 - Deploy su **Render** (`appdipendenti.onrender.com`), auto-deploy dal branch **`main`**.
@@ -153,7 +163,14 @@ dipendente), `onomastici`.
 - `documenti_cloud`: archivio documenti dipendente. Upload massivo POST `/api/dipendenti-cloud/documenti/upload-massivo`: classifica il tipo (UNILAV/CERTIFICAZIONE_UNICA/CONTRATTO/BONIFICO/CODICE_FISCALE/BUSTA_PAGA/ALTRO) da regole sul testo, trova il dipendente dal codice fiscale/nome nel PDF, dedup per hash, salva file_data. Pagina Documenti = vista a cartelle per tipo + download (`/documenti/{id}/file`).
 - Import: anagrafica da Excel (`POST /dipendenti/importa-anagrafica`); pagamenti bonifici
   da CSV banca (`POST /paghe/importa-pagamenti` → collezione `pagamenti_esiti`, ricalcola
-  bonifico mese); Prima Nota Excel (`/paghe/importa-prima-nota`). Prima nota con saldo
+  bonifico mese); Prima Nota Excel (`/paghe/importa-prima-nota`); bonifici stipendi da PDF
+  su Google Drive (`POST /paghe/importa-bonifici-drive`, service account già usato per i
+  cedolini — cartella linkata nel bottone "📁 Cartella Drive bonifici" in Cedolini &
+  Bonifici, stessa del link in `DRIVE_BONIFICI_URL` in App.jsx): legge beneficiario/
+  importo/mese dal PDF, entra in `pagamenti_esiti` se il dipendente è univoco, altrimenti
+  coda "Bonifici da associare" (mai indovinato). Export Excel (dipendente, periodo
+  cedolino, importo cedolino, importo bonifico, stato): `GET
+  /paghe/associazioni-bonifici/export-excel`. Prima nota con saldo
   progressivo: `GET /paghe/prima-nota?dipendente_id=` (cumulato busta − erogato). Upload
   massivo documenti accetta anche ZIP (estrae) e categoria RIDUZIONE_ORARIO.
 - `cedolini`: oltre a netto/pdf salva `voci` (tutti i codici busta) + dati chiave
@@ -168,19 +185,29 @@ dipendente), `onomastici`.
   I payload eSignature/marca temporale/PEC vanno validati contro console.openapi.com.
 - docx→PDF firma automatica: serve `CONVERTAPI_TOKEN` nelle env di Render (ConvertAPI);
   senza token l'endpoint risponde 503. LibreOffice resta solo come fallback locale.
-- **[FIX 29/07/2026, branch `claude/audit-altri-errori`]** `bonifici_stipendi.py::associa_bonifici_a_dipendenti`:
-  il match parziale per cognome sceglieva il primo dipendente trovato nell'indice
-  anche con più omonimi (es. 'CAPEZZUTO' Vincenzo e Valerio, caso reale già
-  documentato nell'import Excel storico) — un bonifico poteva finire associato al
-  dipendente sbagliato. Ora un match parziale viene accettato solo se univoco;
-  se ambiguo il bonifico resta non associato e finisce nel nuovo campo
-  `risultati["ambigui"]` della risposta (nessuna UI lo mostra ancora — solo API).
-  **Non ancora corretto (stesso rischio, non toccato per non rischiare di rompere
-  un match legittimo senza poter verificare i dati reali)**: subito dopo, la
-  ricerca della riga `prima_nota_salari` da aggiornare (riga ~397-400) ha un
-  fallback che rifà lo stesso confronto debole per singola parola del nome se
-  `dipendente_id` non trova nulla — stesso rischio di omonimia, da rivedere.
-  Anche `riconcilia_con_estratto_conto` (riga ~415) conferma "definitivo" un
-  bonifico solo controllando che UNA parola del nome compaia nella descrizione
-  del movimento bancario, senza altra verifica sull'identità — da rafforzare
-  se emergono altri casi di omonimia.
+- **[REFACTOR 28/08/2026, branch `claude/cedolini-refactor-debug-08k03g`]** Rimosso
+  `backend/app/routers/bonifici_stipendi.py` (email IMAP + `prima_nota_salari` +
+  `estratto_conto_movimenti`): era un sistema di riconciliazione bonifici↔stipendi
+  parallelo a quello vivo (`paghe_mensili` + `pagamenti_esiti` in
+  `dipendenti_cloud/__init__.py`), montato in `main.py` ma **nessuna pagina frontend
+  lo chiamava mai** — codice morto, in violazione della regola "un solo sistema per
+  funzione". Le note sui bug di omonimia in quel file (fix del 29/07/2026) non si
+  applicano più: sono andate via col file. Il match per nome del sistema vivo
+  (`_indici_dipendenti`, riusato ovunque: import CSV/Drive, upload documenti) ha
+  sempre avuto la stessa protezione (match univoco o nessun match, mai indovinato).
+- **[FIX 28/08/2026]** `POST /bonifici-da-associare/{id}/associa` (coda manuale
+  "Bonifici da associare"): scriveva il bonifico assegnato solo nella collezione
+  `bonifici`, ma la pagina "Cedolini & Bonifici" e lo stato paga (`stato_pagamento`
+  sulla busta) leggono `pagamenti_esiti`/`paghe_mensili` — un bonifico confermato a
+  mano da quella coda non risultava mai pagato da nessun'altra parte dell'app. Ora
+  l'associazione manuale scrive anche in `pagamenti_esiti` e ricalcola lo stato con
+  `_ricalcola_stato_paga` (lo stesso motore unico di tutti gli altri ingressi).
+- **[NUOVO 28/08/2026]** `POST /paghe/importa-bonifici-drive`: prima la cartella Drive
+  "Bonifici" (linkata da tempo nel bottone "📁 Cartella Drive bonifici", mai letta da
+  nessun codice) non alimentava nulla — i bonifici bancari andavano importati a mano
+  via CSV/Prima Nota. Ora un PDF nuovo nella cartella viene letto ed entra da solo
+  nei pagamenti reali, se il dipendente è univoco; altrimenti finisce nella coda
+  "Bonifici da associare" già esistente (mai indovinato). Va testato con l'archivio
+  reale di bonifici (~44 PDF "Distinta Stipendi" più vecchi bonifici in formato
+  diverso) per verificare la qualità dell'estrazione automatica prima di fidarsene
+  senza controllare la coda dopo ogni import.

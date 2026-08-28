@@ -95,10 +95,9 @@ def register_routers():
     app.include_router(attendance.router, prefix="/api/attendance", tags=["Presenze"], dependencies=STAFF)
     app.include_router(dimissioni.router, prefix="/api/dimissioni", tags=["Dimissioni"], dependencies=ADMIN)
 
-    from .routers import libro_unico_parser, f24_parser, bonifici_stipendi, salari_unificati_v2
+    from .routers import libro_unico_parser, f24_parser, salari_unificati_v2
     app.include_router(libro_unico_parser.router, prefix="/api/paghe", tags=["Libro Unico"], dependencies=ADMIN)
     app.include_router(f24_parser.router, prefix="/api/paghe", tags=["F24 Parser"], dependencies=ADMIN)
-    app.include_router(bonifici_stipendi.router, tags=["Bonifici Stipendi"], dependencies=ADMIN)
     app.include_router(salari_unificati_v2.router, prefix="/api/salari-v2", tags=["Salari V2"], dependencies=ADMIN)
 
     # Contabilità / Gestione Pagamenti (fatture passive, fornitori, documenti fiscali PEC)
