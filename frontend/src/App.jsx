@@ -4590,15 +4590,27 @@ function PagheBonificiPage() {
     finally { setBusy(null); }
   };
 
+  const [importProgress, setImportProgress] = useState(null);
   const importaDaDrive = async () => {
     setImportBusy(true);
+    setImportProgress(null);
+    // La cartella Drive può avere centinaia di PDF (non solo stipendi): il
+    // backend processa un lotto per chiamata (mai visti prima, tracciati per
+    // id Drive) e dice quanti ne restano. Si richiama in automatico finché
+    // non ne restano più, con un tetto di sicurezza sui giri.
+    const tot = { importati: 0, in_coda_da_associare: 0, duplicati: 0, esclusi_non_stipendio: 0 };
     try {
-      const r = await axios.post(`${API}/paghe/importa-bonifici-drive`, {});
-      const d = r.data || {};
-      toast(`Bonifici Drive: ${d.importati || 0} associati, ${d.in_coda_da_associare || 0} da associare a mano, ${d.duplicati || 0} già importati`);
+      for (let giro = 0; giro < 30; giro++) {
+        const r = await axios.post(`${API}/paghe/importa-bonifici-drive`, {});
+        const d = r.data || {};
+        for (const k of Object.keys(tot)) tot[k] += d[k] || 0;
+        setImportProgress({ lavorati: (d.trovati_totale || 0) - (d.restanti || 0), totale: d.trovati_totale || 0 });
+        if (!d.restanti) break;
+      }
+      toast(`Bonifici Drive: ${tot.importati} associati, ${tot.in_coda_da_associare} da associare a mano, ${tot.esclusi_non_stipendio} esclusi (non stipendio), ${tot.duplicati} già importati`);
       await load();
     } catch (e) { toast(e?.response?.data?.detail || "Errore import da Drive", "err"); }
-    finally { setImportBusy(false); }
+    finally { setImportBusy(false); setImportProgress(null); }
   };
 
   const recuperaStorici = async () => {
@@ -4680,7 +4692,9 @@ function PagheBonificiPage() {
             {syncBusy ? "Collego…" : "🔗 Recupera bonifici storici"}
           </button>
           <button className="dc-btn" disabled={importBusy} onClick={importaDaDrive} title="Legge i PDF nuovi dalla cartella Drive bonifici e li abbina ai cedolini">
-            {importBusy ? "Importo…" : "📥 Importa bonifici da Drive"}
+            {importBusy
+              ? (importProgress ? `Importo… ${importProgress.lavorati}/${importProgress.totale}` : "Importo…")
+              : "📥 Importa bonifici da Drive"}
           </button>
           <button className="dc-btn" disabled={exportBusy} onClick={esportaExcel}>
             {exportBusy ? "Esporto…" : "📊 Esporta Excel"}
@@ -4799,6 +4813,7 @@ function PagheBonificiPage() {
                                 <th style={{ ...th, borderBottom: "1px solid #e6e0d4" }}>Causale</th>
                                 <th style={{ ...th, borderBottom: "1px solid #e6e0d4" }}>Beneficiario</th>
                                 <th style={{ ...th, borderBottom: "1px solid #e6e0d4" }}>Riferimento</th>
+                                <th style={{ ...th, borderBottom: "1px solid #e6e0d4" }}>PDF</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -4809,6 +4824,11 @@ function PagheBonificiPage() {
                                   <td style={{ ...td, borderBottom: "none", fontSize: 13 }}>{b.causale || "—"}</td>
                                   <td style={{ ...td, borderBottom: "none", fontSize: 13 }}>{b.beneficiario || "—"}</td>
                                   <td style={{ ...td, borderBottom: "none", fontSize: 12, color: "#7a8576" }}>{b.riferimento || "—"}</td>
+                                  <td style={{ ...td, borderBottom: "none", fontSize: 12 }}>
+                                    {b.pdf_key
+                                      ? <a href={`${API}/paghe/pagamento-esito/${b.pdf_key}/pdf`} target="_blank" rel="noreferrer" style={{ color: "#3d8168", fontWeight: 600 }}>📄 Apri PDF</a>
+                                      : <span style={{ color: "#9aa295" }}>no PDF</span>}
+                                  </td>
                                 </tr>
                               ))}
                             </tbody>

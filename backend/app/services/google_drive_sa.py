@@ -142,5 +142,35 @@ async def scarica_pdf_cartella(folder_id: str, sottocartelle: bool = True,
     return scaricati, falliti
 
 
+async def scarica_per_id(file_ids: List[str]) -> Tuple[List[Tuple[str, str, bytes]], List[str]]:
+    """Scarica SOLO i file Drive indicati (per id), non l'intera cartella: usato per
+    processare una cartella grande a lotti, un click = un lotto, invece di scaricare
+    tutto in una sola richiesta HTTP che altrimenti va in timeout (visto in produzione:
+    573 secondi e 502 con una cartella di centinaia di PDF). Ritorna
+    ([(id, nome, bytes), ...], [id_falliti])."""
+    if not file_ids:
+        return [], []
+    creds = _leggi_credenziali()
+    scaricati: List[Tuple[str, str, bytes]] = []
+    falliti: List[str] = []
+    async with httpx.AsyncClient(timeout=120) as client:
+        access = await _token(creds, client)
+        headers = {"Authorization": f"Bearer {access}"}
+        for fid in file_ids:
+            try:
+                meta = await client.get(f"https://www.googleapis.com/drive/v3/files/{fid}",
+                                        params={"fields": "name", "supportsAllDrives": "true"}, headers=headers)
+                nome = meta.json().get("name", fid) if meta.status_code == 200 else fid
+                r = await client.get(f"https://www.googleapis.com/drive/v3/files/{fid}",
+                                     params={"alt": "media", "supportsAllDrives": "true"}, headers=headers)
+                if r.status_code == 200:
+                    scaricati.append((fid, nome, r.content))
+                else:
+                    falliti.append(fid)
+            except Exception:
+                falliti.append(fid)
+    return scaricati, falliti
+
+
 def cartella_cedolini_default() -> str:
     return os.environ.get("DRIVE_CEDOLINI_FOLDER_ID") or "1XVdbMzz145N5p8jn4XXSt8YkYtsPOT15"
