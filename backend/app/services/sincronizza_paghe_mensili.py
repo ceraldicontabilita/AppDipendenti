@@ -59,13 +59,21 @@ async def sincronizza(db, anno: int = None) -> Dict[str, Any]:
     for b in bonifici:
         per_cedolino.setdefault(b["cedolino_id"], []).append(b)
 
+    # Prefetch di paghe_mensili in blocco: l'adattatore Supabase non ha indici,
+    # un find_one per cedolino (fino a 3000) su una tabella che cresce ad ogni
+    # giro dentro lo stesso ciclo e' un O(N^2) che porta la sincronizzazione a
+    # decine di secondi e puo' far scadere la richiesta (502). Si legge una
+    # volta sola e si indicizza in memoria.
+    esistenti_idx: Dict[tuple, Dict[str, Any]] = {}
+    async for p in db["paghe_mensili"].find({}, {"_id": 0}):
+        esistenti_idx[(p.get("dipendente_id"), p.get("anno"), p.get("mese"))] = p
+
     adesso = datetime.now(timezone.utc).isoformat()
     creati = aggiornati = saltati_manuali = 0
 
     for c in cedolini:
         dip, anno_c, mese_c = c["dipendente_id"], int(c["anno"]), int(c["mese"])
-        esistente = await db["paghe_mensili"].find_one(
-            {"dipendente_id": dip, "anno": anno_c, "mese": mese_c}, {"_id": 0})
+        esistente = esistenti_idx.get((dip, anno_c, mese_c))
         if esistente and esistente.get("origine") not in (None, "cedolino"):
             saltati_manuali += 1
             continue

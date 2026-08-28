@@ -3249,6 +3249,42 @@ async def _calcola_associazioni_bonifici(db, anno: Optional[int] = None, mese: O
     async for d in db.dipendenti.find({}, {"_id": 0, "id": 1, "nome": 1, "cognome": 1, "codice_fiscale": 1}):
         dip_map[d["id"]] = d
 
+    # Prefetch in blocco (UNA lettura per tabella) invece che una query per ogni
+    # riga di paghe_mensili: l'adattatore Supabase non ha indici, ogni find/
+    # find_one legge l'intera tabella e filtra in Python — con centinaia/migliaia
+    # di buste, farlo dentro il ciclo era un incrocio N×M che portava la risposta
+    # a decine o centinaia di secondi (e in produzione ha saturato il pool di
+    # connessioni, con 502 a cascata anche su endpoint scollegati). Qui si legge
+    # ogni tabella una sola volta e si indicizza in memoria.
+    esiti_idx: Dict[tuple, List[Dict[str, Any]]] = {}
+    async for e in db.pagamenti_esiti.find({}, {"_id": 0}):
+        esiti_idx.setdefault((e.get("dipendente_id"), e.get("mese"), e.get("anno")), []).append(e)
+    for lst in esiti_idx.values():
+        lst.sort(key=lambda e: e.get("data") or "")
+
+    # NON includere pdf_data qui: l'adattatore Supabase ottimizza solo le
+    # proiezioni "ad esclusione" (campo: 0) — una proiezione a inclusione
+    # come questa arriverebbe comunque per intero, PDF in base64 compresi
+    # (anche centinaia di MB su ~1500 cedolini). Il PDF si scarica a parte,
+    # da qui basta sapere che il cedolino esiste (has_pdf = bool(ced)).
+    cedolini_lista: List[Dict[str, Any]] = []
+    ced_by_periodo: Dict[tuple, Dict[str, Any]] = {}
+    async for c in db.cedolini.find({}, {"_id": 0, "pdf_data": 0}):
+        cedolini_lista.append(c)
+        chiave = (c.get("dipendente_id"), c.get("mese"), c.get("anno"))
+        ced_by_periodo.setdefault(chiave, c)
+
+    def trova_cedolino(dip_id, cognome, mese_p, anno_p):
+        c = ced_by_periodo.get((dip_id, mese_p, anno_p))
+        if c:
+            return c
+        if cognome:
+            cg = cognome.lower()
+            for cand in cedolini_lista:
+                if cand.get("mese") == mese_p and cand.get("anno") == anno_p and cg in (cand.get("nome_dipendente") or "").lower():
+                    return cand
+        return None
+
     righe = []
     tot = {"buste": 0.0, "bonifici": 0.0, "acconti": 0.0, "saldo": 0.0,
            "pagati": 0, "parziali": 0, "da_pagare": 0, "senza_busta": 0,
@@ -3267,17 +3303,13 @@ async def _calcola_associazioni_bonifici(db, anno: Optional[int] = None, mese: O
         nome = f"{dip.get('cognome', '')} {dip.get('nome', '')}".strip() or dip_id
 
         # Bonifici reali pagati (esiti banca) per questo dipendente/mese/anno
-        esiti = []
-        async for e in db.pagamenti_esiti.find(
-                {"dipendente_id": dip_id, "mese": p.get("mese"), "anno": p.get("anno")},
-                {"_id": 0}).sort("data", 1):
-            esiti.append({
-                "data": e.get("data"),
-                "importo": round(float(e.get("importo") or 0), 2),
-                "causale": e.get("causale") or "",
-                "beneficiario": e.get("beneficiario") or "",
-                "riferimento": e.get("cro") or e.get("key") or "",
-            })
+        esiti = [{
+            "data": e.get("data"),
+            "importo": round(float(e.get("importo") or 0), 2),
+            "causale": e.get("causale") or "",
+            "beneficiario": e.get("beneficiario") or "",
+            "riferimento": e.get("cro") or e.get("key") or "",
+        } for e in esiti_idx.get((dip_id, p.get("mese"), p.get("anno")), [])]
 
         erogato = bon + acc
         if busta <= 0 and erogato > 0:
@@ -3325,16 +3357,10 @@ async def _calcola_associazioni_bonifici(db, anno: Optional[int] = None, mese: O
             else:
                 tot["da_verificare"] += 1
 
-        # Esiste il PDF del cedolino?
-        ced = await db.cedolini.find_one(
-            {"dipendente_id": dip_id, "mese": p.get("mese"), "anno": p.get("anno")},
-            {"_id": 0, "id": 1, "pdf_data": 1})
-        if not ced and dip.get("cognome"):
-            ced = await db.cedolini.find_one(
-                {"nome_dipendente": {"$regex": dip.get("cognome"), "$options": "i"},
-                 "mese": p.get("mese"), "anno": p.get("anno")},
-                {"_id": 0, "id": 1, "pdf_data": 1})
-        has_pdf = bool(ced and ced.get("pdf_data"))
+        # Esiste il cedolino per questo periodo? (il PDF non è stato letto qui,
+        # vedi nota sul prefetch sopra — quasi ogni cedolino importato ne ha uno)
+        ced = trova_cedolino(dip_id, dip.get("cognome"), p.get("mese"), p.get("anno"))
+        has_pdf = bool(ced)
         cedolino_id = ced.get("id") if ced else None
 
         if stato and st != stato:
