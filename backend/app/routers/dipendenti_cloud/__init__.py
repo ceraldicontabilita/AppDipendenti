@@ -239,12 +239,17 @@ async def sincronizza_bonifici_storici():
     risultavano ancora "da pagare". Non tocca i pagamenti "una_tantum" (TFR/
     transazioni di fine rapporto: competenza non è un mese di stipendio)."""
     db = get_db()
+    # Esclude i bonifici già scritti a mano dalla coda "Bonifici da associare"
+    # (associa_bonifico li ha già messi in pagamenti_esiti con la chiave
+    # "beneficiari-diversi:*"): reimportarli qui creerebbe una seconda riga in
+    # pagamenti_esiti per lo stesso pagamento, raddoppiando il bonifico del mese.
     bonifici = await db.bonifici.find(
-        {"categoria": "DIPENDENTE", "dipendente_id": {"$ne": None}, "competenza": {"$ne": None}},
+        {"categoria": "DIPENDENTE", "dipendente_id": {"$ne": None}, "competenza": {"$ne": None},
+         "assegnato_da_bonifico_diversi": {"$exists": False}},
         {"_id": 0}).to_list(5000)
 
     affected = set()
-    importati = 0
+    importati = duplicati = 0
     for b in bonifici:
         competenza = str(b.get("competenza") or "")
         m = re.match(r"^(\d{4})-(\d{1,2})$", competenza)
@@ -253,13 +258,22 @@ async def sincronizza_bonifici_storici():
         anno, mese = int(m.group(1)), int(m.group(2))
         dip_id = b.get("dipendente_id")
         importo = b.get("importo")
+        data_pag = b.get("data")
         if not dip_id or not importo:
+            continue
+        # Difesa aggiuntiva: stesso dipendente/data/importo già presente in
+        # pagamenti_esiti (da CSV, da un'altra corsa di questo stesso ponte, o
+        # da un altro percorso) -> non è un nuovo pagamento, salta.
+        gia_presente = await db.pagamenti_esiti.find_one(
+            {"dipendente_id": dip_id, "data": data_pag, "importo": importo})
+        if gia_presente:
+            duplicati += 1
             continue
         key = f"bonifici-coll:{b.get('id')}"
         await db.pagamenti_esiti.update_one(
             {"key": key},
             {"$set": {"key": key, "cro": None, "dipendente_id": dip_id,
-                      "data": b.get("data"), "importo": importo,
+                      "data": data_pag, "importo": importo,
                       "causale": b.get("fonte") or "Archivio bonifici PDF",
                       "beneficiario": b.get("dipendente_nome"),
                       "mese": mese, "anno": anno, "origine": "bonifici-storico"}},
@@ -282,7 +296,7 @@ async def sincronizza_bonifici_storici():
         await _ricalcola_stato_paga(db, dip_id, anno, mese)
 
     return {"bonifici_esaminati": len(bonifici), "importati_in_pagamenti_esiti": importati,
-            "mesi_aggiornati": len(affected)}
+            "duplicati_saltati": duplicati, "mesi_aggiornati": len(affected)}
 
 
 @router.get("/paghe")
@@ -541,9 +555,18 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
 
     def trova_dipendente(testo, filename):
         haystack = norm(f"{testo} {filename}")
+        # Nomi completi citati nel testo: se ne compare più di uno (es. layout
+        # con più beneficiari che il marcatore "n. stipendi" non ha intercettato),
+        # è ambiguo — meglio la coda manuale che indovinare la persona sbagliata
+        # su un documento che vale come prova di pagamento.
+        per_nome = {}
         for nome_n, d in by_nome.items():
             if nome_n in haystack:
-                return d
+                per_nome[d["id"]] = d
+        if len(per_nome) == 1:
+            return next(iter(per_nome.values()))
+        if len(per_nome) > 1:
+            return None
         candidati = {}
         for cogn, lst in by_cogn.items():
             if cogn in haystack and len(lst) == 1:
@@ -3384,6 +3407,12 @@ async def associazioni_bonifici_export_excel(anno: Optional[int] = None, mese: O
                    "aggregato": "Più bonifici", "da_verificare": "Da verificare"}
     for r in dati["righe"]:
         periodo = f"{mesi[r['mese'] - 1]} {r['anno']}" if r.get("mese") and 1 <= r["mese"] <= 12 else f"{r.get('mese')}/{r.get('anno')}"
+        # "Data ultimo bonifico": paghe_mensili.bonifico_data non viene mai
+        # popolato dagli import via pagamenti_esiti (CSV, Drive, ponte storico) —
+        # la data vera sta sui singoli pagamenti (r["bonifici"], già ordinati per
+        # data), non sul campo aggregato della busta.
+        date_bonifici = [b.get("data") for b in (r.get("bonifici") or []) if b.get("data")]
+        data_ultimo = max(date_bonifici) if date_bonifici else (r.get("bonifico_data") or "")
         ws.append([
             r.get("dipendente"), periodo,
             r.get("busta") or 0, r.get("bonifico") or 0, r.get("acconti") or 0,
@@ -3391,7 +3420,7 @@ async def associazioni_bonifici_export_excel(anno: Optional[int] = None, mese: O
             stati_lbl.get(r.get("stato"), r.get("stato")),
             qualita_lbl.get(r.get("qualita"), r.get("qualita") or ""),
             r.get("fonte") or "", r.get("n_bonifici") or 0,
-            r.get("bonifico_data") or "", "Sì" if r.get("cedolino_pdf") else "No",
+            data_ultimo, "Sì" if r.get("cedolino_pdf") else "No",
         ])
     for col in ws.columns:
         larghezza = max((len(str(c.value)) if c.value is not None else 0) for c in col) + 2
