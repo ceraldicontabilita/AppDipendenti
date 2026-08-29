@@ -12,6 +12,11 @@ const TK = "pt_token";
 // appesa a tempo indeterminato e il bottone (es. Timbra) resta bloccato su
 // "Attendi..." senza che il dipendente sappia se e' andata a buon fine.
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || "/api", timeout: 15000 });
+// Upload/download di file (buste PDF, documenti fino a 12MB) possono legittimamente
+// superare 15s su wifi scarso: qui serve piu' margine, non un fallimento prematuro
+// di un trasferimento che sta andando bene ma lentamente (trovato da una review
+// automatica: il timeout condiviso avrebbe interrotto upload/download validi).
+const FILE_TIMEOUT = 60000;
 api.interceptors.request.use((c) => {
   const t = localStorage.getItem(TK);
   if (t) c.headers.Authorization = `Bearer ${t}`;
@@ -73,7 +78,15 @@ function Login({ onLogin }) {
       // L'amministratore entra DIRETTAMENTE nella Gestione (desktop), non nel portale.
       if (r.data.role === "admin") { window.location.href = "/dipendenti"; return; }
       onLogin();
-    } catch { setErr(sel.admin ? "PIN errato" : "Nome o PIN non validi"); setPin(""); }
+    } catch (e) {
+      // Prima del login il banner globale "Connessione assente" non e' ancora
+      // visibile (schermata separata da pt-root): senza questa distinzione un
+      // timeout di rete veniva mostrato come "PIN errato", proprio sulla wifi
+      // scarsa che questo fix doveva coprire (trovato da una review automatica).
+      setErr(!e.response ? "Connessione assente — riprova"
+        : (sel.admin ? "PIN errato" : "Nome o PIN non validi"));
+      setPin("");
+    }
   };
 
   if (!sel) return (
@@ -290,7 +303,7 @@ function Buste() {
     setVisionato(true);                            // sblocca subito Accetto/Contesta
     const win = window.open("", "_blank");         // aperto nel gesto utente: niente blocco popup
     try {
-      const r = await api.get(`/portale/buste/${b.id}/pdf`, { responseType: "blob" });
+      const r = await api.get(`/portale/buste/${b.id}/pdf`, { responseType: "blob", timeout: FILE_TIMEOUT });
       const url = URL.createObjectURL(r.data);
       if (win) { win.location = url; }
       else { const a=document.createElement("a"); a.href=url; a.download=b.filename||`busta_${b.mese}_${b.anno}.pdf`; a.click(); }
@@ -305,7 +318,7 @@ function Buste() {
   const contesta = async (b) => {
     try { await api.post(`/portale/buste/${b.id}/contesta`); } catch {}
     try {
-      const r = await api.get(`/portale/buste/${b.id}/modulo-contestazione`, { responseType: "blob" });
+      const r = await api.get(`/portale/buste/${b.id}/modulo-contestazione`, { responseType: "blob", timeout: FILE_TIMEOUT });
       const url = URL.createObjectURL(r.data);
       const a = document.createElement("a"); a.href=url; a.download=`contestazione_busta_${mm(b)}_${b.anno}.pdf`; a.click();
       URL.revokeObjectURL(url);
@@ -539,12 +552,12 @@ function Documenti() {
     URL.revokeObjectURL(url);
   };
   const scaricaModulo = async (tipo) => {
-    try { const r = await api.get(`/portale/documenti/modulo/${tipo}`, {responseType:"blob"});
+    try { const r = await api.get(`/portale/documenti/modulo/${tipo}`, {responseType:"blob", timeout: FILE_TIMEOUT});
       blobDownload(r.data, `modulo_${tipo}.pdf`);
     } catch { alert("Modulo non disponibile"); }
   };
   const scaricaFile = async (d) => {
-    try { const r = await api.get(`/portale/documenti/${d.id}/file`, {responseType:"blob"});
+    try { const r = await api.get(`/portale/documenti/${d.id}/file`, {responseType:"blob", timeout: FILE_TIMEOUT});
       blobDownload(r.data, d.nome_file || "documento");
     } catch { alert("Documento non disponibile"); }
   };
@@ -552,7 +565,7 @@ function Documenti() {
     const file = ev.target.files?.[0]; if(!file) return;
     const fd = new FormData(); fd.append("tipo", tipo); fd.append("file", file);
     setBusy(tipo);
-    try { await api.post("/portale/documenti/upload", fd, {headers:{"Content-Type":"multipart/form-data"}}); load(); }
+    try { await api.post("/portale/documenti/upload", fd, {headers:{"Content-Type":"multipart/form-data"}, timeout: FILE_TIMEOUT}); load(); }
     catch(e){ alert(e?.response?.data?.detail || "Errore nel caricamento"); }
     setBusy(""); ev.target.value="";
   };
@@ -561,7 +574,7 @@ function Documenti() {
     try { await api.delete(`/portale/documenti/${d.id}`); load(); } catch {}
   };
   const scaricaRegolamento = async () => {
-    try { const r = await api.get("/portale/documenti/regolamento/file", {responseType:"blob"});
+    try { const r = await api.get("/portale/documenti/regolamento/file", {responseType:"blob", timeout: FILE_TIMEOUT});
       blobDownload(r.data, "regolamento_interno.docx");
     } catch { alert("Regolamento non ancora pubblicato dall'azienda."); }
   };
@@ -752,7 +765,7 @@ function BusteAdmin() {
   const apri = async (b) => {
     const win = window.open("", "_blank");
     try {
-      const r = await api.get(`/portale/buste/${b.id}/pdf`, { responseType: "blob" });
+      const r = await api.get(`/portale/buste/${b.id}/pdf`, { responseType: "blob", timeout: FILE_TIMEOUT });
       const url = URL.createObjectURL(r.data);
       if (win) win.location = url;
       else { const a = document.createElement("a"); a.href = url; a.download = b.filename || "busta.pdf"; a.click(); }
@@ -884,7 +897,7 @@ function DocumentiAdmin() {
   const scarica = async (d) => {
     const win = window.open("", "_blank");
     try {
-      const r = await api.get(`/dipendenti-cloud/documenti/${d.id}/file`, { responseType: "blob" });
+      const r = await api.get(`/dipendenti-cloud/documenti/${d.id}/file`, { responseType: "blob", timeout: FILE_TIMEOUT });
       const url = URL.createObjectURL(r.data);
       if (win) win.location = url;
       else { const a = document.createElement("a"); a.href = url; a.download = d.filename || "documento"; a.click(); }
