@@ -218,7 +218,7 @@ async def riepilogo_mensile(competenza: str):
         # 2) Cedolini parsati dal PDF (bacino principale)
         cedolini_docs = await db.cedolini.find(
             {"anno": anno_int, "mese": mese_int},
-            {"_id": 0},
+            {"_id": 0, "pdf_data": 0},
         ).to_list(length=None)
 
         # 3) Acconti erogati nel mese — per dipendente

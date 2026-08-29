@@ -1335,7 +1335,7 @@ async def sync_giustificativi_da_cedolini(
     if mese:
         query["mese"] = mese
     
-    cedolini = await db["cedolini"].find(query, {"_id": 0}).to_list(10000)
+    cedolini = await db["cedolini"].find(query, {"_id": 0, "pdf_data": 0}).to_list(10000)
     
     risultato = {
         "cedolini_analizzati": len(cedolini),
@@ -1770,17 +1770,25 @@ async def get_saldi_finali_tutti(
             {"_id": 0, "id": 1, "nome_completo": 1, "nome": 1, "cognome": 1}
         ).to_list(500)
         
+        # Ultimo cedolino dell'anno per dipendente, in blocco: l'adattatore
+        # Supabase non ha indici (un find_one per dipendente e' un N+1 su una
+        # tabella che puo' avere anni di storico) e non onora `sort` su
+        # find_one, quindi il vecchio codice pescava un cedolino arbitrario
+        # invece dell'ultimo per mese.
+        cedolini_idx: Dict[str, Dict[str, Any]] = {}
+        async for c in db["cedolini"].find({"anno": anno}, {"_id": 0, "pdf_data": 0}):
+            emp_id_c = c.get("employee_id")
+            if not emp_id_c:
+                continue
+            attuale = cedolini_idx.get(emp_id_c)
+            if attuale is None or (c.get("mese") or 0) > (attuale.get("mese") or 0):
+                cedolini_idx[emp_id_c] = c
+
         for emp in employees:
             emp_id = emp.get("id")
             nome = emp.get("nome_completo") or f"{emp.get('cognome', '')} {emp.get('nome', '')}"
-            
-            # Cerca ultimo cedolino dell'anno per questo dipendente
-            cedolino = await db["cedolini"].find_one(
-                {"employee_id": emp_id, "anno": anno},
-                {"_id": 0},
-                sort=[("mese", -1)]
-            )
-            
+            cedolino = cedolini_idx.get(emp_id)
+
             saldo = {
                 "employee_id": emp_id,
                 "employee_nome": nome,
@@ -1794,18 +1802,18 @@ async def get_saldi_finali_tutti(
             }
             saldi.append(saldo)
     else:
-        # Arricchisci con nomi dipendenti
+        # Arricchisci con nomi dipendenti, in blocco invece di un find_one a riga
+        dipendenti_idx: Dict[str, Dict[str, Any]] = {}
+        async for d in db["dipendenti"].find({}, {"_id": 0, "id": 1, "nome_completo": 1, "nome": 1, "cognome": 1}):
+            dipendenti_idx[d.get("id")] = d
+
         for s in saldi:
-            emp_id = s.get("employee_id")
-            employee = await db["dipendenti"].find_one(
-                {"id": emp_id},
-                {"_id": 0, "nome_completo": 1, "nome": 1, "cognome": 1}
-            )
-            
+            employee = dipendenti_idx.get(s.get("employee_id"))
+
             nome = ""
             if employee:
                 nome = employee.get("nome_completo") or f"{employee.get('cognome', '')} {employee.get('nome', '')}"
-            
+
             s["employee_nome"] = nome
     
     # Ordina per nome
