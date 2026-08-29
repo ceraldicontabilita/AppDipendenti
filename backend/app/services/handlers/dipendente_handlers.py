@@ -160,12 +160,24 @@ async def on_dipendente_cessato(event: Dict[str, Any], db) -> Optional[Dict]:
     2. Rifiuta automaticamente richieste assenza pending con data > data_cessazione
     3. Annulla partite aperte stipendio residue
     4. Risolve alert aperti sul dipendente (tranne DIP_CESSATO_FLUSSI_ATTIVI nuovo)
-    5. Genera audit + eventuale alert se restano flussi anomali
+    5. Revoca il PIN del portale (nessun nuovo login possibile da qui in poi)
+    6. Genera audit + eventuale alert se restano flussi anomali
 
     Idempotente: se ricevuto due volte non duplica azioni (skip se già terminato).
+
+    NOTA (limite noto, trovato da una review automatica): revoca il PIN, quindi
+    blocca ogni NUOVO login, ma un token JWT già emesso a un dipendente resta
+    valido fino alla sua scadenza naturale (fino a 7 giorni, get_identity in
+    utils/identity.py non ri-verifica lo stato del dipendente ad ogni chiamata,
+    solo firma/scadenza del token) — nessuna revoca delle sessioni già aperte.
+    Per questa app (poche decine di dipendenti, cessazioni non frequenti) non
+    si è ritenuto proporzionato aggiungere una query DB su ogni chiamata API
+    protetta solo per coprire questa finestra residua; da rivalutare se diventa
+    un problema reale.
     """
     from backend.app.services.alert_engine import genera_alert
     from backend.app.services.audit_logger import log_evento
+    from backend.app.services.auth_dipendenti import rimuovi_pin
     from datetime import datetime, timedelta, timezone
 
     dip_id = event.get("dipendente_id", "")
@@ -181,7 +193,17 @@ async def on_dipendente_cessato(event: Dict[str, Any], db) -> Optional[Dict]:
         "richieste_future_rifiutate": 0,
         "partite_annullate": 0,
         "alerts_risolti": 0,
+        "pin_revocato": False,
     }
+
+    # 0. Revoca il PIN del portale: da qui in poi nessun nuovo login possibile
+    #    (il selettore nomi del portale esclude comunque i cessati dall'elenco,
+    #    ma senza revocare il PIN un accesso diretto con l'id noto avrebbe
+    #    continuato a funzionare).
+    try:
+        azioni["pin_revocato"] = await rimuovi_pin(dip_id)
+    except Exception as e:
+        logger.exception(f"Errore revoca PIN per dip {dip_id}: {e}")
 
     # 1. Termina contratti attivi
     try:
@@ -297,7 +319,8 @@ async def on_dipendente_cessato(event: Dict[str, Any], db) -> Optional[Dict]:
         f" — contratti={azioni['contratti_terminati']}, "
         f"richieste={azioni['richieste_future_rifiutate']}, "
         f"partite={azioni['partite_annullate']}, "
-        f"alerts={azioni['alerts_risolti']}"
+        f"alerts={azioni['alerts_risolti']}, "
+        f"pin_revocato={azioni['pin_revocato']}"
     )
 
     await log_evento(

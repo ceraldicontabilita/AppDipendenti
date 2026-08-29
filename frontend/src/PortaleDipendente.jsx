@@ -8,6 +8,31 @@ import {
 import "./portale.css";
 
 const TK = "pt_token";
+// Legge la scadenza (exp) dal JWT senza verificarne la firma (la verifica vera
+// e' lato server, qui serve solo a decidere se riaprire il portale senza PIN).
+// Stessa logica di main.jsx (RequireRole per l'area gestione), duplicata qui
+// perche' main.jsx non e' un modulo condiviso.
+function tokenValido(token) {
+  if (!token) return false;
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    return !payload.exp || payload.exp * 1000 > Date.now();
+  } catch {
+    return false;
+  }
+}
+// Millisecondi mancanti alla scadenza (null se assente/invalido/senza exp):
+// serve a pianificare il logout automatico anche se la pagina resta in
+// primo piano ininterrottamente, senza aspettare un evento di focus.
+function msAllaScadenza(token) {
+  if (!token) return null;
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    return payload.exp ? payload.exp * 1000 - Date.now() : null;
+  } catch {
+    return null;
+  }
+}
 // timeout esplicito: senza, su wifi scarso al banco una richiesta puo' restare
 // appesa a tempo indeterminato e il bottone (es. Timbra) resta bloccato su
 // "Attendi..." senza che il dipendente sappia se e' andata a buon fine.
@@ -75,6 +100,20 @@ function _azzeraConnessione() {
   _connFallite.clear();
   _notificaConnessione();
 }
+// Un token persistito puo' sembrare valido lato client (exp futuro) ma essere
+// rifiutato dal server — segreto ruotato, o il dipendente e' stato cessato/
+// disattivato nel frattempo (il PIN viene revocato alla cessazione, ma un
+// token gia' emesso resta valido fino alla scadenza naturale: qui si copre
+// almeno il caso in cui il server lo rifiuta comunque). Senza questo, il
+// portale restava aperto sulla schermata principale mentre ogni chiamata API
+// falliva silenziosamente con 401 (trovato da una review automatica).
+let _authListeners = [];
+function _sessioneRifiutata() {
+  localStorage.removeItem(TK);
+  localStorage.removeItem("pt_role");
+  localStorage.removeItem("pt_name");
+  _authListeners.forEach((fn) => fn());
+}
 api.interceptors.response.use(
   (r) => {
     if (_connFallite.delete(_chiaveRichiesta(r.config))) _notificaConnessione();
@@ -88,6 +127,7 @@ api.interceptors.response.use(
     // specifico del server (trovato da una review automatica).
     if (error.response) {
       if (_connFallite.delete(_chiaveRichiesta(error.config))) _notificaConnessione();
+      if (error.response.status === 401) _sessioneRifiutata();
     } else if (error.config?._connGen === _connGenerazione) {
       // Ignora il fallimento se la vista che l'ha generato e' stata nel
       // frattempo abbandonata (cambio tab -> nuova generazione): altrimenti
@@ -115,27 +155,36 @@ const TIPI = [
 const tipoLabel = (v) => (TIPI.find((t) => t.v === v) || {}).l || v;
 const fmt = (d) => (d ? `${d.slice(8, 10)}/${d.slice(5, 7)}` : "-");
 
-const RICORDA_NOME = "pt_last_nome";
-
 /* ---------------- LOGIN ---------------- */
 function Login({ onLogin }) {
-  // Niente elenco dei dipendenti prima dell'autenticazione: si entra scrivendo
-  // il PROPRIO cognome + PIN. I nomi di tutti restano visibili solo agli
-  // amministratori nella Gestione.
-  const [sel, setSel] = useState(null);   // {admin:true} | {nome:"..."}
-  const [nome, setNome] = useState("");
+  // Selettore a tocco: elenco nomi (GET pubblico, solo id+nome) invece di
+  // digitare il cognome — decisione esplicita del titolare per un dispositivo
+  // condiviso in negozio (cucina/pasticceria), dove ridigitare il nome ad ogni
+  // uso era scomodissimo. Tocca il tuo nome -> tastierino PIN, come prima.
+  const [elenco, setElenco] = useState(null);   // null = in caricamento
+  const [elencoErr, setElencoErr] = useState(false);
+  const [sel, setSel] = useState(null);   // {admin:true} | {id, nome}
   const [pin, setPin] = useState("");
   const [err, setErr] = useState("");
-  // Cognome dell'ultimo login riuscito su QUESTO telefono (non il token/PIN):
-  // senza, ogni riapertura dell'app costringe a ridigitare il cognome su
-  // tastiera prima di poter anche solo timbrare — l'unico testo obbligatorio
-  // di tutto il portale, proprio nel punto che blocca l'azione piu' frequente.
-  const [ricordato, setRicordato] = useState(() => localStorage.getItem(RICORDA_NOME) || "");
+
+  // Estratta (non solo nell'effetto) per poterla richiamare dal bottone
+  // "Riprova": senza, un fallimento di rete lasciava l'elenco vuoto per
+  // sempre, senza alcun modo di ricaricarlo se non l'intera pagina — proprio
+  // sulla wifi scarsa che questo selettore doveva gestire (trovato da una
+  // review automatica).
+  const caricaElenco = () => {
+    setElenco(null);
+    setElencoErr(false);
+    api.get("/auth/dipendenti-attivi")
+      .then((r) => setElenco(r.data.dipendenti || []))
+      .catch(() => { setElenco([]); setElencoErr(true); });
+  };
+  useEffect(() => { caricaElenco(); }, []);
 
   const press = (n) => { setErr(""); if (pin.length < 8) setPin(pin + n); };
   const submit = async (p) => {
     try {
-      const body = sel.admin ? { pin: p } : { nome: sel.nome, pin: p };
+      const body = sel.admin ? { pin: p } : { dipendente_id: sel.id, pin: p };
       const r = await api.post("/auth/pin-login", body);
       // Un login riuscito e' la prova piu' diretta possibile che la
       // connessione funziona: se un tentativo precedente aveva acceso il
@@ -147,7 +196,6 @@ function Login({ onLogin }) {
       localStorage.setItem(TK, r.data.access_token);
       localStorage.setItem("pt_role", r.data.role);
       localStorage.setItem("pt_name", r.data.name || sel.nome);
-      if (!sel.admin) localStorage.setItem(RICORDA_NOME, sel.nome);
       // L'amministratore entra DIRETTAMENTE nella Gestione (desktop), non nel portale.
       if (r.data.role === "admin") { window.location.href = "/dipendenti"; return; }
       onLogin();
@@ -156,8 +204,9 @@ function Login({ onLogin }) {
       // visibile (schermata separata da pt-root): senza questa distinzione un
       // timeout di rete veniva mostrato come "PIN errato", proprio sulla wifi
       // scarsa che questo fix doveva coprire (trovato da una review automatica).
-      setErr(!e.response ? "Connessione assente — riprova"
-        : (sel.admin ? "PIN errato" : "Nome o PIN non validi"));
+      // Login via id (non piu' per nome): un PIN errato e' sempre "PIN errato",
+      // niente piu' ambiguita' da riportare come "nome o PIN non validi".
+      setErr(!e.response ? "Connessione assente — riprova" : "PIN errato");
       setPin("");
     }
   };
@@ -166,26 +215,23 @@ function Login({ onLogin }) {
     <div className="login">
       <div className="brand"><div className="logo"><Users size={30} /></div>
         <h2>Portale Dipendenti</h2><div className="muted" style={{textAlign:"center"}}>Ceraldi Group</div></div>
-      {ricordato ? (
-        <div className="card">
-          <h3>Bentornato</h3>
-          <button className="btn" onClick={() => setSel({ nome: ricordato })}>
-            Continua come {ricordato}
-          </button>
-          <button className="btn gh sm" style={{ marginTop: 10 }}
-            onClick={() => { localStorage.removeItem(RICORDA_NOME); setRicordato(""); }}>
-            Non sono io
-          </button>
+      <div className="card"><h3>Chi sei?</h3>
+        {elenco === null && <div className="muted">Caricamento…</div>}
+        {elenco !== null && elenco.length === 0 && elencoErr && (
+          <>
+            <div className="muted">Connessione assente</div>
+            <button className="btn gh sm" style={{ marginTop: 8 }} onClick={caricaElenco}>Riprova</button>
+          </>
+        )}
+        {elenco !== null && elenco.length === 0 && !elencoErr && (
+          <div className="muted">Nessun nome disponibile: contatta l'amministratore</div>
+        )}
+        <div className="nomi-grid">
+          {(elenco || []).map((d) => (
+            <button key={d.id} className="btn nome-tile" onClick={() => setSel(d)}>{d.nome}</button>
+          ))}
         </div>
-      ) : (
-        <div className="card"><h3>Chi sei?</h3>
-          <label>Scrivi il tuo cognome (o nome e cognome)</label>
-          <input className="input" autoFocus value={nome} onChange={(e)=>{setNome(e.target.value); setErr("");}}
-            placeholder="es. Rossi" onKeyDown={(e)=>{ if(e.key==="Enter" && nome.trim().length>=2) setSel({nome: nome.trim()}); }} />
-          <button className="btn" style={{marginTop:10}} disabled={nome.trim().length<2}
-            onClick={()=>setSel({nome: nome.trim()})}>Continua</button>
-        </div>
-      )}
+      </div>
       <button className="btn sec" onClick={() => setSel({ nome: "Amministratore", admin: true })}>
         Accesso amministratore</button>
     </div>
@@ -1034,9 +1080,13 @@ function TimbraAdmin() {
 }
 
 export default function PortaleDipendente() {
-  // Sicurezza: il portale chiede SEMPRE il PIN all'apertura (niente ingresso
-  // automatico per via di un token salvato nel browser).
-  const [logged, setLogged] = useState(false);
+  // La sessione dura quanto il token (7 giorni, backend/app/config.py): su un
+  // dispositivo condiviso in cucina/pasticceria chiedere il PIN ad ogni
+  // apertura/reload era scomodissimo — richiesta esplicita del titolare di
+  // renderlo persistente. Il PIN resta comunque richiesto quando il token
+  // scade o dopo "Esci", e resta il vero controllo di sicurezza lato server
+  // su ogni chiamata API.
+  const [logged, setLogged] = useState(() => tokenValido(localStorage.getItem(TK)));
   // Timbra e' l'azione piu' frequente in assoluto (piu' volte al giorno, ogni
   // dipendente): e' la tab di apertura, non Turni, cosi' non serve un tap in piu'.
   const [tab, setTab] = useState("timbra");
@@ -1049,6 +1099,52 @@ export default function PortaleDipendente() {
     _connListeners.push(setConnErr);
     return () => { _connListeners = _connListeners.filter((fn) => fn !== setConnErr); };
   }, []);
+
+  // Un 401 dal server (token rifiutato: segreto ruotato, o dipendente cessato/
+  // disattivato nel frattempo) riporta subito al login invece di lasciare il
+  // portale aperto con ogni chiamata che fallisce in silenzio (trovato da una
+  // review automatica sulla sessione persistente sopra).
+  useEffect(() => {
+    const f = () => setLogged(false);
+    _authListeners.push(f);
+    return () => { _authListeners = _authListeners.filter((fn) => fn !== f); };
+  }, []);
+
+  // Il controllo sopra scatta solo alla PROSSIMA chiamata API: su un
+  // dispositivo condiviso, se il token scade mentre il portale resta aperto
+  // in background (tab non chiusa, telefono/tablet bloccato), riaprendolo
+  // mostrerebbe ancora i dati gia' caricati della sessione precedente —
+  // buste paga, documenti — finche' qualcosa non fa una richiesta. Rivalida
+  // subito la scadenza quando la pagina torna visibile/in focus (trovato da
+  // una review automatica).
+  useEffect(() => {
+    const rivalida = () => {
+      if (document.visibilityState !== "hidden" && !tokenValido(localStorage.getItem(TK))) {
+        setLogged(false);
+      }
+    };
+    document.addEventListener("visibilitychange", rivalida);
+    window.addEventListener("focus", rivalida);
+    return () => {
+      document.removeEventListener("visibilitychange", rivalida);
+      window.removeEventListener("focus", rivalida);
+    };
+  }, []);
+
+  // Il controllo sopra scatta su un evento di focus/visibilita': se il
+  // tablet resta acceso con il portale sempre in primo piano ininterrottamente
+  // (mai in background) fino alla scadenza, nessuno di quegli eventi si
+  // verifica. Un timer pianificato sulla scadenza esatta del token chiude
+  // comunque la sessione, indipendentemente da come cambia il focus (trovato
+  // da una review automatica). Riarmato ad ogni nuovo login (`logged` passa
+  // a true con un token diverso, quindi una scadenza diversa).
+  useEffect(() => {
+    if (!logged) return;
+    const ms = msAllaScadenza(localStorage.getItem(TK));
+    if (ms === null || ms <= 0) return;
+    const id = setTimeout(() => setLogged(false), ms);
+    return () => clearTimeout(id);
+  }, [logged]);
 
   // Ogni tab monta UN SOLO componente alla volta (nessuna richiesta in
   // background per una tab abbandonata: niente polling/setInterval in tutto

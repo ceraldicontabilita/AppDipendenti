@@ -68,13 +68,24 @@ Fondo EST (sanitario), Fon.Te. (previdenza compl.).
 ## Autenticazione
 - Ingresso da `/portale` con **PIN** → JWT in `localStorage.pt_token` (+ `pt_role`,
   `pt_name`). Header `Authorization: Bearer`.
-- **Login dipendente = cognome + PIN** (POST `/api/auth/pin-login` con `{nome, pin}`):
-  NESSUN elenco di nomi esposto prima dell'autenticazione (rimosso il vecchio
-  GET `/auth/dipendenti-login`); tra gli omonimi passa solo chi verifica il PIN,
-  se ambiguo l'accesso è negato. I nomi di tutti restano solo in Gestione (admin).
+- **Login dipendente = tocca il tuo nome + PIN** (decisione esplicita del titolare,
+  28/08/2026: reintrodotto l'elenco nomi in login, prima rimosso per non esporlo
+  pre-autenticazione — su un dispositivo condiviso in negozio la digitazione ad
+  ogni apertura era scomodissima, e i nomi non sono comunque un segreto).
+  GET pubblico `/api/auth/dipendenti-attivi` (solo id+nome, dipendenti attivi
+  con PIN impostato) → tocco sul nome → PIN pad → POST `/api/auth/pin-login` con
+  `{dipendente_id, pin}` (niente più ambiguità da omonimi: si sceglie l'id, non
+  il nome). Il vecchio flusso a testo `{nome, pin}` resta supportato lato backend
+  per compatibilità ma il portale non lo usa più.
 - Login admin: dalla schermata PIN → **"Accesso amministratore"** (PIN = env `PIN_CODE`),
   NON dalla scheda di un dipendente.
-- Sessione admin **2 ore** (`ADMIN_TOKEN_EXPIRE_MINUTES`).
+- Sessione admin **2 ore** (`ADMIN_TOKEN_EXPIRE_MINUTES`). Sessione dipendente/portale
+  **7 giorni** (`ACCESS_TOKEN_EXPIRE_MINUTES` in `backend/app/config.py`), e **persistente**:
+  il portale riapre direttamente senza richiedere di nuovo il PIN finché il token
+  non scade (controllo `exp` lato client in `PortaleDipendente.jsx`, verifica vera
+  sempre lato server) — anche questo su richiesta esplicita del titolare per
+  cucina/pasticceria (dispositivo condiviso, PIN ad ogni apertura era scomodissimo).
+  "Esci" nella testata chiude comunque la sessione subito.
 - Backend strict: `require_admin` / `require_staff` in `utils/dependencies.py`
   (fail-closed: senza token valido → 401, nessun "admin di default"). Protetti:
   `/api/contracts`, `/api/cedolini`, `/api/tfr`, `/api/paghe`, `/api/bonifici`,

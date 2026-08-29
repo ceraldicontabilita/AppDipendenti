@@ -23,7 +23,10 @@ from jose import jwt
 from backend.app.config import settings
 from backend.app.database import Database, Collections
 from backend.app.repositories import UserRepository
-from backend.app.services.auth_dipendenti import login_dipendente, login_dipendente_per_nome, operatore_amministratore
+from backend.app.services.auth_dipendenti import (
+    login_dipendente, login_dipendente_per_nome, operatore_amministratore,
+    elenco_dipendenti_per_login,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -77,6 +80,16 @@ def _pin_ok(pin: str) -> bool:
     sent = hashlib.sha256(pin.encode("utf-8")).hexdigest()
     expected = hashlib.sha256(configured.encode("utf-8")).hexdigest()
     return hmac.compare_digest(sent, expected)
+
+
+@router.get("/dipendenti-attivi", summary="Nomi per il selettore di login del portale")
+async def dipendenti_attivi() -> Dict[str, Any]:
+    """Elenco pubblico (nessuna autenticazione) di id+nome dei dipendenti
+    attivi, per il tocca-il-tuo-nome in login — niente digitazione. Include
+    anche chi usa solo il PIN condiviso della cassa (nessun pin_hash proprio),
+    perché login_dipendente() accetta entrambe le fonti. Solo id+nome: nessun
+    altro dato (PIN, ruolo, mansione...) esposto qui."""
+    return {"dipendenti": await elenco_dipendenti_per_login()}
 
 
 @router.post("/pin-login", summary="Login via PIN (mobile app)")
