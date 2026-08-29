@@ -87,6 +87,13 @@ function Login({ onLogin }) {
     try {
       const body = sel.admin ? { pin: p } : { nome: sel.nome, pin: p };
       const r = await api.post("/auth/pin-login", body);
+      // Un login riuscito e' la prova piu' diretta possibile che la
+      // connessione funziona: se un tentativo precedente aveva acceso il
+      // banner "Connessione assente" (prima del login, quindi non visibile
+      // in questa schermata), va spento qui — altrimenti l'app si apre con
+      // un banner falso proprio nel momento in cui la connessione e' appena
+      // stata dimostrata funzionante (trovato da una review automatica).
+      _notificaConnessione(false);
       localStorage.setItem(TK, r.data.access_token);
       localStorage.setItem("pt_role", r.data.role);
       localStorage.setItem("pt_name", r.data.name || sel.nome);

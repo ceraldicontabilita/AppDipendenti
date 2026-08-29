@@ -69,12 +69,19 @@ def _invia_via_smtp(cred: dict, destinatario: str, oggetto: str, corpo: str,
     msg.set_content(corpo)
     for dati, maintype, subtype, filename in (allegati or []):
         msg.add_attachment(dati, maintype=maintype, subtype=subtype, filename=filename)
+    # timeout esplicito: senza, una connessione SMTP che non risponde resta
+    # bloccata a tempo indeterminato — un endpoint che invia l'email prima di
+    # rispondere (es. POST /richieste) puo' far scadere il timeout del client
+    # (frontend) mentre l'inserimento e' gia' avvenuto, inducendo un secondo
+    # tentativo che duplica la richiesta. 25s per restare sotto il timeout
+    # scritture del portale mobile (40s), coerente col relay email (30s sopra).
     if cred["port"] == 465:
-        with smtplib.SMTP_SSL(cred["host"], cred["port"], context=ssl.create_default_context()) as s:
+        with smtplib.SMTP_SSL(cred["host"], cred["port"], timeout=25,
+                              context=ssl.create_default_context()) as s:
             s.login(cred["user"], cred["password"])
             s.send_message(msg)
     else:
-        with smtplib.SMTP(cred["host"], cred["port"]) as s:
+        with smtplib.SMTP(cred["host"], cred["port"], timeout=25) as s:
             s.starttls(context=ssl.create_default_context())
             s.login(cred["user"], cred["password"])
             s.send_message(msg)
