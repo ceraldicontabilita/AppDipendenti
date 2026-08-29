@@ -1098,6 +1098,27 @@ export default function PortaleDipendente() {
     return () => { _authListeners = _authListeners.filter((fn) => fn !== f); };
   }, []);
 
+  // Il controllo sopra scatta solo alla PROSSIMA chiamata API: su un
+  // dispositivo condiviso, se il token scade mentre il portale resta aperto
+  // in background (tab non chiusa, telefono/tablet bloccato), riaprendolo
+  // mostrerebbe ancora i dati gia' caricati della sessione precedente —
+  // buste paga, documenti — finche' qualcosa non fa una richiesta. Rivalida
+  // subito la scadenza quando la pagina torna visibile/in focus (trovato da
+  // una review automatica).
+  useEffect(() => {
+    const rivalida = () => {
+      if (document.visibilityState !== "hidden" && !tokenValido(localStorage.getItem(TK))) {
+        setLogged(false);
+      }
+    };
+    document.addEventListener("visibilitychange", rivalida);
+    window.addEventListener("focus", rivalida);
+    return () => {
+      document.removeEventListener("visibilitychange", rivalida);
+      window.removeEventListener("focus", rivalida);
+    };
+  }, []);
+
   // Ogni tab monta UN SOLO componente alla volta (nessuna richiesta in
   // background per una tab abbandonata: niente polling/setInterval in tutto
   // il portale) — quindi un fallimento agganciato alla tab appena lasciata

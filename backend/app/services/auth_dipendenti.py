@@ -92,13 +92,25 @@ async def login_dipendente_per_nome(nome: str, pin: str) -> Optional[Dict[str, A
     }
 
 
+def _nome_operatore_combacia(nome_op: str, nome_dip: str) -> bool:
+    """Stessa regola di corrispondenza nome usata per accettare il PIN cassa:
+    l'operatore combacia col dipendente se il suo nome e' contenuto per
+    intero, o token per token, nel nome completo del dipendente."""
+    nome_op = (nome_op or "").lower().strip()
+    return bool(nome_op) and (nome_op in nome_dip or all(tok in nome_dip for tok in nome_op.split() if tok))
+
+
+def _nome_completo(dip: Dict[str, Any]) -> str:
+    return (dip.get("nome_completo") or f"{dip.get('nome', '')} {dip.get('cognome', '')}").strip().lower()
+
+
 async def _pin_operatore_valido(db, dip: Dict[str, Any], pin: str) -> bool:
     """Verifica il PIN contro la fonte operatori condivisa (tablet_operatori),
     la stessa usata dalla cassa di Lotti. Accetta solo se l'operatore con quel
     PIN corrisponde, per nome, al dipendente selezionato (un dipendente non puo'
     entrare col PIN di un altro). PIN unico cassa+portale, nessuna copia.
     """
-    nome_dip = (dip.get("nome_completo") or f"{dip.get('nome','')} {dip.get('cognome','')}").strip().lower()
+    nome_dip = _nome_completo(dip)
     if not nome_dip:
         return False
     candidati = []
@@ -119,11 +131,22 @@ async def _pin_operatore_valido(db, dip: Dict[str, Any], pin: str) -> bool:
                 pass
     except Exception:
         return False
-    for c in candidati:
-        nome_op = (c.get("nome") or "").lower().strip()
-        if nome_op and (nome_op in nome_dip or all(tok in nome_dip for tok in nome_op.split() if tok)):
-            return True
-    return False
+    return any(_nome_operatore_combacia(c.get("nome"), nome_dip) for c in candidati)
+
+
+async def _operatori_attivi_per_nome(db) -> List[str]:
+    """Nomi (minuscoli) degli operatori attivi in tablet_operatori — prefetch
+    in blocco per elenco_dipendenti_per_login, invece di una query per
+    dipendente (stesso pattern anti-N+1 usato altrove nel repo)."""
+    out = []
+    try:
+        async for o in db["tablet_operatori"].find({"attivo": True}):
+            nome_op = (o.get("nome") or "").lower().strip()
+            if nome_op:
+                out.append(nome_op)
+    except Exception:
+        return []
+    return out
 
 
 async def operatore_amministratore(db, pin: str):
@@ -211,20 +234,27 @@ async def elenco_dipendenti_per_login() -> List[Dict[str, Any]]:
     dipendenti non è comunque un segreto. Restituisce solo id+nome: niente
     PIN, ruolo o altri dati — quelli restano protetti dal PIN al login vero.
 
-    NIENTE filtro su pin_hash presente (trovato da una review automatica):
-    login_dipendente() accetta anche il PIN condiviso della cassa
-    (tablet_operatori, via _pin_operatore_valido) come seconda fonte — un
-    dipendente che usa SOLO quel PIN non ha pin_hash sul proprio documento,
-    e col selettore a tocco (niente più campo testo) filtrarlo qui lo
-    escluderebbe dal portale senza alcuna via alternativa per entrare."""
+    Include chi ha un pin_hash proprio OPPURE il cui nome corrisponde a un
+    operatore attivo in tablet_operatori (PIN condiviso della cassa) — le due
+    fonti che login_dipendente() accetta. Filtrare solo su pin_hash
+    escluderebbe chi usa solo la cassa (col selettore a tocco non c'e' più
+    modo di entrare scrivendo il nome); NON filtrare affatto mostrerebbe
+    invece dipendenti appena creati senza alcuna credenziale funzionante —
+    un nome selezionabile il cui PIN verrebbe sempre rifiutato (trovato da
+    una review automatica su entrambi i casi, in due giri separati)."""
     db = Database.get_db()
+    operatori_attivi = await _operatori_attivi_per_nome(db)
     out = []
     async for d in db[Collections.EMPLOYEES].find(
             {"attivo": {"$ne": False},
              "merged_into": {"$exists": False},
              "stato": {"$nin": ["cessato", "dimesso", "archiviato"]}}):
         nome = d.get("nome_completo") or f"{d.get('nome', '')} {d.get('cognome', '')}".strip()
-        if nome and d.get("id"):
+        if not (nome and d.get("id")):
+            continue
+        ha_credenziale = bool(d.get("pin_hash")) or any(
+            _nome_operatore_combacia(nome_op, _nome_completo(d)) for nome_op in operatori_attivi)
+        if ha_credenziale:
             out.append({"id": d["id"], "nome": nome})
     out.sort(key=lambda x: x["nome"])
     return out
