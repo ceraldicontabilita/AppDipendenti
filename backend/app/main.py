@@ -28,6 +28,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Seed TFR non avviato: {e}")
     try:
+        from .services.paghe_scheduler import start_scheduler as start_paghe_scheduler
+        start_paghe_scheduler()
+    except Exception as e:
+        logger.warning(f"Sincronizzazione paghe periodica non avviata: {e}")
+    try:
         from .services.startup_fixes import applica_fix_avvio
         await applica_fix_avvio()
     except Exception as e:
@@ -36,6 +41,11 @@ async def lifespan(app: FastAPI):
     try:
         from .services.scadenze_scheduler import stop_scheduler
         stop_scheduler()
+    except Exception:
+        pass
+    try:
+        from .services.paghe_scheduler import stop_scheduler as stop_paghe_scheduler
+        stop_paghe_scheduler()
     except Exception:
         pass
     await Database.close()
