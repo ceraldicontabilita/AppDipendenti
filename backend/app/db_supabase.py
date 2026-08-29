@@ -627,10 +627,16 @@ class SupabaseCollection:
             v = _get(d, campo)
             if v is _MANCANTE:
                 continue
-            chiave = json.dumps(v, sort_keys=True, default=str) if isinstance(v, (dict, list)) else v
-            if chiave not in visti_set:
-                visti_set.add(chiave)
-                out.append(v)
+            # Mongo: se il campo e' un array, distinct restituisce gli elementi
+            # unici al suo interno, non l'array intero come valore unico
+            # (trovato dal 6o giro di review; nessun chiamante attuale usa
+            # distinct su un campo-array, ma il comportamento va allineato).
+            valori = v if isinstance(v, list) else [v]
+            for singolo in valori:
+                chiave = json.dumps(singolo, sort_keys=True, default=str) if isinstance(singolo, (dict, list)) else singolo
+                if chiave not in visti_set:
+                    visti_set.add(chiave)
+                    out.append(singolo)
         return out
 
     def aggregate(self, pipeline: List[Dict[str, Any]], **_) -> _CursoreAggregato:
