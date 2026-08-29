@@ -1019,6 +1019,18 @@ export default function PortaleDipendente() {
     return () => { _connListeners = _connListeners.filter((fn) => fn !== setConnErr); };
   }, []);
 
+  // Ogni tab monta UN SOLO componente alla volta (nessuna richiesta in
+  // background per una tab abbandonata: niente polling/setInterval in tutto
+  // il portale) — quindi un fallimento agganciato alla tab appena lasciata
+  // non puo' piu' guarire da solo (nessuno la richiede piu'), e il banner
+  // restava acceso per sempre finche' non si tornava proprio li' o si
+  // ricaricava la pagina (trovato dal giro di review successivo a quello che
+  // aveva introdotto il tracciamento per chiave). Cambiare tab azzera i
+  // fallimenti registrati: quelli della tab lasciata non contano piu' (vista
+  // non piu' montata), quella nuova riparte pulita e si riaggiungera' da
+  // sola se fallisce a sua volta.
+  useEffect(() => { _azzeraConnessione(); }, [tab]);
+
   const refreshBadge = useCallback(()=>{ api.get("/notifiche/conteggio").then((r)=>setNonLette(r.data.non_lette)).catch(()=>{}); },[]);
   useEffect(()=>{ if(logged) refreshBadge(); },[logged,tab,refreshBadge]);
 
