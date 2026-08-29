@@ -82,7 +82,14 @@ def _confronta(valore: Any, cond: Any) -> bool:
                 if presente != bool(atteso):
                     return False
             elif op == "$in":
-                if not (presente and valore in atteso):
+                # Mongo: un campo assente equivale a null per $in — se None e'
+                # tra i valori richiesti, un documento senza il campo combacia
+                # comunque (es. contratti vecchi senza "stato" in
+                # {"stato": {"$in": [..., None]}}).
+                if presente:
+                    if valore not in atteso:
+                        return False
+                elif None not in atteso:
                     return False
             elif op == "$nin":
                 if presente and valore in atteso:
@@ -619,12 +626,21 @@ class SupabaseCollection:
         # il PDF in base64 dentro il documento, questo trasferirebbe decine di
         # MB per una pipeline che magari somma solo un campo numerico (stesso
         # problema di `_tutti()` gia' documentato sopra; trovato da una review
-        # automatica sulle pipeline di tfr.py/cedolini.py/buste_paga.py). Un
-        # campo pesante e' escluso in SQL SOLO se non compare da nessuna parte
-        # nella pipeline (match/group/addFields/sort) — se compare, si legge
-        # per intero: mai un risultato silenziosamente sbagliato.
-        pipeline_json = json.dumps(pipeline, default=str)
-        escludi = [c for c in _CAMPI_PESANTI if c not in pipeline_json]
+        # automatica sulle pipeline di tfr.py/cedolini.py/buste_paga.py). Ma
+        # va escluso SOLO se una stage a valle scarta comunque la forma del
+        # documento originale: tra le stage supportate, solo $group lo fa
+        # ($match/$addFields/$sort/$limit/$skip restituiscono i documenti
+        # originali intatti, quindi un campo pesante assente dal testo della
+        # pipeline andrebbe comunque nel risultato — trovato dal terzo giro
+        # di review). Anche con $group, se il campo compare da qualche parte
+        # nella pipeline (es. un accumulatore che lo legge) si legge per
+        # intero: mai un risultato silenziosamente sbagliato.
+        ha_stage_che_scarta_forma = any("$group" in stage for stage in pipeline)
+        if ha_stage_che_scarta_forma:
+            pipeline_json = json.dumps(pipeline, default=str)
+            escludi = [c for c in _CAMPI_PESANTI if c not in pipeline_json]
+        else:
+            escludi = []
         return _CursoreAggregato(self, pipeline, escludi)
 
 
