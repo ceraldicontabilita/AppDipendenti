@@ -1488,7 +1488,7 @@ async def diagnostica_unificazione():
     conteggi, sovrapposizioni per (dipendente_id, anno, mese), confronto netto vs importo_busta,
     record presenti solo in paghe_mensili, e dump completo di paghe_mensili per backup."""
     db = get_db()
-    ced = await db.cedolini.find({}, {"_id": 0}).to_list(5000)
+    ced = await db.cedolini.find({}, {"_id": 0, "pdf_data": 0}).to_list(5000)
     pm = await db.paghe_mensili.find({}, {"_id": 0}).to_list(5000)
     ced_idx = {}
     for c in ced:

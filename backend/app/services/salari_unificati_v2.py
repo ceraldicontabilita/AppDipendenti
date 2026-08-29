@@ -801,22 +801,30 @@ async def get_riepilogo_salari_tutti(db, anno: int = None) -> Dict[str, Any]:
         {"_id": 0}
     ).sort("cognome", 1).to_list(200)
     
+    # Cedolini dell'anno per tutti i dipendenti in blocco, invece di un find
+    # per dipendente (fino a 200): l'adattatore Supabase non ha indici, un
+    # find dentro il ciclo e' un N+1 costoso su una tabella non piccola.
+    cedolini_per_cf: Dict[str, List[Dict[str, Any]]] = {}
+    async for c in db["cedolini"].find(
+        {"anno": {"$in": [anno, str(anno)]}},
+        {"_id": 0, "codice_fiscale": 1, "netto": 1, "netto_mese": 1, "importo_pagato": 1,
+         "pagato": 1, "mese": 1, "saldo_residuo": 1, "ferie_residue": 1, "rol_residuo": 1}
+    ):
+        cf_c = c.get("codice_fiscale")
+        if cf_c:
+            cedolini_per_cf.setdefault(cf_c, []).append(c)
+
     riepilogo = []
     totale_debito = 0
     totale_credito = 0
-    
+
     for dip in dipendenti:
         cf = dip.get("codice_fiscale")
         if not cf:
             continue
-        
-        # Cedolini anno
-        cedolini = await db["cedolini"].find(
-            {"codice_fiscale": cf, "anno": {"$in": [anno, str(anno)]}},
-            {"_id": 0, "netto": 1, "netto_mese": 1, "importo_pagato": 1, "pagato": 1, 
-             "mese": 1, "saldo_residuo": 1, "ferie_residue": 1, "rol_residuo": 1}
-        ).to_list(20)
-        
+
+        cedolini = cedolini_per_cf.get(cf, [])
+
         netto_tot = sum(float(c.get("netto") or c.get("netto_mese") or 0) for c in cedolini)
         pagato_tot = sum(float(c.get("importo_pagato") or 0) for c in cedolini)
         saldo = round(pagato_tot - netto_tot, 2)

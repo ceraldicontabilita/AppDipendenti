@@ -794,27 +794,27 @@ async def lista_cedolini_mese(anno: int, mese: int) -> List[Dict[str, Any]]:
     
     cedolini = await db["cedolini"].find(
         {"anno": anno, "mese": mese},
-        {"_id": 0}
+        {"_id": 0, "pdf_data": 0}
     ).to_list(1000)
-    
+
+    # Bonifici del mese: una sola lettura invece di un find_one per cedolino
+    # (l'adattatore Supabase non ha indici, una query per riga e' un N+1 che
+    # su una tabella non piccola porta a decine di secondi/502).
+    prima_nota_per_dip: Dict[str, Dict[str, Any]] = {}
+    async for pn in db["prima_nota_salari"].find(
+        {"anno": anno, "mese": mese, "bonifico_id": {"$exists": True, "$nin": [None, ""]}},
+        {"_id": 0, "dipendente_id": 1, "bonifico_id": 1}
+    ):
+        if pn.get("dipendente_id"):
+            prima_nota_per_dip[pn["dipendente_id"]] = pn
+
     # Arricchisci con info bonifici dalla prima_nota_salari
     for c in cedolini:
-        dipendente_id = c.get("dipendente_id")
-        if dipendente_id:
-            # Cerca nella prima nota salari se c'è un bonifico associato per questo dipendente/mese
-            prima_nota = await db["prima_nota_salari"].find_one(
-                {
-                    "dipendente_id": dipendente_id,
-                    "anno": anno,
-                    "mese": mese,
-                    "bonifico_id": {"$exists": True, "$nin": [None, ""]}
-                },
-                {"_id": 0, "bonifico_id": 1, "bonifico_associato": 1}
-            )
-            if prima_nota and prima_nota.get("bonifico_id"):
-                c["bonifico_id"] = prima_nota.get("bonifico_id")
-                c["salario_associato"] = True
-    
+        pn = prima_nota_per_dip.get(c.get("dipendente_id"))
+        if pn and pn.get("bonifico_id"):
+            c["bonifico_id"] = pn.get("bonifico_id")
+            c["salario_associato"] = True
+
     return cedolini
 
 
@@ -855,21 +855,22 @@ async def cedolini_dipendente(dipendente_id: str, anno: Optional[int] = None) ->
     # Calcola totali
     totale_lordo = sum(c.get("lordo", 0) for c in cedolini)
     totale_netto = sum(c.get("netto", 0) for c in cedolini)
-    
+
+    # Bonifici del dipendente: una sola lettura invece di un find_one per
+    # cedolino (stesso motivo di lista_cedolini_mese sopra).
+    prima_nota_per_periodo: Dict[tuple, Dict[str, Any]] = {}
+    async for pn in db["prima_nota_salari"].find(
+        {"dipendente_id": dipendente_id, "bonifico_id": {"$exists": True, "$nin": [None, ""]}},
+        {"_id": 0, "anno": 1, "mese": 1, "bonifico_id": 1}
+    ):
+        prima_nota_per_periodo[(pn.get("anno"), pn.get("mese"))] = pn
+
     # Arricchisci con info bonifici
     for c in cedolini:
-        prima_nota = await db["prima_nota_salari"].find_one(
-            {
-                "dipendente_id": dipendente_id,
-                "anno": c.get("anno"),
-                "mese": c.get("mese"),
-                "bonifico_id": {"$exists": True, "$nin": [None, ""]}
-            },
-            {"_id": 0, "bonifico_id": 1}
-        )
-        if prima_nota and prima_nota.get("bonifico_id"):
+        pn = prima_nota_per_periodo.get((c.get("anno"), c.get("mese")))
+        if pn and pn.get("bonifico_id"):
             c["pagato"] = True
-            c["bonifico_id"] = prima_nota.get("bonifico_id")
+            c["bonifico_id"] = pn.get("bonifico_id")
     
     return {
         "dipendente_id": dipendente_id,
