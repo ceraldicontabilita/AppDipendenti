@@ -8,16 +8,34 @@ App HR di **Ceraldi Group** (Napoli, titolare Enzo/Vincenzo Ceraldi). Attività:
 
 ## Stack & deploy
 - Backend **FastAPI** in `backend/app`. Il cluster MongoDB **non esiste più**: il
-  database vero è **Postgres/Supabase** (env `SUPABASE_DB_URL`), con un adattatore
+  database vero è **Postgres/Supabase** (env `SUPABASE_DB_URL`, progetto condiviso
+  anche con **GestionaleCloud/CeraldiFatture** — vedi sotto), con un adattatore
   Mongo→Postgres (`backend/app/db_supabase.py`) che riespone la stessa API di motor
-  usata nei 269 punti che chiamano `Database.get_db()` — ogni collection è una
-  tabella `app_<nome>` con colonna `doc jsonb`. Copre find/find_one/insert_one/
-  update_one (con upsert)/delete_one/count_documents, `.sort()`/`.limit()`/
-  `.to_list()`, operatori `$ne $exists $in $nin $gt $gte $lt $lte $or $and`,
-  `$set $setOnInsert $unset $inc`. **NON copre**: `aggregate`, indici, `$push`,
-  `find_one_and_*`, bulk write — non usarli nel codice nuovo. (`MONGO_URL`/Motor
-  restano come fallback in `database.py` se `SUPABASE_DB_URL` non è impostata, ma
-  in produzione oggi è sempre il ramo Supabase.)
+  usata nei 269 punti che chiamano `Database.get_db()` — ogni collection di
+  AppDipendenti è una tabella `app_<nome>` con colonna `doc jsonb`. Copre find/
+  find_one/insert_one/update_one/**update_many**/delete_one/**delete_many**/
+  **distinct**/count_documents (con upsert), `.sort()`/`.limit()`/`.to_list()`,
+  operatori `$ne $exists $in $nin $gt $gte $lt $lte $or $and`, `$set $setOnInsert
+  $unset $inc $push` (forma semplice `{campo: valore}`, no `$each`/`$slice`), e
+  **`aggregate`** per il sottoinsieme realmente usato nel repo: stage `$match
+  $group $addFields $sort $limit $skip`, accumulatori `$sum $avg $first $last
+  $push`, espressioni `$ifNull $cond $toUpper $toLower $toDate $month`. Un
+  operatore fuori da questo elenco solleva `NotImplementedError` (mai un
+  risultato silenziosamente sbagliato) — se serve un operatore nuovo, aggiungilo
+  nell'adattatore, non aggirarlo nel router. **NON copre**: indici veri,
+  `find_one_and_*`, bulk write, altri stage/operatori aggregate. (`MONGO_URL`/
+  Motor restano come fallback in `database.py` se `SUPABASE_DB_URL` non è
+  impostata, ma in produzione oggi è sempre il ramo Supabase.)
+  **[AUDIT 29/08/2026]** Prima di questo fix, `aggregate`/`update_many`/
+  `delete_many`/`$push`/`distinct` non erano implementati affatto: oltre 40 punti
+  del backend fallivano al 100% delle chiamate, non in casi limite — tra questi
+  l'intera catena di **cessazione dipendente** (`services/handlers/
+  dipendente_handlers.py`, ognuna delle 4 azioni avvolta nel proprio try/except
+  che nascondeva l'errore), la feature **"limiti giustificativi"** (ferie/ROL/
+  permessi), il **riepilogo TFR aziendale**, le **statistiche dashboard** per
+  mansione, "**applica tutte le trattenute**" su una busta, l'aggiunta di un
+  **acconto busta paga**. Verifica in produzione dopo il deploy di questo fix
+  prima di darle per scontate di nuovo funzionanti.
 - Frontend **React + Vite** in `frontend/src` (`App.jsx` = gestione desktop,
   `PortaleDipendente.jsx` = portale mobile dipendenti).
 - Deploy su **Render** (`appdipendenti.onrender.com`), auto-deploy dal branch **`main`**.
@@ -123,6 +141,53 @@ Fondo EST (sanitario), Fon.Te. (previdenza compl.).
   onomastici della settimana (solo giorni lavorativi, esclusi stranieri/disattivati e
   i non-turnisti). Date prefillate e modificabili.
 
+## Integrazione GestionaleCloud & cartelle Google Drive
+**[AUDIT 29/08/2026]** Risposta a "fatture/foto hanno un router proprio o fanno
+ponte con GestionaleCloud?":
+- **Fatture/fornitori**: router dedicato `backend/app/routers/contabilita.py`
+  (prefix `/api/contabilita`), ma è un **bridge di sola lettura/import-snapshot**
+  da un'altra app (`https://ceraldi-gestione.onrender.com`, il GestionaleCloud/
+  CeraldiFatture del titolare) — collezioni `invoices`, `fornitori`,
+  `documents_inbox`, `riconciliazioni_match`, popolate da
+  `POST /contabilita/importa-snapshot` (seed `backend/app/data/
+  contabilita_seed.json`) o da `POST /fatture/importa-xml`. **Nessuna pagina
+  frontend** mostra fatture o fornitori (solo diagnostica) — l'unica UI
+  collegata è "Bonifici effettuati" (`BonificiContabPage` in App.jsx), che legge
+  `GET /contabilita/bonifici`.
+- **Magazzino/prodotti**: solo un handler evento interno
+  (`services/handlers/magazzino_handlers.py`, si attiva su `FATTURA_CREATED`),
+  scrive `warehouse_inventory`/`dizionario_prodotti`/`acquisti_prodotti` — **nessun
+  endpoint REST, nessuna UI**. **Foto/immagini prodotto: nessun riferimento nel
+  codice**, non esiste alcuna funzionalità di questo tipo in AppDipendenti oggi.
+- **Database fisico condiviso**: stesso progetto Supabase di GestionaleCloud —
+  tabelle come `fatture` (non-prefissata `app_`... la voce Supabase vera si
+  chiama solo `fatture`/`fornitori`/`incassi`/`movimenti_banca`/`prezzi_ceraldi`/
+  `catalogo_ceraldi`/`chiusure_giornaliere`/`prima_nota_movimenti`/`versamenti`
+  ecc.) sono di GestionaleCloud, mai referenziate da questo repo. Il fascicolo
+  dipendente (`routers/employees/fascicolo_dipendente.py`) legge in più, con
+  fallback silenzioso via try/except, `bonifici_transfers`/`verbali_autovelox`/
+  `presenze_giornaliere`/`tfr_acconti` — tabelle non garantite esistere nello
+  schema di AppDipendenti, lette "a bonus" dal DB condiviso.
+- **Cartelle Google Drive** (service account `gestionale@ceraldi-gestionale.iam.
+  gserviceaccount.com`, stesse env del GestionaleCloud — vedi Autenticazione
+  sotto per i nomi): SOLO DUE, nessuna per fatture/foto/documenti generici:
+  - **Cedolini**: env `DRIVE_CEDOLINI_FOLDER_ID`, default
+    `1XVdbMzz145N5p8jn4XXSt8YkYtsPOT15` — bottone "📥 Importa cedolini da Drive"
+    in Buste Paga → `POST /api/cedolini/import-drive`.
+  - **Bonifici**: env `DRIVE_BONIFICI_FOLDER_ID`, default
+    `1yl55742cu9i-AFLxu2s0QnMvXG6kVkJC` (è l'estratto conto aziendale generico,
+    non solo stipendi — i movimenti non salariali vengono scartati, vedi sotto)
+    — link "📁 Cartella Drive bonifici" e bottone "📥 Importa bonifici da Drive"
+    in Cedolini & Bonifici (`DRIVE_BONIFICI_URL` in App.jsx) →
+    `POST /api/paghe/importa-bonifici-drive`. **Attenzione**: il 29/08/2026
+    questa cartella risultava nel Cestino di Drive (ancora funzionante via API
+    finché non viene svuotato il cestino, ma a rischio di cancellazione
+    automatica) — verificare che il titolare l'abbia ripristinata.
+  - Se il titolare fornisce nuovi ID cartella, aggiornare **entrambi** i punti
+    per ciascuna cartella: l'env var di default nel codice backend (o l'env
+    Render se preferisce non toccare il codice) e la costante frontend
+    corrispondente (`DRIVE_BONIFICI_URL` in App.jsx per i bonifici).
+
 ## Moduli chiave
 - **Assunzione & Contratti** (`App.jsx` AssunzionePage + `routers/employees/employee_contracts.py`):
   template .docx su MongoDB (collezione `contract_templates`), segnaposto nominali
@@ -179,6 +244,38 @@ dipendente), `onomastici`.
   (codice/testo); backfill storico: POST `/cedolini/riscansiona` (riusa il PDF salvato).
 
 ## Bug noti / da fare
+- **[FIX 29/08/2026]** `backend/app/services/paghe_scheduler.py`: "🔄 Sincronizza
+  da cedolini" e "🔗 Recupera bonifici storici" (pagina Cedolini & Bonifici) non
+  erano mai stati eseguiti con successo in produzione — trovato controllando i
+  dati reali: 333 buste su 1202 avevano già il bonifico corrispondente in
+  archivio ma mai agganciato. Ora un job periodico (ogni 6h, primo giro 60s
+  dopo l'avvio) richiama gli stessi due endpoint da solo. Trovati e corretti
+  nello stesso giro tre bug che l'avrebbero reso inaffidabile: (1) `sincronizza()`
+  sovrascriveva lo stato pagamento usando solo `bonifici.cedolino_id` (vista
+  incompleta, 142 bonifici su 887), annullando le riconciliazioni fatte dal
+  ponte storico ad ogni giro successivo — ora `pagamenti_esiti` vince quando
+  presente; (2) `datetime.now()` naive nel fuso del processo (UTC su Render)
+  interpretato da APScheduler nel fuso dello scheduler (Rome) — il primo giro
+  finiva nel passato e veniva saltato; (3) `KeyError 'cedolino_id'` per
+  `$ne:None` che matcha anche i documenti senza quel campo (745 bonifici su 887)
+  — `sincronizza()` falliva SEMPRE, da sempre, anche sui vecchi click manuali.
+- **[AUDIT 29/08/2026]** Portale mobile (`PortaleDipendente.jsx`): login
+  richiedeva di ridigitare il cognome su tastiera ad ogni riapertura — ora il
+  cognome dell'ultimo login riuscito è ricordato sul telefono (non il PIN):
+  bottone "Continua come [Nome]" salta dritto al tastierino. Aggiunto anche
+  `timeout: 15000` su axios + banner "Connessione assente — riprova" (prima,
+  errore di rete e "nessun dato" mostravano la stessa schermata vuota). Restano
+  da fare (priorità media/bassa, vedi audit completo): bottoni giorno turni
+  troppo piccoli (~32px, target consigliato ~44px), nessun evidenziatore "OGGI"
+  nella lista turni, feedback timbratura poco visibile (testo grigio invece di
+  banner), conferma mancante su "annulla disponibilità bar".
+- **[AUDIT 29/08/2026 — residuo, priorità media/bassa]** Altri N+1 (query dentro
+  un ciclo) non ancora corretti: `tfr.py` (calcolo TFR per dipendente),
+  `employee_contracts.py` (generazione massiva contratti), `dipendenti.py`
+  (provisioning libretti sanitari), `dipendenti_cloud/__init__.py` (presenze
+  storiche LUL). Stesso pattern già risolto più volte altrove in questo file:
+  prefetch in blocco della collezione referenziata + lookup in memoria nel
+  ciclo, zero query aggiuntive.
 - Buste paga "foglio bianco": `portale_buste.py::scarica_pdf` genera un riepilogo se
   il cedolino non ha `pdf_data` (buste da Libro Unico senza PDF).
 - OpenAPI: il token esposto in chat va rigenerato; testare in sandbox prima della prod.
