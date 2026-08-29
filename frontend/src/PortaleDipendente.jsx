@@ -155,11 +155,19 @@ function Login({ onLogin }) {
   const [pin, setPin] = useState("");
   const [err, setErr] = useState("");
 
-  useEffect(() => {
+  // Estratta (non solo nell'effetto) per poterla richiamare dal bottone
+  // "Riprova": senza, un fallimento di rete lasciava l'elenco vuoto per
+  // sempre, senza alcun modo di ricaricarlo se non l'intera pagina — proprio
+  // sulla wifi scarsa che questo selettore doveva gestire (trovato da una
+  // review automatica).
+  const caricaElenco = () => {
+    setElenco(null);
+    setElencoErr(false);
     api.get("/auth/dipendenti-attivi")
       .then((r) => setElenco(r.data.dipendenti || []))
       .catch(() => { setElenco([]); setElencoErr(true); });
-  }, []);
+  };
+  useEffect(() => { caricaElenco(); }, []);
 
   const press = (n) => { setErr(""); if (pin.length < 8) setPin(pin + n); };
   const submit = async (p) => {
@@ -197,10 +205,14 @@ function Login({ onLogin }) {
         <h2>Portale Dipendenti</h2><div className="muted" style={{textAlign:"center"}}>Ceraldi Group</div></div>
       <div className="card"><h3>Chi sei?</h3>
         {elenco === null && <div className="muted">Caricamento…</div>}
-        {elenco !== null && elenco.length === 0 && (
-          <div className="muted">
-            {elencoErr ? "Connessione assente — riprova" : "Nessun nome disponibile: contatta l'amministratore"}
-          </div>
+        {elenco !== null && elenco.length === 0 && elencoErr && (
+          <>
+            <div className="muted">Connessione assente</div>
+            <button className="btn gh sm" style={{ marginTop: 8 }} onClick={caricaElenco}>Riprova</button>
+          </>
+        )}
+        {elenco !== null && elenco.length === 0 && !elencoErr && (
+          <div className="muted">Nessun nome disponibile: contatta l'amministratore</div>
         )}
         <div className="nomi-grid">
           {(elenco || []).map((d) => (

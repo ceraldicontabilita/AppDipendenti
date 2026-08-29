@@ -151,18 +151,37 @@ async def operatore_amministratore(db, pin: str):
     return None
 
 
+def _dipendente_eleggibile(dip: Dict[str, Any]) -> bool:
+    """Stesso filtro di login_dipendente_per_nome (attivo, non fuso, non
+    cessato/dimesso/archiviato) — un dipendente non eleggibile non deve poter
+    fare login con NESSUNA delle due fonti PIN, nemmeno quella della cassa."""
+    if dip.get("attivo") is False:
+        return False
+    if "merged_into" in dip:
+        return False
+    if dip.get("stato") in ("cessato", "dimesso", "archiviato"):
+        return False
+    return True
+
+
 async def login_dipendente(dipendente_id: str, pin: str) -> Optional[Dict[str, Any]]:
     """Valida il PIN del dipendente e ritorna il token, oppure None.
 
     Due fonti accettate (PIN unico aziendale):
       1. PIN personale del portale (pin_hash sul documento), se impostato.
       2. PIN della cassa: stessa fonte operatori di Lotti (tablet_operatori).
+
+    Revoca il pin_hash alla cessazione (vedi handlers/dipendente_handlers.py)
+    blocca solo la prima fonte: senza il controllo di eleggibilita' qui, un
+    dipendente cessato il cui nome corrisponde ancora a un operatore attivo
+    in tablet_operatori avrebbe potuto continuare a entrare a tempo
+    indeterminato via PIN cassa (trovato da una review automatica).
     """
     if not _valid_pin_format(pin):
         return None
     db = Database.get_db()
     dip = await db[Collections.EMPLOYEES].find_one({"id": dipendente_id})
-    if not dip:
+    if not dip or not _dipendente_eleggibile(dip):
         return None
     ok = False
     if dip.get("pin_hash") and verify_pin(pin, dip["pin_hash"]):
