@@ -57,7 +57,15 @@ async def sincronizza(db, anno: int = None) -> Dict[str, Any]:
     bonifici = await db["bonifici"].find({"cedolino_id": {"$ne": None}}, {"_id": 0}).to_list(1000)
     per_cedolino: Dict[str, list] = {}
     for b in bonifici:
-        per_cedolino.setdefault(b["cedolino_id"], []).append(b)
+        # $ne:None nell'adattatore Supabase, come in Mongo, matcha anche i
+        # documenti dove il campo manca del tutto (non solo quelli con null
+        # esplicito) — b["cedolino_id"] andava in KeyError per la maggioranza
+        # degli 887 bonifici (solo 142 hanno davvero cedolino_id), quindi
+        # sincronizza() falliva SEMPRE prima ancora di leggere un cedolino.
+        # Trovato dal primo giro reale dello scheduler in produzione.
+        cid = b.get("cedolino_id")
+        if cid:
+            per_cedolino.setdefault(cid, []).append(b)
 
     # Prefetch di pagamenti_esiti (il motore unico di "Cedolini & Bonifici", che
     # copre anche i bonifici da Drive/ponte storico senza cedolino_id, non solo
