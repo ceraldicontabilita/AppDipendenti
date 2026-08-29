@@ -581,6 +581,17 @@ class SupabaseCollection:
         # mentre se ne aspetta una seconda puo' esaurire il pool (5 connessioni)
         # sotto concorrenza e bloccare fino al command_timeout di 60s (trovato
         # da una review automatica prima del deploy).
+        # NOTA (trovato dal 4o giro di review, non risolto qui): tra la lettura
+        # sopra e la UPDATE qui sotto, una modifica concorrente allo stesso
+        # documento (da un'altra richiesta) verrebbe sovrascritta insieme al
+        # resto del documento — stesso limite gia' presente da sempre in
+        # update_one/delete_one (letti-poi-scritti senza lock). Non e' una
+        # regressione di update_many/delete_many: e' il design dell'intero
+        # adattatore (collection piccole, pochi utenti admin/responsabile
+        # turni concorrenti). Risolverlo davvero servirebbe row lock/merge
+        # JSONB lato SQL per ogni punto di scrittura, non solo qui: fuori
+        # scope per un fix mirato, da valutare se in futuro la concorrenza
+        # reale aumenta.
         docs = [d for d in await self._tutti() if _match(d, filtro)]
         matched = len(docs)
         for d in docs:
@@ -597,6 +608,8 @@ class SupabaseCollection:
 
     async def delete_many(self, filtro, **_) -> _Risultato:
         await self._assicura_tabella()
+        # stesso limite di concorrenza documentato sopra in update_many: la
+        # lista di id viene fissata alla lettura, non ri-verificata alla DELETE.
         chiavi = [str(d.get("id") or d.get("_id")) for d in await self._tutti() if _match(d, filtro)]
         if chiavi:
             async with self._db._pool.acquire() as con:
