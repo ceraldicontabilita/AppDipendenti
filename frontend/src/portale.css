@@ -69,4 +69,8 @@ label{font-size:13px;font-weight:600;display:block;margin-top:10px}
 .daycard:last-child{border-bottom:none}
 .empty{text-align:center;color:var(--muted);padding:30px 10px;font-size:14px}
 .err{background:#fdeaea;color:var(--danger);padding:10px;border-radius:10px;font-size:13px;margin-top:8px}
+.pt-connerr{position:sticky;top:0;z-index:7;background:var(--danger);color:#fff;font-size:13px;font-weight:700;
+  padding:9px 14px;display:flex;align-items:center;justify-content:center;gap:10px;text-align:center}
+.pt-connerr button{background:#fff;color:var(--danger);border:none;border-radius:8px;padding:5px 10px;
+  font-weight:700;font-size:12px;font-family:inherit}
 .spin{text-align:center;padding:30px;color:var(--muted)}

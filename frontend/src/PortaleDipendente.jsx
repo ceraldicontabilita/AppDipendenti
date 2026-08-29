@@ -8,12 +8,27 @@ import {
 import "./portale.css";
 
 const TK = "pt_token";
-const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || "/api" });
+// timeout esplicito: senza, su wifi scarso al banco una richiesta puo' restare
+// appesa a tempo indeterminato e il bottone (es. Timbra) resta bloccato su
+// "Attendi..." senza che il dipendente sappia se e' andata a buon fine.
+const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || "/api", timeout: 15000 });
 api.interceptors.request.use((c) => {
   const t = localStorage.getItem(TK);
   if (t) c.headers.Authorization = `Bearer ${t}`;
   return c;
 });
+// Banner "connessione assente" condiviso da tutte le tab: un errore di rete/
+// timeout (nessuna risposta dal server) e una risposta vuota altrimenti
+// sembrano identici ad ogni singola vista — qui si segnala una volta sola,
+// visibile ovunque, con un modo di riprovare invece di restare bloccati.
+let _connListeners = [];
+function _notificaConnessione(assente) {
+  _connListeners.forEach((fn) => fn(assente));
+}
+api.interceptors.response.use(
+  (r) => { _notificaConnessione(false); return r; },
+  (error) => { if (!error.response) _notificaConnessione(true); return Promise.reject(error); }
+);
 
 const TIPI = [
   { v: "ferie_programmate", l: "Ferie programmate", date: true },
@@ -29,6 +44,8 @@ const TIPI = [
 const tipoLabel = (v) => (TIPI.find((t) => t.v === v) || {}).l || v;
 const fmt = (d) => (d ? `${d.slice(8, 10)}/${d.slice(5, 7)}` : "-");
 
+const RICORDA_NOME = "pt_last_nome";
+
 /* ---------------- LOGIN ---------------- */
 function Login({ onLogin }) {
   // Niente elenco dei dipendenti prima dell'autenticazione: si entra scrivendo
@@ -38,6 +55,11 @@ function Login({ onLogin }) {
   const [nome, setNome] = useState("");
   const [pin, setPin] = useState("");
   const [err, setErr] = useState("");
+  // Cognome dell'ultimo login riuscito su QUESTO telefono (non il token/PIN):
+  // senza, ogni riapertura dell'app costringe a ridigitare il cognome su
+  // tastiera prima di poter anche solo timbrare — l'unico testo obbligatorio
+  // di tutto il portale, proprio nel punto che blocca l'azione piu' frequente.
+  const [ricordato, setRicordato] = useState(() => localStorage.getItem(RICORDA_NOME) || "");
 
   const press = (n) => { setErr(""); if (pin.length < 8) setPin(pin + n); };
   const submit = async (p) => {
@@ -47,6 +69,7 @@ function Login({ onLogin }) {
       localStorage.setItem(TK, r.data.access_token);
       localStorage.setItem("pt_role", r.data.role);
       localStorage.setItem("pt_name", r.data.name || sel.nome);
+      if (!sel.admin) localStorage.setItem(RICORDA_NOME, sel.nome);
       // L'amministratore entra DIRETTAMENTE nella Gestione (desktop), non nel portale.
       if (r.data.role === "admin") { window.location.href = "/dipendenti"; return; }
       onLogin();
@@ -57,13 +80,26 @@ function Login({ onLogin }) {
     <div className="login">
       <div className="brand"><div className="logo"><Users size={30} /></div>
         <h2>Portale Dipendenti</h2><div className="muted" style={{textAlign:"center"}}>Ceraldi Group</div></div>
-      <div className="card"><h3>Chi sei?</h3>
-        <label>Scrivi il tuo cognome (o nome e cognome)</label>
-        <input className="input" autoFocus value={nome} onChange={(e)=>{setNome(e.target.value); setErr("");}}
-          placeholder="es. Rossi" onKeyDown={(e)=>{ if(e.key==="Enter" && nome.trim().length>=2) setSel({nome: nome.trim()}); }} />
-        <button className="btn" style={{marginTop:10}} disabled={nome.trim().length<2}
-          onClick={()=>setSel({nome: nome.trim()})}>Continua</button>
-      </div>
+      {ricordato ? (
+        <div className="card">
+          <h3>Bentornato</h3>
+          <button className="btn" onClick={() => setSel({ nome: ricordato })}>
+            Continua come {ricordato}
+          </button>
+          <button className="btn gh sm" style={{ marginTop: 10 }}
+            onClick={() => { localStorage.removeItem(RICORDA_NOME); setRicordato(""); }}>
+            Non sono io
+          </button>
+        </div>
+      ) : (
+        <div className="card"><h3>Chi sei?</h3>
+          <label>Scrivi il tuo cognome (o nome e cognome)</label>
+          <input className="input" autoFocus value={nome} onChange={(e)=>{setNome(e.target.value); setErr("");}}
+            placeholder="es. Rossi" onKeyDown={(e)=>{ if(e.key==="Enter" && nome.trim().length>=2) setSel({nome: nome.trim()}); }} />
+          <button className="btn" style={{marginTop:10}} disabled={nome.trim().length<2}
+            onClick={()=>setSel({nome: nome.trim()})}>Continua</button>
+        </div>
+      )}
       <button className="btn sec" onClick={() => setSel({ nome: "Amministratore", admin: true })}>
         Accesso amministratore</button>
     </div>
@@ -915,10 +951,18 @@ export default function PortaleDipendente() {
   // Sicurezza: il portale chiede SEMPRE il PIN all'apertura (niente ingresso
   // automatico per via di un token salvato nel browser).
   const [logged, setLogged] = useState(false);
-  const [tab, setTab] = useState("turni");
+  // Timbra e' l'azione piu' frequente in assoluto (piu' volte al giorno, ogni
+  // dipendente): e' la tab di apertura, non Turni, cosi' non serve un tap in piu'.
+  const [tab, setTab] = useState("timbra");
   const [nonLette, setNonLette] = useState(0);
+  const [connErr, setConnErr] = useState(false);
   const role = localStorage.getItem("pt_role");
   const isGestore = role === "responsabile_turni" || role === "admin";
+
+  useEffect(() => {
+    _connListeners.push(setConnErr);
+    return () => { _connListeners = _connListeners.filter((fn) => fn !== setConnErr); };
+  }, []);
 
   const refreshBadge = useCallback(()=>{ api.get("/notifiche/conteggio").then((r)=>setNonLette(r.data.non_lette)).catch(()=>{}); },[]);
   useEffect(()=>{ if(logged) refreshBadge(); },[logged,tab,refreshBadge]);
@@ -938,6 +982,12 @@ export default function PortaleDipendente() {
 
   return (
     <div className="pt-root">
+      {connErr && (
+        <div className="pt-connerr">
+          Connessione assente — riprova
+          <button onClick={() => window.location.reload()}>Ricarica</button>
+        </div>
+      )}
       <div className="pt-head">
         <h1>Portale Dipendenti</h1>
         <div className="sub">{localStorage.getItem("pt_name")}{isGestore?` · ${role==="admin"?"admin":"responsabile turni"}`:""}</div>
