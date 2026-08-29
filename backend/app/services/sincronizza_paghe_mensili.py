@@ -59,6 +59,19 @@ async def sincronizza(db, anno: int = None) -> Dict[str, Any]:
     for b in bonifici:
         per_cedolino.setdefault(b["cedolino_id"], []).append(b)
 
+    # Prefetch di pagamenti_esiti (il motore unico di "Cedolini & Bonifici", che
+    # copre anche i bonifici da Drive/ponte storico senza cedolino_id, non solo
+    # quelli in `bonifici`): trovato da un review automatico prima del deploy,
+    # senza questo ogni giro dello scheduler periodico sovrascriveva
+    # stato_pagamento/bonifico_importo usando SOLO `bonifici.cedolino_id`
+    # (una vista incompleta, 142 bonifici su 887), annullando le riconciliazioni
+    # gia' fatte da _ricalcola_stato_paga in giri precedenti. Sommati una volta
+    # sola per (dipendente_id, anno, mese), zero query aggiuntive nel ciclo.
+    esiti_idx: Dict[tuple, float] = {}
+    async for e in db["pagamenti_esiti"].find({}, {"_id": 0, "dipendente_id": 1, "anno": 1, "mese": 1, "importo": 1}):
+        k = (e.get("dipendente_id"), e.get("anno"), e.get("mese"))
+        esiti_idx[k] = round((esiti_idx.get(k) or 0) + (_num(e.get("importo")) or 0), 2)
+
     # Prefetch di paghe_mensili in blocco: l'adattatore Supabase non ha indici,
     # un find_one per cedolino (fino a 3000) su una tabella che cresce ad ogni
     # giro dentro lo stesso ciclo e' un O(N^2) che porta la sincronizzazione a
@@ -81,6 +94,11 @@ async def sincronizza(db, anno: int = None) -> Dict[str, Any]:
         bon = per_cedolino.get(c.get("id"), [])
         bonifico_importo = round(sum(_num(b.get("importo")) or 0 for b in bon), 2)
         bonifico_data = max((b.get("data") for b in bon), default=None)
+        # pagamenti_esiti e' la fonte autorevole quando presente (copre anche i
+        # bonifici senza cedolino_id): vince su quella derivata da `bonifici`.
+        tot_esiti = esiti_idx.get((dip, anno_c, mese_c))
+        if tot_esiti is not None:
+            bonifico_importo = tot_esiti
 
         acconti_busta = (c.get("acconti") or {}).get("acconto_erogato")
 

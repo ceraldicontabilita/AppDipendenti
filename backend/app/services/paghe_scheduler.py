@@ -42,8 +42,13 @@ def start_scheduler():
         return None
 
     sched = AsyncIOScheduler(timezone="Europe/Rome")
+    # datetime.now() e' naive nel fuso del processo (UTC su Render), ma APScheduler
+    # interpreta un next_run_time naive nel fuso DELLO SCHEDULER (Rome, +1/+2h) —
+    # senza .now(sched.timezone) il primo giro risulterebbe nel passato e verrebbe
+    # saltato (misfire), rimandando la prima sincronizzazione a dopo il prossimo
+    # intervallo di 6h. Trovato da un review automatico prima del deploy.
     sched.add_job(sincronizza_paghe_periodico, "interval", hours=6, id="sincronizza_paghe",
-                  next_run_time=datetime.now() + timedelta(seconds=60),
+                  next_run_time=datetime.now(sched.timezone) + timedelta(seconds=60),
                   replace_existing=True)
     sched.start()
     _scheduler = sched
