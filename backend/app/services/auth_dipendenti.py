@@ -184,20 +184,26 @@ async def login_dipendente(dipendente_id: str, pin: str) -> Optional[Dict[str, A
 
 
 async def elenco_dipendenti_per_login() -> List[Dict[str, Any]]:
-    """Nomi dei dipendenti attivi con un PIN impostato, per il selettore di
-    login del portale (tocca il tuo nome, poi il PIN — niente più tastiera).
+    """Nomi dei dipendenti attivi, per il selettore di login del portale
+    (tocca il tuo nome, poi il PIN — niente più tastiera).
     Decisione esplicita del titolare: reintroduce l'elenco nomi in login
     (prima rimosso per non esporli pre-autenticazione) in cambio di zero
     digitazione, per un dispositivo condiviso in negozio dove la lista dei
     dipendenti non è comunque un segreto. Restituisce solo id+nome: niente
-    PIN, ruolo o altri dati — quelli restano protetti dal PIN al login vero."""
+    PIN, ruolo o altri dati — quelli restano protetti dal PIN al login vero.
+
+    NIENTE filtro su pin_hash presente (trovato da una review automatica):
+    login_dipendente() accetta anche il PIN condiviso della cassa
+    (tablet_operatori, via _pin_operatore_valido) come seconda fonte — un
+    dipendente che usa SOLO quel PIN non ha pin_hash sul proprio documento,
+    e col selettore a tocco (niente più campo testo) filtrarlo qui lo
+    escluderebbe dal portale senza alcuna via alternativa per entrare."""
     db = Database.get_db()
     out = []
     async for d in db[Collections.EMPLOYEES].find(
             {"attivo": {"$ne": False},
              "merged_into": {"$exists": False},
-             "stato": {"$nin": ["cessato", "dimesso", "archiviato"]},
-             "pin_hash": {"$exists": True, "$ne": None}}):
+             "stato": {"$nin": ["cessato", "dimesso", "archiviato"]}}):
         nome = d.get("nome_completo") or f"{d.get('nome', '')} {d.get('cognome', '')}".strip()
         if nome and d.get("id"):
             out.append({"id": d["id"], "nome": nome})

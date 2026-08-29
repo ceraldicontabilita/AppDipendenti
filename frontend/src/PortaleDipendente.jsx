@@ -88,6 +88,20 @@ function _azzeraConnessione() {
   _connFallite.clear();
   _notificaConnessione();
 }
+// Un token persistito puo' sembrare valido lato client (exp futuro) ma essere
+// rifiutato dal server — segreto ruotato, o il dipendente e' stato cessato/
+// disattivato nel frattempo (il PIN viene revocato alla cessazione, ma un
+// token gia' emesso resta valido fino alla scadenza naturale: qui si copre
+// almeno il caso in cui il server lo rifiuta comunque). Senza questo, il
+// portale restava aperto sulla schermata principale mentre ogni chiamata API
+// falliva silenziosamente con 401 (trovato da una review automatica).
+let _authListeners = [];
+function _sessioneRifiutata() {
+  localStorage.removeItem(TK);
+  localStorage.removeItem("pt_role");
+  localStorage.removeItem("pt_name");
+  _authListeners.forEach((fn) => fn());
+}
 api.interceptors.response.use(
   (r) => {
     if (_connFallite.delete(_chiaveRichiesta(r.config))) _notificaConnessione();
@@ -101,6 +115,7 @@ api.interceptors.response.use(
     // specifico del server (trovato da una review automatica).
     if (error.response) {
       if (_connFallite.delete(_chiaveRichiesta(error.config))) _notificaConnessione();
+      if (error.response.status === 401) _sessioneRifiutata();
     } else if (error.config?._connGen === _connGenerazione) {
       // Ignora il fallimento se la vista che l'ha generato e' stata nel
       // frattempo abbandonata (cambio tab -> nuova generazione): altrimenti
@@ -1059,6 +1074,16 @@ export default function PortaleDipendente() {
   useEffect(() => {
     _connListeners.push(setConnErr);
     return () => { _connListeners = _connListeners.filter((fn) => fn !== setConnErr); };
+  }, []);
+
+  // Un 401 dal server (token rifiutato: segreto ruotato, o dipendente cessato/
+  // disattivato nel frattempo) riporta subito al login invece di lasciare il
+  // portale aperto con ogni chiamata che fallisce in silenzio (trovato da una
+  // review automatica sulla sessione persistente sopra).
+  useEffect(() => {
+    const f = () => setLogged(false);
+    _authListeners.push(f);
+    return () => { _authListeners = _authListeners.filter((fn) => fn !== f); };
   }, []);
 
   // Ogni tab monta UN SOLO componente alla volta (nessuna richiesta in

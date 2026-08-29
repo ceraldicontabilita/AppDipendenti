@@ -84,9 +84,11 @@ def _pin_ok(pin: str) -> bool:
 
 @router.get("/dipendenti-attivi", summary="Nomi per il selettore di login del portale")
 async def dipendenti_attivi() -> Dict[str, Any]:
-    """Elenco pubblico (nessuna autenticazione) di id+nome dei dipendenti con
-    PIN impostato, per il tocca-il-tuo-nome in login — niente digitazione.
-    Solo id+nome: nessun altro dato (PIN, ruolo, mansione...) esposto qui."""
+    """Elenco pubblico (nessuna autenticazione) di id+nome dei dipendenti
+    attivi, per il tocca-il-tuo-nome in login — niente digitazione. Include
+    anche chi usa solo il PIN condiviso della cassa (nessun pin_hash proprio),
+    perché login_dipendente() accetta entrambe le fonti. Solo id+nome: nessun
+    altro dato (PIN, ruolo, mansione...) esposto qui."""
     return {"dipendenti": await elenco_dipendenti_per_login()}
 
 
