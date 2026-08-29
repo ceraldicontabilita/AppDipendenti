@@ -163,9 +163,13 @@ def _applica_update(doc: Dict[str, Any], update: Dict[str, Any],
             # Solo forma semplice {campo: valore}: nessun $each/$slice/$position,
             # non usati da nessun chiamante in questo repo.
             for k, v in campi.items():
-                lista = nuovo.get(k)
-                if not isinstance(lista, list):
-                    lista = []
+                # dict(doc) e' una copia shallow: senza list(...) qui sotto,
+                # `lista` sarebbe lo STESSO oggetto lista di `doc[k]", quindi
+                # l'append muterebbe anche il documento originale e il confronto
+                # `nuovo != doc` usato per il change-detection risulterebbe
+                # sempre uguale, facendo saltare l'UPDATE in update_many (trovato
+                # da una review automatica prima del deploy).
+                lista = list(nuovo.get(k)) if isinstance(nuovo.get(k), list) else []
                 lista.append(v)
                 nuovo[k] = lista
         else:
@@ -554,19 +558,23 @@ class SupabaseCollection:
     async def update_many(self, filtro, update, **_) -> _Risultato:
         await self._assicura_tabella()
         matched = modified = 0
-        async with self._db._pool.acquire() as con:
-            for d in await self._tutti():
-                if not _match(d, filtro):
-                    continue
-                matched += 1
-                nuovo = _applica_update(d, update, inserito=False)
-                if nuovo != d:
-                    chiave = str(d.get("id") or d.get("_id"))
+        # Materializza PRIMA di aprire la connessione di scrittura: _tutti()
+        # acquisisce a sua volta dal pool, e tenerne una ferma (inutilizzata)
+        # mentre se ne aspetta una seconda puo' esaurire il pool (5 connessioni)
+        # sotto concorrenza e bloccare fino al command_timeout di 60s (trovato
+        # da una review automatica prima del deploy).
+        docs = [d for d in await self._tutti() if _match(d, filtro)]
+        matched = len(docs)
+        for d in docs:
+            nuovo = _applica_update(d, update, inserito=False)
+            if nuovo != d:
+                chiave = str(d.get("id") or d.get("_id"))
+                async with self._db._pool.acquire() as con:
                     await con.execute(
                         'UPDATE public."%s" SET doc = $2::jsonb WHERE id = $1' % self._tab,
                         chiave, json.dumps(nuovo, default=str),
                     )
-                    modified += 1
+                modified += 1
         return _Risultato(matched, modified)
 
     async def delete_many(self, filtro, **_) -> _Risultato:
