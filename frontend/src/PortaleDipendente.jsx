@@ -17,21 +17,37 @@ const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || "/api", time
 // di un trasferimento che sta andando bene ma lentamente (trovato da una review
 // automatica: il timeout condiviso avrebbe interrotto upload/download validi).
 const FILE_TIMEOUT = 60000;
+// Le scritture (POST/PUT/DELETE) possono restare in attesa lato server anche
+// dopo aver gia' fatto l'inserimento — es. POST /richieste inserisce la riga
+// e SOLO DOPO aspetta l'invio email (fino a 30s, backend/app/services/
+// email_smtp.py). Con soli 15s il client vede un timeout, mostra "riprova",
+// ma un secondo tentativo crea una SECONDA richiesta/notifica/email per un
+// inserimento gia' andato a buon fine (trovato da una review automatica).
+// Le sole GET restano a 15s: sono sicure da interrompere e riprovare.
+const WRITE_TIMEOUT = 40000;
 api.interceptors.request.use((c) => {
   const t = localStorage.getItem(TK);
   if (t) c.headers.Authorization = `Bearer ${t}`;
+  if ((c.method || "get").toLowerCase() !== "get" && (!c.timeout || c.timeout <= 15000)) {
+    c.timeout = WRITE_TIMEOUT;
+  }
   return c;
 });
 // Banner "connessione assente" condiviso da tutte le tab: un errore di rete/
 // timeout (nessuna risposta dal server) e una risposta vuota altrimenti
 // sembrano identici ad ogni singola vista — qui si segnala una volta sola,
 // visibile ovunque, con un modo di riprovare invece di restare bloccati.
+// Si spegne SOLO con "Ricarica" (ricarica l'intera pagina): un'altra
+// richiesta andata a buon fine nel frattempo non basta a spegnerlo, perche'
+// puo' appartenere a una tab diversa da quella rimasta bloccata sul suo
+// fallback vuoto — spegnerlo comunque nasconderebbe proprio quel caso
+// (trovato da una review automatica).
 let _connListeners = [];
 function _notificaConnessione(assente) {
   _connListeners.forEach((fn) => fn(assente));
 }
 api.interceptors.response.use(
-  (r) => { _notificaConnessione(false); return r; },
+  (r) => r,
   (error) => { if (!error.response) _notificaConnessione(true); return Promise.reject(error); }
 );
 
