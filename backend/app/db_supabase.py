@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 
 _NOME_OK = re.compile(r"^[A-Za-z0-9_]+$")
 
+# Campi noti per essere pesanti (PDF in base64) su alcune collection: esclusi
+# di default dalle letture in blocco di aggregate() quando la pipeline non li
+# nomina — vedi SupabaseCollection.aggregate().
+_CAMPI_PESANTI = ("pdf_data",)
+
 
 def _tabella(collection: str) -> str:
     if not _NOME_OK.match(collection):
@@ -282,9 +287,15 @@ def _chiave_ordine(v: Any):
 
 
 class _Risultato:
+    """Un solo tipo di risultato per update/delete (motor ne ha due,
+    UpdateResult e DeleteResult): deleted_count == matched_count per le
+    cancellazioni, cosi' i chiamanti scritti contro l'uno o l'altro attributo
+    funzionano entrambi (es. repositories/base_repository.py legge
+    deleted_count — mancava, trovato da una review automatica)."""
     def __init__(self, matched: int, modified: int, upserted_id: Any = None):
         self.matched_count = matched
         self.modified_count = modified
+        self.deleted_count = matched
         self.upserted_id = upserted_id
 
 
@@ -345,12 +356,12 @@ class _CursoreAggregato:
     (`await cur.to_list(n)` e `async for`), ma materializza eseguendo in Python
     la pipeline invece di un filtro/proiezione singoli."""
 
-    def __init__(self, coll, pipeline: List[Dict[str, Any]]):
-        self._coll, self._pipeline = coll, pipeline
+    def __init__(self, coll, pipeline: List[Dict[str, Any]], escludi: Optional[List[str]] = None):
+        self._coll, self._pipeline, self._escludi = coll, pipeline, escludi or []
         self._iter = None
 
     async def _materializza(self) -> List[Dict[str, Any]]:
-        docs = await self._coll._tutti()
+        docs = await self._coll._tutti(self._escludi)
         for stage in self._pipeline:
             if len(stage) != 1:
                 raise NotImplementedError("stage aggregate non riconosciuto: %r" % (stage,))
@@ -603,7 +614,18 @@ class SupabaseCollection:
         return out
 
     def aggregate(self, pipeline: List[Dict[str, Any]], **_) -> _CursoreAggregato:
-        return _CursoreAggregato(self, pipeline)
+        # aggregate() legge sempre l'intera collection prima di applicare la
+        # pipeline in Python (niente pushdown SQL) — su `cedolini`, che tiene
+        # il PDF in base64 dentro il documento, questo trasferirebbe decine di
+        # MB per una pipeline che magari somma solo un campo numerico (stesso
+        # problema di `_tutti()` gia' documentato sopra; trovato da una review
+        # automatica sulle pipeline di tfr.py/cedolini.py/buste_paga.py). Un
+        # campo pesante e' escluso in SQL SOLO se non compare da nessuna parte
+        # nella pipeline (match/group/addFields/sort) — se compare, si legge
+        # per intero: mai un risultato silenziosamente sbagliato.
+        pipeline_json = json.dumps(pipeline, default=str)
+        escludi = [c for c in _CAMPI_PESANTI if c not in pipeline_json]
+        return _CursoreAggregato(self, pipeline, escludi)
 
 
 class SupabaseDatabase:
