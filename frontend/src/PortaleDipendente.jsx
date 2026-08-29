@@ -34,21 +34,40 @@ api.interceptors.request.use((c) => {
   return c;
 });
 // Banner "connessione assente" condiviso da tutte le tab: un errore di rete/
-// timeout (nessuna risposta dal server) e una risposta vuota altrimenti
-// sembrano identici ad ogni singola vista — qui si segnala una volta sola,
-// visibile ovunque, con un modo di riprovare invece di restare bloccati.
-// Si spegne SOLO con "Ricarica" (ricarica l'intera pagina): un'altra
-// richiesta andata a buon fine nel frattempo non basta a spegnerlo, perche'
-// puo' appartenere a una tab diversa da quella rimasta bloccata sul suo
-// fallback vuoto — spegnerlo comunque nasconderebbe proprio quel caso
-// (trovato da una review automatica).
+// timeout (nessuna risposta dal server) sembra identico ad ogni singola vista
+// — qui si segnala una volta sola, visibile ovunque, con un modo di riprovare
+// invece di restare bloccati. Tenuto per CHIAVE richiesta (metodo+url), non
+// come flag unico: una richiesta diversa andata a buon fine nel frattempo NON
+// deve spegnere il banner se la vista che ha fallito e' ancora rotta (es. un
+// altro tab che sta caricando con successo) — ma quando la STESSA richiesta
+// che aveva fallito va a buon fine (l'utente/la vista si e' ripresa da sola),
+// il banner si spegne senza dover premere "Ricarica" (trovato da una review
+// automatica: prima non si spegneva mai da solo, nemmeno a vista recuperata).
+let _connFallite = new Set();
 let _connListeners = [];
-function _notificaConnessione(assente) {
+function _chiaveRichiesta(config) {
+  return `${(config?.method || "get").toLowerCase()} ${config?.url || ""}`;
+}
+function _notificaConnessione() {
+  const assente = _connFallite.size > 0;
   _connListeners.forEach((fn) => fn(assente));
 }
+function _azzeraConnessione() {
+  _connFallite.clear();
+  _notificaConnessione();
+}
 api.interceptors.response.use(
-  (r) => r,
-  (error) => { if (!error.response) _notificaConnessione(true); return Promise.reject(error); }
+  (r) => {
+    if (_connFallite.delete(_chiaveRichiesta(r.config))) _notificaConnessione();
+    return r;
+  },
+  (error) => {
+    if (!error.response) {
+      _connFallite.add(_chiaveRichiesta(error.config));
+      _notificaConnessione();
+    }
+    return Promise.reject(error);
+  }
 );
 
 const TIPI = [
@@ -93,7 +112,7 @@ function Login({ onLogin }) {
       // in questa schermata), va spento qui — altrimenti l'app si apre con
       // un banner falso proprio nel momento in cui la connessione e' appena
       // stata dimostrata funzionante (trovato da una review automatica).
-      _notificaConnessione(false);
+      _azzeraConnessione();
       localStorage.setItem(TK, r.data.access_token);
       localStorage.setItem("pt_role", r.data.role);
       localStorage.setItem("pt_name", r.data.name || sel.nome);
