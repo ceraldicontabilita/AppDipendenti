@@ -8,12 +8,98 @@ import {
 import "./portale.css";
 
 const TK = "pt_token";
-const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || "/api" });
+// timeout esplicito: senza, su wifi scarso al banco una richiesta puo' restare
+// appesa a tempo indeterminato e il bottone (es. Timbra) resta bloccato su
+// "Attendi..." senza che il dipendente sappia se e' andata a buon fine.
+const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || "/api", timeout: 15000 });
+// Upload/download di file (buste PDF, documenti fino a 12MB) possono legittimamente
+// superare 15s su wifi scarso: qui serve piu' margine, non un fallimento prematuro
+// di un trasferimento che sta andando bene ma lentamente (trovato da una review
+// automatica: il timeout condiviso avrebbe interrotto upload/download validi).
+const FILE_TIMEOUT = 60000;
+// Le scritture (POST/PUT/DELETE) possono restare in attesa lato server anche
+// dopo aver gia' fatto l'inserimento — es. POST /richieste inserisce la riga
+// e SOLO DOPO aspetta l'invio email (fino a 30s, backend/app/services/
+// email_smtp.py). Con soli 15s il client vede un timeout, mostra "riprova",
+// ma un secondo tentativo crea una SECONDA richiesta/notifica/email per un
+// inserimento gia' andato a buon fine (trovato da una review automatica).
+// Le sole GET restano a 15s: sono sicure da interrompere e riprovare.
+const WRITE_TIMEOUT = 40000;
+// Generazione corrente della vista montata: incrementata ad ogni cambio tab
+// (vedi _azzeraConnessione). Ogni richiesta viene marcata con la generazione
+// in cui e' partita — se fallisce DOPO che l'utente ha gia' cambiato tab, la
+// generazione non combacia piu' e il fallimento viene ignorato: senza,
+// una richiesta lenta partita dalla tab abbandonata poteva riaccendere il
+// banner sopra la tab nuova, gia' caricata con successo, senza modo di
+// spegnersi da solo (trovato da una review automatica).
+let _connGenerazione = 0;
 api.interceptors.request.use((c) => {
   const t = localStorage.getItem(TK);
   if (t) c.headers.Authorization = `Bearer ${t}`;
+  if ((c.method || "get").toLowerCase() !== "get" && (!c.timeout || c.timeout <= 15000)) {
+    c.timeout = WRITE_TIMEOUT;
+  }
+  c._connGen = _connGenerazione;
   return c;
 });
+// Banner "connessione assente" condiviso da tutte le tab: un errore di rete/
+// timeout (nessuna risposta dal server) sembra identico ad ogni singola vista
+// — qui si segnala una volta sola, visibile ovunque, con un modo di riprovare
+// invece di restare bloccati. Tenuto per CHIAVE richiesta (metodo+url), non
+// come flag unico: una richiesta diversa andata a buon fine nel frattempo NON
+// deve spegnere il banner se la vista che ha fallito e' ancora rotta (es. un
+// altro tab che sta caricando con successo) — ma quando la STESSA richiesta
+// che aveva fallito va a buon fine (l'utente/la vista si e' ripresa da sola),
+// il banner si spegne senza dover premere "Ricarica" (trovato da una review
+// automatica: prima non si spegneva mai da solo, nemmeno a vista recuperata).
+// LIMITE NOTO (trovato da una review automatica, non risolto qui): se una
+// stessa vista rifà la stessa richiesta con parametri diversi (es. un admin
+// che cambia la data filtrata su un endpoint che fallisce su un giorno e poi
+// ne interroga un altro con successo), la query "vecchia" fallita resta in
+// _connFallite finché non si cambia tab — nessuno la richiede più per farla
+// scadere da sola. Tracciare l'owner-vista invece della sola chiave
+// richiesta risolverebbe anche questo, ma è un cambio di disegno più ampio
+// di un banner informativo con "Ricarica" già disponibile come via d'uscita
+// manuale: non affrontato qui.
+let _connFallite = new Set();
+let _connListeners = [];
+function _chiaveRichiesta(config) {
+  return `${(config?.method || "get").toLowerCase()} ${config?.url || ""}`;
+}
+function _notificaConnessione() {
+  const assente = _connFallite.size > 0;
+  _connListeners.forEach((fn) => fn(assente));
+}
+function _azzeraConnessione() {
+  _connGenerazione++;
+  _connFallite.clear();
+  _notificaConnessione();
+}
+api.interceptors.response.use(
+  (r) => {
+    if (_connFallite.delete(_chiaveRichiesta(r.config))) _notificaConnessione();
+    return r;
+  },
+  (error) => {
+    // Una risposta del server (anche un errore HTTP, es. 409 su un retry di
+    // una scrittura gia' andata a buon fine) dimostra che la connessione
+    // funziona quanto un successo: va tolta dai fallimenti come un successo,
+    // altrimenti resta "connessione assente" mentre si vede gia' l'errore
+    // specifico del server (trovato da una review automatica).
+    if (error.response) {
+      if (_connFallite.delete(_chiaveRichiesta(error.config))) _notificaConnessione();
+    } else if (error.config?._connGen === _connGenerazione) {
+      // Ignora il fallimento se la vista che l'ha generato e' stata nel
+      // frattempo abbandonata (cambio tab -> nuova generazione): altrimenti
+      // una richiesta lenta partita dalla tab precedente potrebbe riaccendere
+      // il banner sopra la tab nuova, gia' caricata con successo, senza che
+      // nulla la richieda piu' per farlo spegnere da solo.
+      _connFallite.add(_chiaveRichiesta(error.config));
+      _notificaConnessione();
+    }
+    return Promise.reject(error);
+  }
+);
 
 const TIPI = [
   { v: "ferie_programmate", l: "Ferie programmate", date: true },
@@ -29,6 +115,8 @@ const TIPI = [
 const tipoLabel = (v) => (TIPI.find((t) => t.v === v) || {}).l || v;
 const fmt = (d) => (d ? `${d.slice(8, 10)}/${d.slice(5, 7)}` : "-");
 
+const RICORDA_NOME = "pt_last_nome";
+
 /* ---------------- LOGIN ---------------- */
 function Login({ onLogin }) {
   // Niente elenco dei dipendenti prima dell'autenticazione: si entra scrivendo
@@ -38,32 +126,66 @@ function Login({ onLogin }) {
   const [nome, setNome] = useState("");
   const [pin, setPin] = useState("");
   const [err, setErr] = useState("");
+  // Cognome dell'ultimo login riuscito su QUESTO telefono (non il token/PIN):
+  // senza, ogni riapertura dell'app costringe a ridigitare il cognome su
+  // tastiera prima di poter anche solo timbrare — l'unico testo obbligatorio
+  // di tutto il portale, proprio nel punto che blocca l'azione piu' frequente.
+  const [ricordato, setRicordato] = useState(() => localStorage.getItem(RICORDA_NOME) || "");
 
   const press = (n) => { setErr(""); if (pin.length < 8) setPin(pin + n); };
   const submit = async (p) => {
     try {
       const body = sel.admin ? { pin: p } : { nome: sel.nome, pin: p };
       const r = await api.post("/auth/pin-login", body);
+      // Un login riuscito e' la prova piu' diretta possibile che la
+      // connessione funziona: se un tentativo precedente aveva acceso il
+      // banner "Connessione assente" (prima del login, quindi non visibile
+      // in questa schermata), va spento qui — altrimenti l'app si apre con
+      // un banner falso proprio nel momento in cui la connessione e' appena
+      // stata dimostrata funzionante (trovato da una review automatica).
+      _azzeraConnessione();
       localStorage.setItem(TK, r.data.access_token);
       localStorage.setItem("pt_role", r.data.role);
       localStorage.setItem("pt_name", r.data.name || sel.nome);
+      if (!sel.admin) localStorage.setItem(RICORDA_NOME, sel.nome);
       // L'amministratore entra DIRETTAMENTE nella Gestione (desktop), non nel portale.
       if (r.data.role === "admin") { window.location.href = "/dipendenti"; return; }
       onLogin();
-    } catch { setErr(sel.admin ? "PIN errato" : "Nome o PIN non validi"); setPin(""); }
+    } catch (e) {
+      // Prima del login il banner globale "Connessione assente" non e' ancora
+      // visibile (schermata separata da pt-root): senza questa distinzione un
+      // timeout di rete veniva mostrato come "PIN errato", proprio sulla wifi
+      // scarsa che questo fix doveva coprire (trovato da una review automatica).
+      setErr(!e.response ? "Connessione assente — riprova"
+        : (sel.admin ? "PIN errato" : "Nome o PIN non validi"));
+      setPin("");
+    }
   };
 
   if (!sel) return (
     <div className="login">
       <div className="brand"><div className="logo"><Users size={30} /></div>
         <h2>Portale Dipendenti</h2><div className="muted" style={{textAlign:"center"}}>Ceraldi Group</div></div>
-      <div className="card"><h3>Chi sei?</h3>
-        <label>Scrivi il tuo cognome (o nome e cognome)</label>
-        <input className="input" autoFocus value={nome} onChange={(e)=>{setNome(e.target.value); setErr("");}}
-          placeholder="es. Rossi" onKeyDown={(e)=>{ if(e.key==="Enter" && nome.trim().length>=2) setSel({nome: nome.trim()}); }} />
-        <button className="btn" style={{marginTop:10}} disabled={nome.trim().length<2}
-          onClick={()=>setSel({nome: nome.trim()})}>Continua</button>
-      </div>
+      {ricordato ? (
+        <div className="card">
+          <h3>Bentornato</h3>
+          <button className="btn" onClick={() => setSel({ nome: ricordato })}>
+            Continua come {ricordato}
+          </button>
+          <button className="btn gh sm" style={{ marginTop: 10 }}
+            onClick={() => { localStorage.removeItem(RICORDA_NOME); setRicordato(""); }}>
+            Non sono io
+          </button>
+        </div>
+      ) : (
+        <div className="card"><h3>Chi sei?</h3>
+          <label>Scrivi il tuo cognome (o nome e cognome)</label>
+          <input className="input" autoFocus value={nome} onChange={(e)=>{setNome(e.target.value); setErr("");}}
+            placeholder="es. Rossi" onKeyDown={(e)=>{ if(e.key==="Enter" && nome.trim().length>=2) setSel({nome: nome.trim()}); }} />
+          <button className="btn" style={{marginTop:10}} disabled={nome.trim().length<2}
+            onClick={()=>setSel({nome: nome.trim()})}>Continua</button>
+        </div>
+      )}
       <button className="btn sec" onClick={() => setSel({ nome: "Amministratore", admin: true })}>
         Accesso amministratore</button>
     </div>
@@ -254,7 +376,7 @@ function Buste() {
     setVisionato(true);                            // sblocca subito Accetto/Contesta
     const win = window.open("", "_blank");         // aperto nel gesto utente: niente blocco popup
     try {
-      const r = await api.get(`/portale/buste/${b.id}/pdf`, { responseType: "blob" });
+      const r = await api.get(`/portale/buste/${b.id}/pdf`, { responseType: "blob", timeout: FILE_TIMEOUT });
       const url = URL.createObjectURL(r.data);
       if (win) { win.location = url; }
       else { const a=document.createElement("a"); a.href=url; a.download=b.filename||`busta_${b.mese}_${b.anno}.pdf`; a.click(); }
@@ -269,7 +391,7 @@ function Buste() {
   const contesta = async (b) => {
     try { await api.post(`/portale/buste/${b.id}/contesta`); } catch {}
     try {
-      const r = await api.get(`/portale/buste/${b.id}/modulo-contestazione`, { responseType: "blob" });
+      const r = await api.get(`/portale/buste/${b.id}/modulo-contestazione`, { responseType: "blob", timeout: FILE_TIMEOUT });
       const url = URL.createObjectURL(r.data);
       const a = document.createElement("a"); a.href=url; a.download=`contestazione_busta_${mm(b)}_${b.anno}.pdf`; a.click();
       URL.revokeObjectURL(url);
@@ -503,12 +625,12 @@ function Documenti() {
     URL.revokeObjectURL(url);
   };
   const scaricaModulo = async (tipo) => {
-    try { const r = await api.get(`/portale/documenti/modulo/${tipo}`, {responseType:"blob"});
+    try { const r = await api.get(`/portale/documenti/modulo/${tipo}`, {responseType:"blob", timeout: FILE_TIMEOUT});
       blobDownload(r.data, `modulo_${tipo}.pdf`);
     } catch { alert("Modulo non disponibile"); }
   };
   const scaricaFile = async (d) => {
-    try { const r = await api.get(`/portale/documenti/${d.id}/file`, {responseType:"blob"});
+    try { const r = await api.get(`/portale/documenti/${d.id}/file`, {responseType:"blob", timeout: FILE_TIMEOUT});
       blobDownload(r.data, d.nome_file || "documento");
     } catch { alert("Documento non disponibile"); }
   };
@@ -516,7 +638,7 @@ function Documenti() {
     const file = ev.target.files?.[0]; if(!file) return;
     const fd = new FormData(); fd.append("tipo", tipo); fd.append("file", file);
     setBusy(tipo);
-    try { await api.post("/portale/documenti/upload", fd, {headers:{"Content-Type":"multipart/form-data"}}); load(); }
+    try { await api.post("/portale/documenti/upload", fd, {headers:{"Content-Type":"multipart/form-data"}, timeout: FILE_TIMEOUT}); load(); }
     catch(e){ alert(e?.response?.data?.detail || "Errore nel caricamento"); }
     setBusy(""); ev.target.value="";
   };
@@ -525,7 +647,7 @@ function Documenti() {
     try { await api.delete(`/portale/documenti/${d.id}`); load(); } catch {}
   };
   const scaricaRegolamento = async () => {
-    try { const r = await api.get("/portale/documenti/regolamento/file", {responseType:"blob"});
+    try { const r = await api.get("/portale/documenti/regolamento/file", {responseType:"blob", timeout: FILE_TIMEOUT});
       blobDownload(r.data, "regolamento_interno.docx");
     } catch { alert("Regolamento non ancora pubblicato dall'azienda."); }
   };
@@ -716,7 +838,7 @@ function BusteAdmin() {
   const apri = async (b) => {
     const win = window.open("", "_blank");
     try {
-      const r = await api.get(`/portale/buste/${b.id}/pdf`, { responseType: "blob" });
+      const r = await api.get(`/portale/buste/${b.id}/pdf`, { responseType: "blob", timeout: FILE_TIMEOUT });
       const url = URL.createObjectURL(r.data);
       if (win) win.location = url;
       else { const a = document.createElement("a"); a.href = url; a.download = b.filename || "busta.pdf"; a.click(); }
@@ -848,7 +970,7 @@ function DocumentiAdmin() {
   const scarica = async (d) => {
     const win = window.open("", "_blank");
     try {
-      const r = await api.get(`/dipendenti-cloud/documenti/${d.id}/file`, { responseType: "blob" });
+      const r = await api.get(`/dipendenti-cloud/documenti/${d.id}/file`, { responseType: "blob", timeout: FILE_TIMEOUT });
       const url = URL.createObjectURL(r.data);
       if (win) win.location = url;
       else { const a = document.createElement("a"); a.href = url; a.download = d.filename || "documento"; a.click(); }
@@ -915,10 +1037,30 @@ export default function PortaleDipendente() {
   // Sicurezza: il portale chiede SEMPRE il PIN all'apertura (niente ingresso
   // automatico per via di un token salvato nel browser).
   const [logged, setLogged] = useState(false);
-  const [tab, setTab] = useState("turni");
+  // Timbra e' l'azione piu' frequente in assoluto (piu' volte al giorno, ogni
+  // dipendente): e' la tab di apertura, non Turni, cosi' non serve un tap in piu'.
+  const [tab, setTab] = useState("timbra");
   const [nonLette, setNonLette] = useState(0);
+  const [connErr, setConnErr] = useState(false);
   const role = localStorage.getItem("pt_role");
   const isGestore = role === "responsabile_turni" || role === "admin";
+
+  useEffect(() => {
+    _connListeners.push(setConnErr);
+    return () => { _connListeners = _connListeners.filter((fn) => fn !== setConnErr); };
+  }, []);
+
+  // Ogni tab monta UN SOLO componente alla volta (nessuna richiesta in
+  // background per una tab abbandonata: niente polling/setInterval in tutto
+  // il portale) — quindi un fallimento agganciato alla tab appena lasciata
+  // non puo' piu' guarire da solo (nessuno la richiede piu'), e il banner
+  // restava acceso per sempre finche' non si tornava proprio li' o si
+  // ricaricava la pagina (trovato dal giro di review successivo a quello che
+  // aveva introdotto il tracciamento per chiave). Cambiare tab azzera i
+  // fallimenti registrati: quelli della tab lasciata non contano piu' (vista
+  // non piu' montata), quella nuova riparte pulita e si riaggiungera' da
+  // sola se fallisce a sua volta.
+  useEffect(() => { _azzeraConnessione(); }, [tab]);
 
   const refreshBadge = useCallback(()=>{ api.get("/notifiche/conteggio").then((r)=>setNonLette(r.data.non_lette)).catch(()=>{}); },[]);
   useEffect(()=>{ if(logged) refreshBadge(); },[logged,tab,refreshBadge]);
@@ -938,6 +1080,12 @@ export default function PortaleDipendente() {
 
   return (
     <div className="pt-root">
+      {connErr && (
+        <div className="pt-connerr">
+          Connessione assente — riprova
+          <button onClick={() => window.location.reload()}>Ricarica</button>
+        </div>
+      )}
       <div className="pt-head">
         <h1>Portale Dipendenti</h1>
         <div className="sub">{localStorage.getItem("pt_name")}{isGestore?` · ${role==="admin"?"admin":"responsabile turni"}`:""}</div>

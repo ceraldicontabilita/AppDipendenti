@@ -11,11 +11,10 @@ un blocco di indisponibilità per il generatore turni (collegamento ferie→turn
 """
 import logging
 import os
-import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, HTTPException, Body, Query, Depends
+from fastapi import APIRouter, HTTPException, Body, Query, Depends, BackgroundTasks
 
 from backend.app.database import Database, Collections
 from backend.app.utils.identity import get_identity, require_roles
@@ -129,6 +128,7 @@ async def _registra_ferie_cloud(db, req: Dict[str, Any], richiesta_id: str):
 
 @router.post("", summary="Crea una richiesta (dipendente)")
 async def crea_richiesta(
+    background_tasks: BackgroundTasks,
     payload: Dict[str, Any] = Body(..., example={"tipo": "ferie_programmate",
                                                  "dettaglio": "Ferie estive",
                                                  "dati": {"dal": "2026-08-01", "al": "2026-08-10"}}),
@@ -171,10 +171,14 @@ async def crea_richiesta(
             extra={"richiesta_id": doc["id"], "tipo": tipo, "dipendente_nome": nome})
     except Exception:
         logger.exception("notifica richiesta")
-    try:
-        await asyncio.to_thread(_invia_email_richiesta, nome, label, doc)
-    except Exception:
-        logger.exception("email richiesta")
+    # L'email va in background: _invia_email_richiesta puo' restare bloccata
+    # sull'SMTP anche per piu' round-trip (connessione/TLS/auth/invio, ognuno
+    # col proprio timeout — un timeout sul socket non e' una scadenza totale,
+    # trovato dalla review su questa stessa PR). L'inserimento in DB e' gia'
+    # avvenuto sopra: se restasse in `await` qui, un SMTP lento farebbe
+    # scadere il timeout scrittura del client (portale mobile) mentre la
+    # richiesta e' gia' salvata, inducendo un secondo tentativo duplicato.
+    background_tasks.add_task(_invia_email_richiesta, nome, label, doc)
     # Contestazione busta → alert tracciato per l'azienda
     if tipo == "contestazione_busta":
         try:
