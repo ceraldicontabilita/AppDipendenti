@@ -25,12 +25,21 @@ const FILE_TIMEOUT = 60000;
 // inserimento gia' andato a buon fine (trovato da una review automatica).
 // Le sole GET restano a 15s: sono sicure da interrompere e riprovare.
 const WRITE_TIMEOUT = 40000;
+// Generazione corrente della vista montata: incrementata ad ogni cambio tab
+// (vedi _azzeraConnessione). Ogni richiesta viene marcata con la generazione
+// in cui e' partita — se fallisce DOPO che l'utente ha gia' cambiato tab, la
+// generazione non combacia piu' e il fallimento viene ignorato: senza,
+// una richiesta lenta partita dalla tab abbandonata poteva riaccendere il
+// banner sopra la tab nuova, gia' caricata con successo, senza modo di
+// spegnersi da solo (trovato da una review automatica).
+let _connGenerazione = 0;
 api.interceptors.request.use((c) => {
   const t = localStorage.getItem(TK);
   if (t) c.headers.Authorization = `Bearer ${t}`;
   if ((c.method || "get").toLowerCase() !== "get" && (!c.timeout || c.timeout <= 15000)) {
     c.timeout = WRITE_TIMEOUT;
   }
+  c._connGen = _connGenerazione;
   return c;
 });
 // Banner "connessione assente" condiviso da tutte le tab: un errore di rete/
@@ -43,6 +52,15 @@ api.interceptors.request.use((c) => {
 // che aveva fallito va a buon fine (l'utente/la vista si e' ripresa da sola),
 // il banner si spegne senza dover premere "Ricarica" (trovato da una review
 // automatica: prima non si spegneva mai da solo, nemmeno a vista recuperata).
+// LIMITE NOTO (trovato da una review automatica, non risolto qui): se una
+// stessa vista rifà la stessa richiesta con parametri diversi (es. un admin
+// che cambia la data filtrata su un endpoint che fallisce su un giorno e poi
+// ne interroga un altro con successo), la query "vecchia" fallita resta in
+// _connFallite finché non si cambia tab — nessuno la richiede più per farla
+// scadere da sola. Tracciare l'owner-vista invece della sola chiave
+// richiesta risolverebbe anche questo, ma è un cambio di disegno più ampio
+// di un banner informativo con "Ricarica" già disponibile come via d'uscita
+// manuale: non affrontato qui.
 let _connFallite = new Set();
 let _connListeners = [];
 function _chiaveRichiesta(config) {
@@ -53,6 +71,7 @@ function _notificaConnessione() {
   _connListeners.forEach((fn) => fn(assente));
 }
 function _azzeraConnessione() {
+  _connGenerazione++;
   _connFallite.clear();
   _notificaConnessione();
 }
@@ -62,7 +81,19 @@ api.interceptors.response.use(
     return r;
   },
   (error) => {
-    if (!error.response) {
+    // Una risposta del server (anche un errore HTTP, es. 409 su un retry di
+    // una scrittura gia' andata a buon fine) dimostra che la connessione
+    // funziona quanto un successo: va tolta dai fallimenti come un successo,
+    // altrimenti resta "connessione assente" mentre si vede gia' l'errore
+    // specifico del server (trovato da una review automatica).
+    if (error.response) {
+      if (_connFallite.delete(_chiaveRichiesta(error.config))) _notificaConnessione();
+    } else if (error.config?._connGen === _connGenerazione) {
+      // Ignora il fallimento se la vista che l'ha generato e' stata nel
+      // frattempo abbandonata (cambio tab -> nuova generazione): altrimenti
+      // una richiesta lenta partita dalla tab precedente potrebbe riaccendere
+      // il banner sopra la tab nuova, gia' caricata con successo, senza che
+      // nulla la richieda piu' per farlo spegnere da solo.
       _connFallite.add(_chiaveRichiesta(error.config));
       _notificaConnessione();
     }
