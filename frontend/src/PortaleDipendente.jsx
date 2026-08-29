@@ -8,6 +8,19 @@ import {
 import "./portale.css";
 
 const TK = "pt_token";
+// Legge la scadenza (exp) dal JWT senza verificarne la firma (la verifica vera
+// e' lato server, qui serve solo a decidere se riaprire il portale senza PIN).
+// Stessa logica di main.jsx (RequireRole per l'area gestione), duplicata qui
+// perche' main.jsx non e' un modulo condiviso.
+function tokenValido(token) {
+  if (!token) return false;
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    return !payload.exp || payload.exp * 1000 > Date.now();
+  } catch {
+    return false;
+  }
+}
 // timeout esplicito: senza, su wifi scarso al banco una richiesta puo' restare
 // appesa a tempo indeterminato e il bottone (es. Timbra) resta bloccato su
 // "Attendi..." senza che il dipendente sappia se e' andata a buon fine.
@@ -115,27 +128,28 @@ const TIPI = [
 const tipoLabel = (v) => (TIPI.find((t) => t.v === v) || {}).l || v;
 const fmt = (d) => (d ? `${d.slice(8, 10)}/${d.slice(5, 7)}` : "-");
 
-const RICORDA_NOME = "pt_last_nome";
-
 /* ---------------- LOGIN ---------------- */
 function Login({ onLogin }) {
-  // Niente elenco dei dipendenti prima dell'autenticazione: si entra scrivendo
-  // il PROPRIO cognome + PIN. I nomi di tutti restano visibili solo agli
-  // amministratori nella Gestione.
-  const [sel, setSel] = useState(null);   // {admin:true} | {nome:"..."}
-  const [nome, setNome] = useState("");
+  // Selettore a tocco: elenco nomi (GET pubblico, solo id+nome) invece di
+  // digitare il cognome — decisione esplicita del titolare per un dispositivo
+  // condiviso in negozio (cucina/pasticceria), dove ridigitare il nome ad ogni
+  // uso era scomodissimo. Tocca il tuo nome -> tastierino PIN, come prima.
+  const [elenco, setElenco] = useState(null);   // null = in caricamento
+  const [elencoErr, setElencoErr] = useState(false);
+  const [sel, setSel] = useState(null);   // {admin:true} | {id, nome}
   const [pin, setPin] = useState("");
   const [err, setErr] = useState("");
-  // Cognome dell'ultimo login riuscito su QUESTO telefono (non il token/PIN):
-  // senza, ogni riapertura dell'app costringe a ridigitare il cognome su
-  // tastiera prima di poter anche solo timbrare — l'unico testo obbligatorio
-  // di tutto il portale, proprio nel punto che blocca l'azione piu' frequente.
-  const [ricordato, setRicordato] = useState(() => localStorage.getItem(RICORDA_NOME) || "");
+
+  useEffect(() => {
+    api.get("/auth/dipendenti-attivi")
+      .then((r) => setElenco(r.data.dipendenti || []))
+      .catch(() => { setElenco([]); setElencoErr(true); });
+  }, []);
 
   const press = (n) => { setErr(""); if (pin.length < 8) setPin(pin + n); };
   const submit = async (p) => {
     try {
-      const body = sel.admin ? { pin: p } : { nome: sel.nome, pin: p };
+      const body = sel.admin ? { pin: p } : { dipendente_id: sel.id, pin: p };
       const r = await api.post("/auth/pin-login", body);
       // Un login riuscito e' la prova piu' diretta possibile che la
       // connessione funziona: se un tentativo precedente aveva acceso il
@@ -147,7 +161,6 @@ function Login({ onLogin }) {
       localStorage.setItem(TK, r.data.access_token);
       localStorage.setItem("pt_role", r.data.role);
       localStorage.setItem("pt_name", r.data.name || sel.nome);
-      if (!sel.admin) localStorage.setItem(RICORDA_NOME, sel.nome);
       // L'amministratore entra DIRETTAMENTE nella Gestione (desktop), non nel portale.
       if (r.data.role === "admin") { window.location.href = "/dipendenti"; return; }
       onLogin();
@@ -156,8 +169,9 @@ function Login({ onLogin }) {
       // visibile (schermata separata da pt-root): senza questa distinzione un
       // timeout di rete veniva mostrato come "PIN errato", proprio sulla wifi
       // scarsa che questo fix doveva coprire (trovato da una review automatica).
-      setErr(!e.response ? "Connessione assente — riprova"
-        : (sel.admin ? "PIN errato" : "Nome o PIN non validi"));
+      // Login via id (non piu' per nome): un PIN errato e' sempre "PIN errato",
+      // niente piu' ambiguita' da riportare come "nome o PIN non validi".
+      setErr(!e.response ? "Connessione assente — riprova" : "PIN errato");
       setPin("");
     }
   };
@@ -166,26 +180,19 @@ function Login({ onLogin }) {
     <div className="login">
       <div className="brand"><div className="logo"><Users size={30} /></div>
         <h2>Portale Dipendenti</h2><div className="muted" style={{textAlign:"center"}}>Ceraldi Group</div></div>
-      {ricordato ? (
-        <div className="card">
-          <h3>Bentornato</h3>
-          <button className="btn" onClick={() => setSel({ nome: ricordato })}>
-            Continua come {ricordato}
-          </button>
-          <button className="btn gh sm" style={{ marginTop: 10 }}
-            onClick={() => { localStorage.removeItem(RICORDA_NOME); setRicordato(""); }}>
-            Non sono io
-          </button>
+      <div className="card"><h3>Chi sei?</h3>
+        {elenco === null && <div className="muted">Caricamento…</div>}
+        {elenco !== null && elenco.length === 0 && (
+          <div className="muted">
+            {elencoErr ? "Connessione assente — riprova" : "Nessun nome disponibile: contatta l'amministratore"}
+          </div>
+        )}
+        <div className="nomi-grid">
+          {(elenco || []).map((d) => (
+            <button key={d.id} className="btn nome-tile" onClick={() => setSel(d)}>{d.nome}</button>
+          ))}
         </div>
-      ) : (
-        <div className="card"><h3>Chi sei?</h3>
-          <label>Scrivi il tuo cognome (o nome e cognome)</label>
-          <input className="input" autoFocus value={nome} onChange={(e)=>{setNome(e.target.value); setErr("");}}
-            placeholder="es. Rossi" onKeyDown={(e)=>{ if(e.key==="Enter" && nome.trim().length>=2) setSel({nome: nome.trim()}); }} />
-          <button className="btn" style={{marginTop:10}} disabled={nome.trim().length<2}
-            onClick={()=>setSel({nome: nome.trim()})}>Continua</button>
-        </div>
-      )}
+      </div>
       <button className="btn sec" onClick={() => setSel({ nome: "Amministratore", admin: true })}>
         Accesso amministratore</button>
     </div>
@@ -1034,9 +1041,13 @@ function TimbraAdmin() {
 }
 
 export default function PortaleDipendente() {
-  // Sicurezza: il portale chiede SEMPRE il PIN all'apertura (niente ingresso
-  // automatico per via di un token salvato nel browser).
-  const [logged, setLogged] = useState(false);
+  // La sessione dura quanto il token (7 giorni, backend/app/config.py): su un
+  // dispositivo condiviso in cucina/pasticceria chiedere il PIN ad ogni
+  // apertura/reload era scomodissimo — richiesta esplicita del titolare di
+  // renderlo persistente. Il PIN resta comunque richiesto quando il token
+  // scade o dopo "Esci", e resta il vero controllo di sicurezza lato server
+  // su ogni chiamata API.
+  const [logged, setLogged] = useState(() => tokenValido(localStorage.getItem(TK)));
   // Timbra e' l'azione piu' frequente in assoluto (piu' volte al giorno, ogni
   // dipendente): e' la tab di apertura, non Turni, cosi' non serve un tap in piu'.
   const [tab, setTab] = useState("timbra");
