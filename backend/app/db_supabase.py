@@ -11,13 +11,19 @@ letti: niente traduzione query->SQL da mantenere, e il comportamento e' quello
 di Mongo anche sugli operatori annidati.
 
 Coperto: $ne $exists $in $nin $gt $gte $lt $lte $or $and, proiezioni
-include/exclude, $set $setOnInsert $unset $inc, upsert.
-NON coperto: aggregate, indici, $push, find_one_and_*, bulk write.
+include/exclude, $set $setOnInsert $unset $inc $push, upsert, update_many,
+delete_many, distinct, aggregate (sottoinsieme: $match $group $addFields
+$sort $limit $skip, con accumulatori $sum/$avg/$first/$last/$push ed
+espressioni $ifNull/$cond/$toUpper/$toLower/$toDate/$month — il sottoinsieme
+usato davvero in questo repo, non un motore Mongo generico).
+NON coperto: indici, find_one_and_*, bulk write, altri stage/operatori
+aggregate oltre a quelli elencati sopra (sollevano NotImplementedError).
 """
 import json
 import logging
 import re
 import uuid
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 import asyncpg
@@ -25,6 +31,11 @@ import asyncpg
 logger = logging.getLogger(__name__)
 
 _NOME_OK = re.compile(r"^[A-Za-z0-9_]+$")
+
+# Campi noti per essere pesanti (PDF in base64) su alcune collection: esclusi
+# di default dalle letture in blocco di aggregate() quando la pipeline non li
+# nomina — vedi SupabaseCollection.aggregate().
+_CAMPI_PESANTI = ("pdf_data",)
 
 
 def _tabella(collection: str) -> str:
@@ -71,7 +82,14 @@ def _confronta(valore: Any, cond: Any) -> bool:
                 if presente != bool(atteso):
                     return False
             elif op == "$in":
-                if not (presente and valore in atteso):
+                # Mongo: un campo assente equivale a null per $in — se None e'
+                # tra i valori richiesti, un documento senza il campo combacia
+                # comunque (es. contratti vecchi senza "stato" in
+                # {"stato": {"$in": [..., None]}}).
+                if presente:
+                    if valore not in atteso:
+                        return False
+                elif None not in atteso:
                     return False
             elif op == "$nin":
                 if presente and valore in atteso:
@@ -153,9 +171,110 @@ def _applica_update(doc: Dict[str, Any], update: Dict[str, Any],
         elif op == "$inc":
             for k, delta in campi.items():
                 nuovo[k] = (nuovo.get(k) or 0) + delta
+        elif op == "$push":
+            # Solo forma semplice {campo: valore}: nessun $each/$slice/$position,
+            # non usati da nessun chiamante in questo repo.
+            for k, v in campi.items():
+                # dict(doc) e' una copia shallow: senza list(...) qui sotto,
+                # `lista` sarebbe lo STESSO oggetto lista di `doc[k]", quindi
+                # l'append muterebbe anche il documento originale e il confronto
+                # `nuovo != doc` usato per il change-detection risulterebbe
+                # sempre uguale, facendo saltare l'UPDATE in update_many (trovato
+                # da una review automatica prima del deploy).
+                lista = list(nuovo.get(k)) if isinstance(nuovo.get(k), list) else []
+                lista.append(v)
+                nuovo[k] = lista
         else:
             raise NotImplementedError("update non supportato: " + op)
     return nuovo
+
+
+def _truthy(v: Any) -> bool:
+    """Verita' in stile Mongo per $cond: null/mancante/false/0/"" sono falsi."""
+    return bool(v) if v is not None and v is not _MANCANTE else False
+
+
+def _parse_data(v: Any):
+    """Converte una stringa data/ora ISO in datetime, per $toDate/$month."""
+    if isinstance(v, (datetime, date)):
+        return v
+    if isinstance(v, str):
+        try:
+            return datetime.fromisoformat(v[:19])
+        except ValueError:
+            return None
+    return None
+
+
+def _eval_expr(doc: Dict[str, Any], expr: Any) -> Any:
+    """Valuta un'espressione di aggregazione Mongo (sottoinsieme usato in questo repo)."""
+    if isinstance(expr, str) and expr.startswith("$"):
+        v = _get(doc, expr[1:])
+        return None if v is _MANCANTE else v
+    if isinstance(expr, dict) and len(expr) == 1 and next(iter(expr)).startswith("$"):
+        op, arg = next(iter(expr.items()))
+        if op == "$ifNull":
+            a, b = arg
+            v = _eval_expr(doc, a)
+            return v if v is not None else _eval_expr(doc, b)
+        if op == "$cond":
+            if isinstance(arg, list):
+                condv, thenv, elsev = arg
+            else:
+                condv, thenv, elsev = arg["if"], arg["then"], arg["else"]
+            return _eval_expr(doc, thenv) if _truthy(_eval_expr(doc, condv)) else _eval_expr(doc, elsev)
+        if op == "$toUpper":
+            v = _eval_expr(doc, arg[0] if isinstance(arg, list) else arg)
+            return v.upper() if isinstance(v, str) else v
+        if op == "$toLower":
+            v = _eval_expr(doc, arg[0] if isinstance(arg, list) else arg)
+            return v.lower() if isinstance(v, str) else v
+        if op == "$toDate":
+            return _parse_data(_eval_expr(doc, arg[0] if isinstance(arg, list) else arg))
+        if op == "$month":
+            d = _eval_expr(doc, arg[0] if isinstance(arg, list) else arg)
+            d = d if isinstance(d, (datetime, date)) else _parse_data(d)
+            return d.month if d else None
+        raise NotImplementedError("espressione aggregate non supportata: " + op)
+    if isinstance(expr, dict):
+        # dizionario letterale a piu' chiavi (es. _id composto): valutato campo per campo
+        return {k: _eval_expr(doc, v) for k, v in expr.items()}
+    return expr  # letterale (numero, stringa semplice, bool, None, lista...)
+
+
+def _eval_group_id(doc: Dict[str, Any], id_expr: Any) -> Any:
+    if isinstance(id_expr, dict) and any(k.startswith("$") for k in id_expr):
+        return _eval_expr(doc, id_expr)
+    if isinstance(id_expr, dict):
+        return {k: _eval_expr(doc, v) for k, v in id_expr.items()}
+    return _eval_expr(doc, id_expr)
+
+
+def _applica_accumulatore(docs: List[Dict[str, Any]], spec: Any) -> Any:
+    if not (isinstance(spec, dict) and len(spec) == 1):
+        raise NotImplementedError("accumulatore aggregate non riconosciuto: %r" % (spec,))
+    op, expr = next(iter(spec.items()))
+    if op == "$sum":
+        tot = 0
+        for d in docs:
+            if expr == 1:
+                tot += 1
+                continue
+            v = _eval_expr(d, expr)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                tot += v
+        return tot
+    if op == "$avg":
+        vals = [v for v in (_eval_expr(d, expr) for d in docs)
+                if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        return (sum(vals) / len(vals)) if vals else None
+    if op == "$first":
+        return _eval_expr(docs[0], expr) if docs else None
+    if op == "$last":
+        return _eval_expr(docs[-1], expr) if docs else None
+    if op == "$push":
+        return [_eval_expr(d, expr) for d in docs]
+    raise NotImplementedError("accumulatore aggregate non supportato: " + op)
 
 
 def _chiave_ordine(v: Any):
@@ -175,9 +294,15 @@ def _chiave_ordine(v: Any):
 
 
 class _Risultato:
+    """Un solo tipo di risultato per update/delete (motor ne ha due,
+    UpdateResult e DeleteResult): deleted_count == matched_count per le
+    cancellazioni, cosi' i chiamanti scritti contro l'uno o l'altro attributo
+    funzionano entrambi (es. repositories/base_repository.py legge
+    deleted_count — mancava, trovato da una review automatica)."""
     def __init__(self, matched: int, modified: int, upserted_id: Any = None):
         self.matched_count = matched
         self.modified_count = modified
+        self.deleted_count = matched
         self.upserted_id = upserted_id
 
 
@@ -215,6 +340,79 @@ class _Cursore:
         if self._limite:
             docs = docs[: self._limite]
         return [_proietta(d, self._proj) for d in docs]
+
+    async def to_list(self, length: Optional[int] = None) -> List[Dict[str, Any]]:
+        docs = await self._materializza()
+        return docs[:length] if length else docs
+
+    def __aiter__(self):
+        self._iter = None
+        return self
+
+    async def __anext__(self):
+        if self._iter is None:
+            self._iter = iter(await self._materializza())
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
+class _CursoreAggregato:
+    """Cursore per `aggregate()`: stesse due modalita' di consumo di _Cursore
+    (`await cur.to_list(n)` e `async for`), ma materializza eseguendo in Python
+    la pipeline invece di un filtro/proiezione singoli."""
+
+    def __init__(self, coll, pipeline: List[Dict[str, Any]], escludi: Optional[List[str]] = None):
+        self._coll, self._pipeline, self._escludi = coll, pipeline, escludi or []
+        self._iter = None
+
+    async def _materializza(self) -> List[Dict[str, Any]]:
+        docs = await self._coll._tutti(self._escludi)
+        for stage in self._pipeline:
+            if len(stage) != 1:
+                raise NotImplementedError("stage aggregate non riconosciuto: %r" % (stage,))
+            op, arg = next(iter(stage.items()))
+            if op == "$match":
+                docs = [d for d in docs if _match(d, arg)]
+            elif op == "$addFields":
+                nuovi = []
+                for d in docs:
+                    d2 = dict(d)
+                    for k, expr in arg.items():
+                        d2[k] = _eval_expr(d2, expr)
+                    nuovi.append(d2)
+                docs = nuovi
+            elif op == "$group":
+                id_expr = arg.get("_id")
+                acc_specs = {k: v for k, v in arg.items() if k != "_id"}
+                gruppi: Dict[str, Dict[str, Any]] = {}
+                ordine: List[str] = []
+                for d in docs:
+                    gid = _eval_group_id(d, id_expr)
+                    chiave = json.dumps(gid, sort_keys=True, default=str)
+                    if chiave not in gruppi:
+                        gruppi[chiave] = {"_id": gid, "_docs": []}
+                        ordine.append(chiave)
+                    gruppi[chiave]["_docs"].append(d)
+                docs = []
+                for chiave in ordine:
+                    g = gruppi[chiave]
+                    riga = {"_id": g["_id"]}
+                    for campo, spec in acc_specs.items():
+                        riga[campo] = _applica_accumulatore(g["_docs"], spec)
+                    docs.append(riga)
+            elif op == "$sort":
+                for chiave, direzione in reversed(list(arg.items())):
+                    docs = sorted(docs, key=lambda d, k=chiave: _chiave_ordine(_get(d, k)),
+                                  reverse=direzione < 0)
+            elif op == "$limit":
+                docs = docs[:arg]
+            elif op == "$skip":
+                docs = docs[arg:]
+            else:
+                raise NotImplementedError("stage aggregate non supportato: " + op)
+        return docs
 
     async def to_list(self, length: Optional[int] = None) -> List[Dict[str, Any]]:
         docs = await self._materializza()
@@ -374,6 +572,95 @@ class SupabaseCollection:
                     )
                 return _Risultato(1, 1)
         return _Risultato(0, 0)
+
+    async def update_many(self, filtro, update, **_) -> _Risultato:
+        await self._assicura_tabella()
+        matched = modified = 0
+        # Materializza PRIMA di aprire la connessione di scrittura: _tutti()
+        # acquisisce a sua volta dal pool, e tenerne una ferma (inutilizzata)
+        # mentre se ne aspetta una seconda puo' esaurire il pool (5 connessioni)
+        # sotto concorrenza e bloccare fino al command_timeout di 60s (trovato
+        # da una review automatica prima del deploy).
+        # NOTA (trovato dal 4o giro di review, non risolto qui): tra la lettura
+        # sopra e la UPDATE qui sotto, una modifica concorrente allo stesso
+        # documento (da un'altra richiesta) verrebbe sovrascritta insieme al
+        # resto del documento — stesso limite gia' presente da sempre in
+        # update_one/delete_one (letti-poi-scritti senza lock). Non e' una
+        # regressione di update_many/delete_many: e' il design dell'intero
+        # adattatore (collection piccole, pochi utenti admin/responsabile
+        # turni concorrenti). Risolverlo davvero servirebbe row lock/merge
+        # JSONB lato SQL per ogni punto di scrittura, non solo qui: fuori
+        # scope per un fix mirato, da valutare se in futuro la concorrenza
+        # reale aumenta.
+        docs = [d for d in await self._tutti() if _match(d, filtro)]
+        matched = len(docs)
+        for d in docs:
+            nuovo = _applica_update(d, update, inserito=False)
+            if nuovo != d:
+                chiave = str(d.get("id") or d.get("_id"))
+                async with self._db._pool.acquire() as con:
+                    await con.execute(
+                        'UPDATE public."%s" SET doc = $2::jsonb WHERE id = $1' % self._tab,
+                        chiave, json.dumps(nuovo, default=str),
+                    )
+                modified += 1
+        return _Risultato(matched, modified)
+
+    async def delete_many(self, filtro, **_) -> _Risultato:
+        await self._assicura_tabella()
+        # stesso limite di concorrenza documentato sopra in update_many: la
+        # lista di id viene fissata alla lettura, non ri-verificata alla DELETE.
+        chiavi = [str(d.get("id") or d.get("_id")) for d in await self._tutti() if _match(d, filtro)]
+        if chiavi:
+            async with self._db._pool.acquire() as con:
+                await con.execute(
+                    'DELETE FROM public."%s" WHERE id = ANY($1::text[])' % self._tab, chiavi
+                )
+        return _Risultato(len(chiavi), len(chiavi))
+
+    async def distinct(self, campo: str, filtro=None, **_) -> List[Any]:
+        visti_set = set()
+        out: List[Any] = []
+        for d in await self._tutti():
+            if not _match(d, filtro):
+                continue
+            v = _get(d, campo)
+            if v is _MANCANTE:
+                continue
+            # Mongo: se il campo e' un array, distinct restituisce gli elementi
+            # unici al suo interno, non l'array intero come valore unico
+            # (trovato dal 6o giro di review; nessun chiamante attuale usa
+            # distinct su un campo-array, ma il comportamento va allineato).
+            valori = v if isinstance(v, list) else [v]
+            for singolo in valori:
+                chiave = json.dumps(singolo, sort_keys=True, default=str) if isinstance(singolo, (dict, list)) else singolo
+                if chiave not in visti_set:
+                    visti_set.add(chiave)
+                    out.append(singolo)
+        return out
+
+    def aggregate(self, pipeline: List[Dict[str, Any]], **_) -> _CursoreAggregato:
+        # aggregate() legge sempre l'intera collection prima di applicare la
+        # pipeline in Python (niente pushdown SQL) — su `cedolini`, che tiene
+        # il PDF in base64 dentro il documento, questo trasferirebbe decine di
+        # MB per una pipeline che magari somma solo un campo numerico (stesso
+        # problema di `_tutti()` gia' documentato sopra; trovato da una review
+        # automatica sulle pipeline di tfr.py/cedolini.py/buste_paga.py). Ma
+        # va escluso SOLO se una stage a valle scarta comunque la forma del
+        # documento originale: tra le stage supportate, solo $group lo fa
+        # ($match/$addFields/$sort/$limit/$skip restituiscono i documenti
+        # originali intatti, quindi un campo pesante assente dal testo della
+        # pipeline andrebbe comunque nel risultato — trovato dal terzo giro
+        # di review). Anche con $group, se il campo compare da qualche parte
+        # nella pipeline (es. un accumulatore che lo legge) si legge per
+        # intero: mai un risultato silenziosamente sbagliato.
+        ha_stage_che_scarta_forma = any("$group" in stage for stage in pipeline)
+        if ha_stage_che_scarta_forma:
+            pipeline_json = json.dumps(pipeline, default=str)
+            escludi = [c for c in _CAMPI_PESANTI if c not in pipeline_json]
+        else:
+            escludi = []
+        return _CursoreAggregato(self, pipeline, escludi)
 
 
 class SupabaseDatabase:
