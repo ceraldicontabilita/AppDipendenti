@@ -21,6 +21,18 @@ function tokenValido(token) {
     return false;
   }
 }
+// Millisecondi mancanti alla scadenza (null se assente/invalido/senza exp):
+// serve a pianificare il logout automatico anche se la pagina resta in
+// primo piano ininterrottamente, senza aspettare un evento di focus.
+function msAllaScadenza(token) {
+  if (!token) return null;
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    return payload.exp ? payload.exp * 1000 - Date.now() : null;
+  } catch {
+    return null;
+  }
+}
 // timeout esplicito: senza, su wifi scarso al banco una richiesta puo' restare
 // appesa a tempo indeterminato e il bottone (es. Timbra) resta bloccato su
 // "Attendi..." senza che il dipendente sappia se e' andata a buon fine.
@@ -1118,6 +1130,21 @@ export default function PortaleDipendente() {
       window.removeEventListener("focus", rivalida);
     };
   }, []);
+
+  // Il controllo sopra scatta su un evento di focus/visibilita': se il
+  // tablet resta acceso con il portale sempre in primo piano ininterrottamente
+  // (mai in background) fino alla scadenza, nessuno di quegli eventi si
+  // verifica. Un timer pianificato sulla scadenza esatta del token chiude
+  // comunque la sessione, indipendentemente da come cambia il focus (trovato
+  // da una review automatica). Riarmato ad ogni nuovo login (`logged` passa
+  // a true con un token diverso, quindi una scadenza diversa).
+  useEffect(() => {
+    if (!logged) return;
+    const ms = msAllaScadenza(localStorage.getItem(TK));
+    if (ms === null || ms <= 0) return;
+    const id = setTimeout(() => setLogged(false), ms);
+    return () => clearTimeout(id);
+  }, [logged]);
 
   // Ogni tab monta UN SOLO componente alla volta (nessuna richiesta in
   // background per una tab abbandonata: niente polling/setInterval in tutto

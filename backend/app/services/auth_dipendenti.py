@@ -137,15 +137,20 @@ async def _pin_operatore_valido(db, dip: Dict[str, Any], pin: str) -> bool:
 async def _operatori_attivi_per_nome(db) -> List[str]:
     """Nomi (minuscoli) degli operatori attivi in tablet_operatori — prefetch
     in blocco per elenco_dipendenti_per_login, invece di una query per
-    dipendente (stesso pattern anti-N+1 usato altrove nel repo)."""
+    dipendente (stesso pattern anti-N+1 usato altrove nel repo).
+
+    Un fallimento di lettura qui NON va inghiottito (trovato da una review
+    automatica): se tornasse silenziosamente [], chi usa solo il PIN della
+    cassa sparirebbe dal selettore come se non avesse nessuna credenziale,
+    con l'endpoint che risponde comunque 200 — nessun errore da mostrare, il
+    "Riprova" già previsto in Login non scatterebbe mai. Lasciando propagare
+    l'eccezione, l'endpoint fallisce esplicitamente e il frontend lo tratta
+    come l'errore di rete che già gestisce."""
     out = []
-    try:
-        async for o in db["tablet_operatori"].find({"attivo": True}):
-            nome_op = (o.get("nome") or "").lower().strip()
-            if nome_op:
-                out.append(nome_op)
-    except Exception:
-        return []
+    async for o in db["tablet_operatori"].find({"attivo": True}):
+        nome_op = (o.get("nome") or "").lower().strip()
+        if nome_op:
+            out.append(nome_op)
     return out
 
 
