@@ -211,7 +211,7 @@ def _eval_expr(doc: Dict[str, Any], expr: Any) -> Any:
     if isinstance(expr, str) and expr.startswith("$"):
         v = _get(doc, expr[1:])
         return None if v is _MANCANTE else v
-    if isinstance(expr, dict) and len(expr) == 1:
+    if isinstance(expr, dict) and len(expr) == 1 and next(iter(expr)).startswith("$"):
         op, arg = next(iter(expr.items()))
         if op == "$ifNull":
             a, b = arg
