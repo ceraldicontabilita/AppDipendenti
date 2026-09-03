@@ -251,16 +251,21 @@ async def _aggiorna_bonifico_mese(db, dip_id: str, anno: int, mese: int):
                                            {"_id": 0, "importo": 1, "pdf_data": 0}):
         tot += float(p.get("importo") or 0)
         n += 1
-    riga = await db.paghe_mensili.find_one({"dipendente_id": dip_id, "anno": anno, "mese": mese},
-                                           {"_id": 0, "bonifico_da_esiti": 1, "importo_busta": 1})
+    riga = await db.paghe_mensili.find_one({"dipendente_id": dip_id, "anno": anno, "mese": mese}, {"_id": 0, "pdf_data": 0})
     if n == 0 and riga is not None and not riga.get("bonifico_da_esiti"):
         return await _ricalcola_stato_paga(db, dip_id, anno, mese)
     if n == 0 and riga is None:
         return None
+    bonifico = round(tot, 2)
+    if n == 0 and riga.get("bonifico_da_prima_nota"):
+        # La riga era nata dalla Prima Nota, poi aveva ricevuto un pagamento
+        # reale ora ri-attribuito altrove: si torna all'importo della Prima
+        # Nota (erogato_atteso), non a zero (trovato da una review automatica).
+        bonifico = round(float(riga.get("erogato_atteso") or 0), 2)
     await db.paghe_mensili.update_one(
         {"dipendente_id": dip_id, "anno": anno, "mese": mese},
         {"$set": {"dipendente_id": dip_id, "anno": anno, "mese": mese,
-                  "bonifico_importo": round(tot, 2), "bonifico_ricevuto": tot > 0,
+                  "bonifico_importo": bonifico, "bonifico_ricevuto": bonifico > 0,
                   "bonifico_da_esiti": n > 0, "updated_at": now_iso()}}, upsert=True)
     return await _ricalcola_stato_paga(db, dip_id, anno, mese)
 
@@ -3297,6 +3302,16 @@ async def importa_pagamenti(file: UploadFile = File(...)):
     importati, affected = 0, set()
     if pendenti:
         indice = await IndiceCedolini.carica(db)
+        # Un CSV ricaricato riusa le stesse chiavi (CRO): se nel frattempo sono
+        # arrivati cedolini nuovi la busta assegnata può cambiare, e il mese
+        # che perde il pagamento va ricalcolato come quello che lo riceve —
+        # altrimenti resterebbe "pagato" con un importo che non ha più
+        # (trovato da una review automatica).
+        chiavi = {p["key"] for p in pendenti}
+        vecchi: Dict[str, tuple] = {}
+        async for e in db.pagamenti_esiti.find({}, {"_id": 0, "key": 1, "dipendente_id": 1, "mese": 1, "anno": 1, "pdf_data": 0}):
+            if e.get("key") in chiavi:
+                vecchi[e["key"]] = (e.get("dipendente_id"), e.get("mese"), e.get("anno"))
         for p, comp in zip(pendenti, risolvi_lotto(pendenti, indice)):
             if not comp:
                 continue
@@ -3305,6 +3320,9 @@ async def importa_pagamenti(file: UploadFile = File(...)):
                 {"$set": {**p, "mese": comp["mese"], "anno": comp["anno"], "origine": "csv-banca",
                           "metodo": comp["metodo"], "cedolino_id": comp.get("cedolino_id")}}, upsert=True)
             affected.add((p["dipendente_id"], comp["mese"], comp["anno"]))
+            prima = vecchi.get(p["key"])
+            if prima and prima != (p["dipendente_id"], comp["mese"], comp["anno"]) and prima[1] and prima[2]:
+                affected.add(prima)
             importati += 1
     for dip_id, mese, anno in affected:
         await _aggiorna_bonifico_mese(db, dip_id, anno, mese)
@@ -3407,11 +3425,14 @@ async def _calcola_associazioni_bonifici(db, anno: Optional[int] = None, mese: O
     # come questa arriverebbe comunque per intero, PDF in base64 compresi
     # (anche centinaia di MB su ~1500 cedolini). Il PDF si scarica a parte,
     # da qui basta sapere che il cedolino esiste (has_pdf = bool(ced)).
+    from backend.app.services.competenza_pagamenti import mese_registro
     cedolini_lista: List[Dict[str, Any]] = []
     ced_by_periodo: Dict[tuple, Dict[str, Any]] = {}
-    async for c in db.cedolini.find({}, {"_id": 0, "pdf_data": 0}):
+    async for c in db.cedolini.find({}, {"_id": 0, "pdf_data": 0, "voci": 0}):
+        # Stesso mese del registro (13/14 per le mensilità aggiuntive, per tipo).
+        c["_mese_registro"] = mese_registro(c)
         cedolini_lista.append(c)
-        chiave = (c.get("dipendente_id"), c.get("mese"), c.get("anno"))
+        chiave = (c.get("dipendente_id"), c["_mese_registro"], c.get("anno"))
         ced_by_periodo.setdefault(chiave, c)
 
     def trova_cedolino(dip_id, cognome, mese_p, anno_p):
@@ -3421,7 +3442,7 @@ async def _calcola_associazioni_bonifici(db, anno: Optional[int] = None, mese: O
         if cognome:
             cg = cognome.lower()
             for cand in cedolini_lista:
-                if cand.get("mese") == mese_p and cand.get("anno") == anno_p and cg in (cand.get("nome_dipendente") or "").lower():
+                if cand["_mese_registro"] == mese_p and cand.get("anno") == anno_p and cg in (cand.get("nome_dipendente") or "").lower():
                     return cand
         return None
 
@@ -3485,12 +3506,16 @@ async def _calcola_associazioni_bonifici(db, anno: Optional[int] = None, mese: O
         if bon <= 0:
             qualita = None
         elif esiti:
-            if len(esiti) == 1 and busta > 0 and abs(esiti[0]["importo"] - busta) <= 0.5:
+            if all(e["metodo"] == "presunto" for e in esiti):
+                # Messi su questo mese SOLO per data (nessun cedolino da
+                # confrontare al momento dell'import): anche se l'importo
+                # combacia con la busta del registro resta "da controllare" —
+                # la conferma la dà una persona (trovato da una review automatica).
+                qualita = "presunto"
+            elif len(esiti) == 1 and busta > 0 and abs(esiti[0]["importo"] - busta) <= 0.5:
                 qualita = "esatto"          # un solo bonifico che combacia con la busta
             elif busta > 0 and abs(bon - busta) <= 0.5:
                 qualita = "per_importo"     # somma bonifici = busta
-            elif all(e["metodo"] == "presunto" for e in esiti):
-                qualita = "presunto"        # attribuiti a questo mese solo per data: da controllare
             elif len(esiti) > 1:
                 qualita = "aggregato"       # più bonifici nello stesso mese
             else:

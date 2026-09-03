@@ -45,6 +45,28 @@ MESI_IT = {"gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "g
 # dell'import Prima Nota). Per la finestra temporale contano come il mese in
 # cui vengono normalmente pagate.
 MESE_EQUIVALENTE = {13: 12, 14: 6}
+MENSILITA_AGGIUNTIVE = {"tredicesima": 13, "quattordicesima": 14}
+TIPI_ORDINARI = ("ordinario", "mensile", None, "")
+
+
+def mese_registro(cedolino: Dict[str, Any]) -> Optional[int]:
+    """Mese sotto cui un cedolino sta nel registro paghe e in questo indice:
+    1-12 per l'ordinario; SEMPRE 13/14 per tredicesima/quattordicesima, anche
+    quando il parser ha salvato il mese di calendario in cui sono state pagate
+    (in archivio: 12 tredicesime con mese=7). Un'unica regola per indice,
+    registro e vista, altrimenti un pagamento agganciato per importo a una
+    tredicesima "mese 7" finirebbe sulla busta ordinaria di luglio (trovato da
+    una review automatica). None = cedolino non classificabile."""
+    tipo = cedolino.get("tipo_cedolino")
+    if tipo in MENSILITA_AGGIUNTIVE:
+        return MENSILITA_AGGIUNTIVE[tipo]
+    if tipo not in TIPI_ORDINARI:
+        return None
+    try:
+        mese = int(cedolino.get("mese"))
+    except (TypeError, ValueError):
+        return None
+    return mese if 1 <= mese <= 12 else None
 
 _RE_MESE_NUM = re.compile(r"\b(0?[1-9]|1[0-2])\s*[-/]\s*(20\d{2})\b")
 _RE_ANNO = re.compile(r"\b(20\d{2})\b")
@@ -124,14 +146,13 @@ class IndiceCedolini:
         self.per_dip: Dict[str, List[Dict[str, Any]]] = {}
         self.per_id: Dict[str, Dict[str, Any]] = {}
         for c in cedolini:
-            dip, anno, mese, netto = c.get("dipendente_id"), c.get("anno"), c.get("mese"), _num(c.get("netto"))
+            dip, anno, netto = c.get("dipendente_id"), c.get("anno"), _num(c.get("netto"))
+            mese = mese_registro(c)
             if not dip or not anno or not mese or netto is None:
                 continue
             try:
-                anno, mese = int(anno), int(mese)
+                anno = int(anno)
             except (TypeError, ValueError):
-                continue
-            if not 1 <= mese <= 14:
                 continue
             voce = {"id": c.get("id"), "dipendente_id": dip, "anno": anno, "mese": mese,
                     "netto": round(netto, 2), "tipo": c.get("tipo_cedolino") or "ordinario"}

@@ -303,6 +303,14 @@ dipendente), `onomastici`.
   eseguito in produzione (`scadenze_scheduler.py`, `datetime.now()` naive letto
   come ora di Roma → primo giro "missed by 1:59:15", poi istanza free spenta),
   log scheduler con `%r` + traceback e `CancelledError` non più inghiottito.
+  **Dato da verificare**: in archivio ci sono 12 cedolini 2026 con
+  `tipo_cedolino=tredicesima` e `mese=7` (Parisi, Vespa, Carotenuto, Capezzuto,
+  Guarino, Pocci, Lesina, Murolo, Russo, Taiano, Iazzetta, A. Ceraldi), netti da
+  stipendio ordinario, e per quei dipendenti NON esiste il cedolino ordinario di
+  luglio 2026 → quasi certamente il parser LUL ha etichettato male luglio (o la
+  14ª). `mese_registro` li tratta per tipo (→ mese 13, "Tredicesima 2026"): se
+  sono luglio, vanno ricorretti in `cedolini` (tipo ordinario) e il registro si
+  sistema al giro successivo.
 - **[FIX 29/08/2026]** `backend/app/services/paghe_scheduler.py`: "🔄 Sincronizza
   da cedolini" e "🔗 Recupera bonifici storici" (pagina Cedolini & Bonifici) non
   erano mai stati eseguiti con successo in produzione — trovato controllando i

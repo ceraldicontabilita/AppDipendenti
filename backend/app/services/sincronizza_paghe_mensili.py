@@ -17,9 +17,12 @@ cedolino_id come prova più forte), quindi la seconda fonte era solo un
 doppione — eliminata ("un solo sistema per funzione").
 
 Include anche tredicesima e quattordicesima (mese 13 e 14, stessa convenzione
-dell'import Prima Nota): senza, i bonifici di dicembre/giugno uguali al netto
-della mensilità aggiuntiva restavano "bonifico senza busta" o finivano sommati
-allo stipendio ordinario del mese.
+dell'import Prima Nota, decisa da `competenza_pagamenti.mese_registro` per
+tipo e non per mese salvato): senza, i bonifici di dicembre/giugno uguali al
+netto della mensilità aggiuntiva restavano "bonifico senza busta" o finivano
+sommati allo stipendio ordinario del mese. Se due cedolini dello stesso tipo
+cadono sullo stesso (dipendente, anno, 13/14) vince quello che porta già il
+mese 13/14 esplicito.
 
 Gli acconti letti sulla busta (`cedolino.acconti.acconto_erogato`) vengono
 esposti come campo informativo a parte, non sommati dentro `acconti[]`:
@@ -34,9 +37,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from backend.app.database import Collections
-
-TIPI_ORDINARI = ("ordinario", "mensile", None)
-MENSILITA_AGGIUNTIVE = {"tredicesima": 13, "quattordicesima": 14}
+from backend.app.services.competenza_pagamenti import mese_registro
 
 
 def _num(v: Any) -> Optional[float]:
@@ -60,33 +61,25 @@ def _stato_e_saldo(busta: float, bonifico: float) -> Dict[str, Any]:
     return {"stato_pagamento": stato, "saldo": round(busta - bonifico, 2)}
 
 
-def _mese_registro(c: Dict[str, Any]) -> Optional[int]:
-    """Mese sotto cui il cedolino va nel registro: 1-12 per l'ordinario, 13/14
-    per le mensilità aggiuntive SOLO se il cedolino le porta già come mese 13/14
-    (un cedolino 'tredicesima' con mese=7 è un dato ambiguo del parser LUL e
-    resta fuori, come prima, invece di collidere con la busta di luglio)."""
-    tipo = c.get("tipo_cedolino")
-    try:
-        mese = int(c.get("mese"))
-    except (TypeError, ValueError):
-        return None
-    if tipo in TIPI_ORDINARI:
-        return mese if 1 <= mese <= 12 else None
-    if tipo in MENSILITA_AGGIUNTIVE:
-        return mese if mese == MENSILITA_AGGIUNTIVE[tipo] else None
-    return None
-
-
 async def sincronizza(db, anno: int = None) -> Dict[str, Any]:
     filtro_ced: Dict[str, Any] = {}
     if anno:
         filtro_ced["anno"] = anno
     cedolini = await db[Collections.PAYSLIPS].find(filtro_ced, {"_id": 0, "pdf_data": 0, "voci": 0}).to_list(5000)
-    voci = []
+    per_chiave: Dict[tuple, tuple] = {}
     for c in cedolini:
-        mese = _mese_registro(c)
-        if c.get("dipendente_id") and c.get("anno") and mese and _num(c.get("netto")) is not None:
-            voci.append((c, mese))
+        mese = mese_registro(c)
+        if not (c.get("dipendente_id") and c.get("anno") and mese and _num(c.get("netto")) is not None):
+            continue
+        try:
+            chiave = (c["dipendente_id"], int(c["anno"]), mese)
+        except (TypeError, ValueError):
+            continue
+        esplicito = str(c.get("mese")) == str(mese)
+        gia = per_chiave.get(chiave)
+        if gia is None or (esplicito and not gia[2]):
+            per_chiave[chiave] = (c, mese, esplicito)
+    voci = [(c, mese) for c, mese, _ in per_chiave.values()]
 
     # Prefetch di pagamenti_esiti, sommati una volta sola per (dipendente,
     # anno, mese) con la data dell'ultimo pagamento: zero query nel ciclo
@@ -133,9 +126,12 @@ async def sincronizza(db, anno: int = None) -> Dict[str, Any]:
                         "bonifico_data": agg["data"], "bonifico_da_esiti": True})
         elif esistente and esistente.get("bonifico_da_esiti"):
             # Il mese aveva pagamenti che il ponte ha poi ri-attribuito altrove:
-            # l'importo residuo veniva dagli esiti e va azzerato, non lasciato.
-            bonifico = 0.0
-            doc.update({"bonifico_importo": 0.0, "bonifico_ricevuto": False,
+            # l'importo residuo veniva dagli esiti e va azzerato, non lasciato —
+            # a meno che la riga non avesse PRIMA un importo dalla Prima Nota
+            # (erogato_atteso): quello va ripristinato, non cancellato.
+            bonifico = _num(esistente.get("erogato_atteso")) if esistente.get("bonifico_da_prima_nota") else None
+            bonifico = bonifico or 0.0
+            doc.update({"bonifico_importo": bonifico, "bonifico_ricevuto": bonifico > 0,
                         "bonifico_data": None, "bonifico_da_esiti": False})
         else:
             # Nessun pagamento reale: un importo scritto a mano o dalla Prima
