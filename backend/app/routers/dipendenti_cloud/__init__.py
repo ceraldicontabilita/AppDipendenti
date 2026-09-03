@@ -270,6 +270,46 @@ async def _aggiorna_bonifico_mese(db, dip_id: str, anno: int, mese: int):
     return await _ricalcola_stato_paga(db, dip_id, anno, mese)
 
 
+async def _esiti_esistenti(db, dip_ids=None):
+    """Una sola lettura di pagamenti_esiti (senza PDF) per gli ingressi
+    incrementali (CSV, Drive, PDF caricati): ritorna
+      - triplette (dipendente, data, importo) già in archivio, per non
+        registrare due volte lo stesso bonifico arrivato da due strade (CSV
+        banca + PDF della stessa contabile, Drive + upload manuale);
+      - chiavi già presenti, per riconoscere un CRO già importato dal CSV;
+      - i pagamenti 'presunti' dei dipendenti indicati, candidati partner di
+        un acconto/saldo che arriva adesso (regola importo_somma)."""
+    triplette, chiavi, presunti = set(), {}, []
+    async for e in db.pagamenti_esiti.find({}, {"_id": 0, "pdf_data": 0, "beneficiario": 0, "causale": 0}):
+        triplette.add((e.get("dipendente_id"), e.get("data"), _num_or_none(e.get("importo"))))
+        if e.get("key"):
+            chiavi[e["key"]] = (e.get("dipendente_id"), e.get("mese"), e.get("anno"))
+        if e.get("metodo") == "presunto" and (dip_ids is None or e.get("dipendente_id") in dip_ids):
+            presunti.append({"key": e.get("key"), "dipendente_id": e.get("dipendente_id"),
+                             "data": e.get("data"), "importo": e.get("importo"),
+                             "mese": e.get("mese"), "anno": e.get("anno")})
+    return {"triplette": triplette, "chiavi": chiavi, "presunti": presunti}
+
+
+async def _sposta_partner(db, esistenti, comp, affected):
+    """Il pagamento appena arrivato ha formato acconto+saldo con un pagamento
+    'presunto' già in archivio (comp['partner_key']): anche quello va sulla
+    stessa busta, e il mese che lo perde va ricalcolato."""
+    key = comp.get("partner_key")
+    if not key:
+        return
+    partner = next((p for p in esistenti["presunti"] if p["key"] == key), None)
+    if not partner:
+        return
+    await db.pagamenti_esiti.update_one(
+        {"key": key},
+        {"$set": {"mese": comp["mese"], "anno": comp["anno"], "metodo": "importo_somma",
+                  "cedolino_id": comp.get("cedolino_id")}})
+    if partner.get("mese") and partner.get("anno"):
+        affected.add((partner["dipendente_id"], partner["mese"], partner["anno"]))
+    affected.add((partner["dipendente_id"], comp["mese"], comp["anno"]))
+
+
 @router.post("/paghe/sincronizza-bonifici-storici")
 async def sincronizza_bonifici_storici():
     """Ponte (ripetibile, idempotente) tra la collezione `bonifici` — l'archivio
@@ -725,6 +765,11 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
     async for b in db.bonifici_da_associare.find({}, {"_id": 0, "pdf_data": 0}):
         if b.get("hash"):
             hash_esistenti.add(b["hash"])
+    # Stesso pagamento già arrivato da un'altra strada (CSV banca, PDF
+    # caricato a mano): riconosciuto per dipendente/data/importo, non solo
+    # per hash del file. E i 'presunti' già in archivio come partner
+    # acconto+saldo dei PDF di questo giro.
+    esistenti = await _esiti_esistenti(db)
 
     from backend.app.services.competenza_pagamenti import IndiceCedolini, risolvi_lotto
     indice_cedolini = await IndiceCedolini.carica(db)
@@ -768,9 +813,16 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
         data_iso = dati["data"].strftime("%Y-%m-%d") if dati["data"] else None
         comp = None
         if dip and dati["importo"] and data_iso and dati["causale_stipendio"]:
+            tripletta = (dip["id"], data_iso, _num_or_none(dati["importo"]))
+            if tripletta in esistenti["triplette"]:
+                duplicati += 1
+                await segna_visto()
+                continue
+            esistenti["triplette"].add(tripletta)
             comp = risolvi_lotto([{"dipendente_id": dip["id"], "data": data_iso, "importo": dati["importo"],
                                    "causale": dati["causale"], "mese_esplicito": dati["mese"],
-                                   "anno_esplicito": dati["anno"]}], indice_cedolini)[0]
+                                   "anno_esplicito": dati["anno"]}], indice_cedolini,
+                                 partner_esistenti=esistenti["presunti"])[0]
         if comp:
             key = f"drive:{h[:24]}"
             await db.pagamenti_esiti.update_one(
@@ -784,6 +836,10 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
                           "pdf_data": pdf_b64, "ha_pdf": True}},
                 upsert=True)
             affected.add((dip["id"], comp["mese"], comp["anno"]))
+            await _sposta_partner(db, esistenti, comp, affected)
+            if comp["metodo"] == "presunto":
+                esistenti["presunti"].append({"key": key, "dipendente_id": dip["id"], "data": data_iso,
+                                              "importo": dati["importo"], "mese": comp["mese"], "anno": comp["anno"]})
             importati += 1
         else:
             await db.bonifici_da_associare.insert_one({
@@ -1246,6 +1302,12 @@ async def _importa_documenti(pdf_items, errori_iniziali=None, forza=False):
     # successivo dello scheduler).
     from backend.app.services.competenza_pagamenti import IndiceCedolini, risolvi_lotto
     indice_cedolini = await IndiceCedolini.carica(get_db())
+    # Pagamenti già in archivio (una lettura per tutto il lotto): per non
+    # registrare due volte la stessa contabile arrivata anche dal CSV banca
+    # (stesso CRO o stessa tripletta dipendente/data/importo) e per formare
+    # acconto+saldo anche tra un PDF caricato oggi e uno caricato prima
+    # (trovati da una review automatica).
+    esiti_esistenti = await _esiti_esistenti(get_db())
 
     async def _processa_pdf(pdfbytes, origine):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -1319,9 +1381,17 @@ async def _importa_documenti(pdf_items, errori_iniziali=None, forza=False):
                                                  "importo": b["importo"], "mese": pm, "anno": pa,
                                                  "data": data, "saldo": saldo})
                         return ass, dac, bon, pres, dup, tfr, prestiti
+                    cro = (b.get("cro") or "").strip() or None
+                    # Stessa chiave del CSV banca (CRO nudo): la contabile PDF
+                    # dello stesso bonifico aggiorna quella riga, non ne crea
+                    # una seconda. Senza CRO: impronta del file.
+                    key = cro or f"pdf-caricato:{h[:24]}"
+                    tripletta = (dip["id"], b.get("data"), _num_or_none(b.get("importo")))
+                    gia_in_esiti = key in esiti_esistenti["chiavi"] or tripletta in esiti_esistenti["triplette"]
                     comp = risolvi_lotto([{"dipendente_id": dip["id"], "data": b.get("data"),
                                            "importo": b["importo"], "causale": b.get("causale")}],
-                                         indice_cedolini)[0]
+                                         indice_cedolini, partner_esistenti=esiti_esistenti["presunti"],
+                                         anno_minimo=min(ANNI_AMMESSI))[0]
                     mese, anno, fonte = (comp["mese"], comp["anno"], comp["metodo"]) if comp else (None, None, None)
                     if not mese or not anno:
                         dac.append({"nome": (b.get("causale") or "?")[:30], "origine": origine,
@@ -1330,10 +1400,10 @@ async def _importa_documenti(pdf_items, errori_iniziali=None, forza=False):
                         dac.append({"nome": (b.get("causale") or "?")[:30], "origine": origine,
                                     "motivo": f"anno {anno} non ammesso — bloccato (solo 2023-2026)"})
                     else:
-                        cro = b.get("cro")
                         gia = await get_db().documenti_importati.find_one({"chiave": f"cro:{cro}"}) if cro else None
-                        if gia:
-                            dup.append({"file": origine, "motivo": f"bonifico già importato (CRO {cro})"})
+                        if gia or (gia_in_esiti and not b.get("is_tfr")):
+                            dup.append({"file": origine, "motivo": f"bonifico già importato (CRO {cro})" if cro
+                                        else "bonifico già in archivio (stesso dipendente, data e importo)"})
                         elif b.get("is_tfr"):
                             # Anticipo TFR: fuori dal saldo stipendi
                             await get_db().paghe_mensili.update_one(
@@ -1353,17 +1423,25 @@ async def _importa_documenti(pdf_items, errori_iniziali=None, forza=False):
                             discrep = atteso if (atteso is not None and abs(atteso - b["importo"]) > 1) else None
                             # Pagamento reale -> pagamenti_esiti (motore unico), il
                             # bonifico del mese e lo stato vengono ricalcolati da lì.
-                            key = f"cro:{cro}" if cro else f"pdf-caricato:{h[:24]}"
                             await get_db().pagamenti_esiti.update_one(
                                 {"key": key},
-                                {"$set": {"key": key, "cro": cro or None, "dipendente_id": dip["id"],
+                                {"$set": {"key": key, "cro": cro, "dipendente_id": dip["id"],
                                           "data": b.get("data"), "importo": b["importo"],
                                           "causale": b.get("causale"),
                                           "beneficiario": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
                                           "mese": mese, "anno": anno, "origine": "pdf-caricato",
                                           "metodo": comp["metodo"], "cedolino_id": comp.get("cedolino_id"),
                                           "pdf_nome": origine}}, upsert=True)
-                            await _aggiorna_bonifico_mese(get_db(), dip["id"], anno, mese)
+                            mesi_da_ricalcolare = {(dip["id"], mese, anno)}
+                            await _sposta_partner(get_db(), esiti_esistenti, comp, mesi_da_ricalcolare)
+                            for d_id, m_r, a_r in mesi_da_ricalcolare:
+                                await _aggiorna_bonifico_mese(get_db(), d_id, a_r, m_r)
+                            esiti_esistenti["chiavi"][key] = (dip["id"], mese, anno)
+                            esiti_esistenti["triplette"].add(tripletta)
+                            if comp["metodo"] == "presunto":
+                                esiti_esistenti["presunti"].append({"key": key, "dipendente_id": dip["id"],
+                                                                    "data": b.get("data"), "importo": b["importo"],
+                                                                    "mese": mese, "anno": anno})
                             await _registra_doc(h, "bonifico", f"cro:{cro}" if cro else f"bon:{dip['id']}:{anno}:{mese}", origine)
                             bon.append({"dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
                                         "importo": b["importo"], "mese": mese, "anno": anno,
@@ -3306,13 +3384,12 @@ async def importa_pagamenti(file: UploadFile = File(...)):
         # arrivati cedolini nuovi la busta assegnata può cambiare, e il mese
         # che perde il pagamento va ricalcolato come quello che lo riceve —
         # altrimenti resterebbe "pagato" con un importo che non ha più
-        # (trovato da una review automatica).
-        chiavi = {p["key"] for p in pendenti}
-        vecchi: Dict[str, tuple] = {}
-        async for e in db.pagamenti_esiti.find({}, {"_id": 0, "key": 1, "dipendente_id": 1, "mese": 1, "anno": 1, "pdf_data": 0}):
-            if e.get("key") in chiavi:
-                vecchi[e["key"]] = (e.get("dipendente_id"), e.get("mese"), e.get("anno"))
-        for p, comp in zip(pendenti, risolvi_lotto(pendenti, indice)):
+        # (trovato da una review automatica). I 'presunti' già in archivio
+        # sono candidati partner acconto+saldo dei pagamenti di questo CSV.
+        esistenti = await _esiti_esistenti(db, {p["dipendente_id"] for p in pendenti})
+        chiavi_mie = {p["key"] for p in pendenti}
+        partner = [pe for pe in esistenti["presunti"] if pe["key"] not in chiavi_mie]
+        for p, comp in zip(pendenti, risolvi_lotto(pendenti, indice, partner_esistenti=partner)):
             if not comp:
                 continue
             await db.pagamenti_esiti.update_one(
@@ -3320,9 +3397,10 @@ async def importa_pagamenti(file: UploadFile = File(...)):
                 {"$set": {**p, "mese": comp["mese"], "anno": comp["anno"], "origine": "csv-banca",
                           "metodo": comp["metodo"], "cedolino_id": comp.get("cedolino_id")}}, upsert=True)
             affected.add((p["dipendente_id"], comp["mese"], comp["anno"]))
-            prima = vecchi.get(p["key"])
+            prima = esistenti["chiavi"].get(p["key"])
             if prima and prima != (p["dipendente_id"], comp["mese"], comp["anno"]) and prima[1] and prima[2]:
                 affected.add(prima)
+            await _sposta_partner(db, esistenti, comp, affected)
             importati += 1
     for dip_id, mese, anno in affected:
         await _aggiorna_bonifico_mese(db, dip_id, anno, mese)
@@ -3506,11 +3584,12 @@ async def _calcola_associazioni_bonifici(db, anno: Optional[int] = None, mese: O
         if bon <= 0:
             qualita = None
         elif esiti:
-            if all(e["metodo"] == "presunto" for e in esiti):
-                # Messi su questo mese SOLO per data (nessun cedolino da
-                # confrontare al momento dell'import): anche se l'importo
-                # combacia con la busta del registro resta "da controllare" —
-                # la conferma la dà una persona (trovato da una review automatica).
+            if any(e["metodo"] == "presunto" for e in esiti):
+                # Anche UNO solo dei pagamenti messo su questo mese SOLO per
+                # data (nessun cedolino da confrontare al momento dell'import)
+                # basta a tenere la riga "da controllare", anche se la somma
+                # combacia con la busta del registro — la conferma la dà una
+                # persona (trovato da una review automatica, in due giri).
                 qualita = "presunto"
             elif len(esiti) == 1 and busta > 0 and abs(esiti[0]["importo"] - busta) <= 0.5:
                 qualita = "esatto"          # un solo bonifico che combacia con la busta

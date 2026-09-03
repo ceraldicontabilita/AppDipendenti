@@ -228,10 +228,35 @@ def _giorni(data: str) -> Optional[int]:
         return None
 
 
-def risolvi_lotto(pagamenti: List[Dict[str, Any]], indice: IndiceCedolini) -> List[Optional[Dict[str, Any]]]:
+def _coppia(indice: IndiceCedolini, dip: str, a: Dict[str, Any], b: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Cedolino il cui netto = importo(a) + importo(b), nella finestra del più
+    recente dei due; None se i due pagamenti non formano una coppia."""
+    ga, gb = _giorni(a.get("data")), _giorni(b.get("data"))
+    if ga is None or gb is None or abs(gb - ga) > GIORNI_COPPIA:
+        return None
+    somma = (_num(a.get("importo")) or 0) + (_num(b.get("importo")) or 0)
+    dm = anno_mese_da_data(a["data"] if ga >= gb else b["data"])
+    cands = indice.per_importo(dip, somma, dm[0], dm[1]) if dm else []
+    return cands[0] if cands else None
+
+
+def risolvi_lotto(pagamenti: List[Dict[str, Any]], indice: IndiceCedolini,
+                  partner_esistenti: Optional[List[Dict[str, Any]]] = None,
+                  anno_minimo: Optional[int] = None) -> List[Optional[Dict[str, Any]]]:
     """Applica tutte le regole a un lotto di pagamenti (stessa lista in
     ingresso e in uscita, posizione per posizione). None solo se il
-    pagamento non ha nemmeno una data leggibile."""
+    pagamento non ha nemmeno una data leggibile.
+
+    partner_esistenti: pagamenti GIÀ in archivio con metodo 'presunto'
+    ({key, dipendente_id, data, importo}), candidati a formare acconto+saldo
+    con quelli del lotto — così un acconto caricato oggi e il saldo caricato
+    domani (o in un altro CSV/PDF) si riconoscono lo stesso. Quando succede
+    l'esito del pagamento nuovo porta `partner_key`: chi chiama deve spostare
+    anche il partner sulla stessa busta (trovato da una review automatica).
+
+    anno_minimo: se il ripiego "mese precedente" scenderebbe sotto questo
+    anno, resta sul mese del pagamento (l'importatore di PDF caricati a mano
+    ammette solo dal 2023: gennaio 2023 non deve diventare dicembre 2022)."""
     esiti: List[Optional[Dict[str, Any]]] = [risolvi_competenza(p, indice) for p in pagamenti]
 
     # Regola 4: acconto + saldo. Tra i pagamenti ancora senza prova dello
@@ -243,6 +268,11 @@ def risolvi_lotto(pagamenti: List[Dict[str, Any]], indice: IndiceCedolini) -> Li
         p = pagamenti[i]
         if p.get("dipendente_id") and _num(p.get("importo")) and _giorni(p.get("data")) is not None:
             per_dip.setdefault(p["dipendente_id"], []).append(i)
+    partner_per_dip: Dict[str, List[Dict[str, Any]]] = {}
+    for pe in partner_esistenti or []:
+        if pe.get("key") and pe.get("dipendente_id") and _num(pe.get("importo")) and _giorni(pe.get("data")) is not None:
+            partner_per_dip.setdefault(pe["dipendente_id"], []).append(pe)
+    partner_usati = set()
     for dip, idxs in per_dip.items():
         idxs.sort(key=lambda i: _giorni(pagamenti[i]["data"]))
         for a_pos, i in enumerate(idxs):
@@ -251,16 +281,21 @@ def risolvi_lotto(pagamenti: List[Dict[str, Any]], indice: IndiceCedolini) -> Li
             for j in idxs[a_pos + 1:]:
                 if esiti[j] is not None:
                     continue
-                gi, gj = _giorni(pagamenti[i]["data"]), _giorni(pagamenti[j]["data"])
-                if gj - gi > GIORNI_COPPIA:
-                    break
-                somma = _num(pagamenti[i]["importo"]) + _num(pagamenti[j]["importo"])
-                dm = anno_mese_da_data(pagamenti[j]["data"])
-                cands = indice.per_importo(dip, somma, dm[0], dm[1]) if dm else []
-                if cands:
-                    c = cands[0]
+                c = _coppia(indice, dip, pagamenti[i], pagamenti[j])
+                if c:
                     esiti[i] = _esito(c["anno"], c["mese"], "importo_somma", c)
                     esiti[j] = _esito(c["anno"], c["mese"], "importo_somma", c)
+                    break
+            if esiti[i] is not None:
+                continue
+            for pe in partner_per_dip.get(dip, []):
+                if pe["key"] in partner_usati:
+                    continue
+                c = _coppia(indice, dip, pagamenti[i], pe)
+                if c:
+                    esiti[i] = _esito(c["anno"], c["mese"], "importo_somma", c)
+                    esiti[i]["partner_key"] = pe["key"]
+                    partner_usati.add(pe["key"])
                     break
 
     # Regola 5: ripiego sul mese precedente al pagamento.
@@ -269,5 +304,7 @@ def risolvi_lotto(pagamenti: List[Dict[str, Any]], indice: IndiceCedolini) -> Li
             dm = anno_mese_da_data(pagamenti[i].get("data"))
             if dm:
                 a, m = mese_precedente(dm[0], dm[1])
+                if anno_minimo is not None and a < anno_minimo:
+                    a, m = dm
                 esiti[i] = _esito(a, m, "presunto")
     return esiti
