@@ -3271,9 +3271,32 @@ async def importa_pagamenti(file: UploadFile = File(...)):
     import io
     import csv as _csv
     raw = await file.read()
-    text = raw.decode("utf-8", errors="ignore")
-    reader = _csv.reader(io.StringIO(text), delimiter=";")
-    righe = list(reader)
+    if (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
+        # Estratto conto in Excel (es. il "Movimenti bancari" tenuto dal
+        # titolare: Banca; Conto; Data contabile; Data valuta; Anno; Uscita;
+        # Entrata; Nome dipendente; Numero operazione; Descrizione; TRN):
+        # stesse colonne logiche del CSV esiti, lette per nome. Le celle
+        # vengono rese come testo nel formato che il parser CSV già capisce.
+        import openpyxl
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        except Exception as e:
+            raise HTTPException(400, f"Excel non leggibile: {e}")
+        ws = wb.active
+
+        def cella(v):
+            if v is None:
+                return ""
+            if isinstance(v, datetime):
+                return v.strftime("%d/%m/%Y")
+            if isinstance(v, (int, float)):
+                return f"{float(v):.2f}".replace(".", ",")
+            return str(v).replace("?", "").strip()
+        righe = [[cella(v) for v in r] for r in ws.iter_rows(values_only=True)]
+    else:
+        text = raw.decode("utf-8", errors="ignore")
+        reader = _csv.reader(io.StringIO(text), delimiter=";")
+        righe = list(reader)
     if not righe:
         raise HTTPException(400, "CSV vuoto")
     db = get_db()
@@ -3316,13 +3339,13 @@ async def importa_pagamenti(file: UploadFile = File(...)):
 
     def col(*names):
         return next((i for i, h in enumerate(hdr) if any(n in h for n in names)), None)
-    i_ben = col("beneficiario")
+    i_ben = col("beneficiario", "nome dipendente")
     if i_ben is not None:
         formato = "esiti"
-        i_data = col("esecuzione", "data") if col("esecuzione", "data") is not None else 0
-        i_imp = col("importo") if col("importo") is not None else 3
+        i_data = col("esecuzione", "data contabile", "data") if col("esecuzione", "data contabile", "data") is not None else 0
+        i_imp = col("importo", "uscita") if col("importo", "uscita") is not None else 3
         i_caus = col("causale", "descrizione")
-        i_cro = col("cro")
+        i_cro = col("cro", "numero operazione", "trn")
         i_cat = None
     else:
         formato = "andamento"
@@ -3367,7 +3390,11 @@ async def importa_pagamenti(file: UploadFile = File(...)):
             beneficiario = (r[i_ben] if i_ben is not None and i_ben < len(r) else "") or ""
         if importo < 5:
             continue
-        d = trova_dip(beneficiario if formato == "esiti" else causale)
+        # Beneficiario, altrimenti la descrizione (nell'Excel del titolare le
+        # righe più vecchie hanno il nome solo lì).
+        d = trova_dip(beneficiario) if beneficiario else None
+        if not d and causale:
+            d = trova_dip(causale if formato == "andamento" else favore(causale))
         if not d:
             non_trovati.append(beneficiario or favore(causale))
             continue
