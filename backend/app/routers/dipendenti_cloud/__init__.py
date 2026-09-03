@@ -259,17 +259,25 @@ async def _aggiorna_bonifico_mese(db, dip_id: str, anno: int, mese: int):
         return await _ricalcola_stato_paga(db, dip_id, anno, mese)
     if n == 0 and riga is None:
         return None
+    riga = riga or {}
     bonifico = round(tot, 2)
-    if n == 0 and riga.get("bonifico_da_prima_nota"):
-        # La riga era nata dalla Prima Nota, poi aveva ricevuto un pagamento
-        # reale ora ri-attribuito altrove: si torna all'importo della Prima
-        # Nota (erogato_atteso), non a zero (trovato da una review automatica).
-        bonifico = round(float(riga.get("erogato_atteso") or 0), 2)
+    upd = {"dipendente_id": dip_id, "anno": anno, "mese": mese,
+           "bonifico_importo": bonifico, "bonifico_ricevuto": bonifico > 0,
+           "bonifico_da_esiti": n > 0, "updated_at": now_iso()}
+    if riga.get("bonifico_da_prima_nota"):
+        if n > 0 and not riga.get("bonifico_da_esiti") and riga.get("erogato_atteso") is None:
+            # Primo pagamento reale su una riga della Prima Nota: si conserva
+            # l'importo della Prima Nota prima di sovrascriverlo (l'import
+            # Prima Nota non lo salva a parte), per poterlo ripristinare.
+            upd["erogato_atteso"] = float(riga.get("bonifico_importo") or 0)
+        if n == 0:
+            # La riga era nata dalla Prima Nota, poi aveva ricevuto un pagamento
+            # reale ora ri-attribuito altrove: si torna all'importo della Prima
+            # Nota, non a zero (trovato da una review automatica).
+            bonifico = round(float(riga.get("erogato_atteso") or 0), 2)
+            upd.update({"bonifico_importo": bonifico, "bonifico_ricevuto": bonifico > 0})
     await db.paghe_mensili.update_one(
-        {"dipendente_id": dip_id, "anno": anno, "mese": mese},
-        {"$set": {"dipendente_id": dip_id, "anno": anno, "mese": mese,
-                  "bonifico_importo": bonifico, "bonifico_ricevuto": bonifico > 0,
-                  "bonifico_da_esiti": n > 0, "updated_at": now_iso()}}, upsert=True)
+        {"dipendente_id": dip_id, "anno": anno, "mese": mese}, {"$set": upd}, upsert=True)
     return await _ricalcola_stato_paga(db, dip_id, anno, mese)
 
 
@@ -308,6 +316,10 @@ async def _sposta_partner(db, esistenti, comp, affected):
         {"key": key},
         {"$set": {"mese": comp["mese"], "anno": comp["anno"], "metodo": "importo_somma",
                   "cedolino_id": comp.get("cedolino_id")}})
+    # Non è più 'presunto': via dai partner disponibili, altrimenti il PDF
+    # successivo dello stesso giro (ogni PDF è un lotto a sé) potrebbe
+    # accoppiarsi di nuovo con lui (trovato da una review automatica).
+    esistenti["presunti"][:] = [p for p in esistenti["presunti"] if p["key"] != key]
     if partner.get("mese") and partner.get("anno"):
         affected.add((partner["dipendente_id"], partner["mese"], partner["anno"]))
     affected.add((partner["dipendente_id"], comp["mese"], comp["anno"]))

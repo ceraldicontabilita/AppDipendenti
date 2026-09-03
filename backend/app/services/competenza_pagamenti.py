@@ -149,8 +149,14 @@ def competenza_da_causale(causale: Optional[str], data: Optional[str] = None) ->
     return None
 
 
+_RE_DATA_COMPLETA = re.compile(r"\b\d{1,2}[-/.]\d{1,2}[-/.](?:20)?\d{2}\b")
+
+
 def _anno_in_testo(c: str) -> Optional[int]:
-    m = _RE_ANNO.search(c)
+    """Anno dichiarato nel testo, IGNORANDO le date complete (la data di
+    esecuzione nel nome file della banca, "05-01-2026", non è l'anno della
+    competenza: una "tredicesima" pagata il 05/01/2026 è quella del 2025)."""
+    m = _RE_ANNO.search(_RE_DATA_COMPLETA.sub(" ", c))
     return int(m.group(1)) if m else None
 
 

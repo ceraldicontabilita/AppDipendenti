@@ -124,6 +124,12 @@ async def sincronizza(db, anno: int = None) -> Dict[str, Any]:
             bonifico = agg["tot"]
             doc.update({"bonifico_importo": bonifico, "bonifico_ricevuto": bonifico > 0,
                         "bonifico_data": agg["data"], "bonifico_da_esiti": True})
+            if (esistente and esistente.get("bonifico_da_prima_nota") and not esistente.get("bonifico_da_esiti")
+                    and esistente.get("erogato_atteso") is None):
+                # Primo pagamento reale su una riga della Prima Nota: se ne
+                # conserva l'importo (l'import Prima Nota non lo salva a parte)
+                # per il ripristino qui sotto, se gli esiti se ne andranno.
+                doc["erogato_atteso"] = _num(esistente.get("bonifico_importo")) or 0.0
         elif esistente and esistente.get("bonifico_da_esiti"):
             # Il mese aveva pagamenti che il ponte ha poi ri-attribuito altrove:
             # l'importo residuo veniva dagli esiti e va azzerato, non lasciato —
