@@ -3169,9 +3169,14 @@ async def importa_prima_nota(file: UploadFile = File(...)):
             continue
         existing = await db.paghe_mensili.find_one(
             {"dipendente_id": d["id"], "anno": anno, "mese": mese}, {"importo_busta": 1}) or {}
+        # erogato_atteso = copia dell'importo Prima Nota: se un pagamento reale
+        # (pagamenti_esiti) sovrascrive bonifico_importo e poi viene
+        # ri-attribuito altrove, _aggiorna_bonifico_mese ripristina questo
+        # valore invece di zero — vale anche se il pagamento reale c'era già
+        # prima di questo import (trovato da una review automatica).
         set_doc = {"dipendente_id": d["id"], "anno": anno, "mese": mese,
                    "bonifico_importo": erog, "bonifico_ricevuto": erog > 0,
-                   "bonifico_da_prima_nota": True, "updated_at": now_iso()}
+                   "bonifico_da_prima_nota": True, "erogato_atteso": erog, "updated_at": now_iso()}
         busta_app = existing.get("importo_busta")
         if (busta_app in (None, 0, "")) and netto > 0:
             set_doc["importo_busta"] = netto
@@ -3545,6 +3550,12 @@ async def importa_pagamenti(file: UploadFile = File(...)):
         pendenti.append({"key": key, "cro": cro, "dipendente_id": d["id"],
                          "data": data_dt.strftime("%Y-%m-%d"), "importo": importo,
                          "causale": causale, "beneficiario": beneficiario})
+
+    # Stessa transazione due volte nel file (stesso CRO/chiave): una sola
+    # copia entra nel lotto, altrimenti due copie da 500 verrebbero lette come
+    # "acconto+saldo = 1000" (trovato da una review automatica).
+    visti_key = set()
+    pendenti = [p for p in pendenti if not (p["key"] in visti_key or visti_key.add(p["key"]))]
 
     importati, affected = 0, set()
     if pendenti:

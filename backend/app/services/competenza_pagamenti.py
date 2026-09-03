@@ -123,6 +123,9 @@ def competenza_da_causale(causale: Optional[str], data: Optional[str] = None) ->
     m = _RE_MESE_NUM.search(c)
     if m:
         return int(m.group(2)), int(m.group(1))
+    m = _RE_MESE_SPAZIO.search(c)
+    if m:
+        return int(m.group(2)), int(m.group(1))
     m = _RE_MESE_ABBREV.search(c)
     if m:
         anno = int(m.group(2))
@@ -149,7 +152,11 @@ def competenza_da_causale(causale: Optional[str], data: Optional[str] = None) ->
     return None
 
 
-_RE_DATA_COMPLETA = re.compile(r"\b\d{1,2}[-/.]\d{1,2}[-/.](?:20)?\d{2}\b")
+_RE_DATA_COMPLETA = re.compile(r"\b\d{1,2}[-/.]\d{1,2}[-/.](?:20)?\d{2}\b|\b20\d{2}-\d{2}-\d{2}\b")
+# "stip 10 2024", "salario 9 2025": mese e anno separati da spazio, accettati
+# SOLO dopo una parola da stipendio (altrimenti "acconto 2 2024" potrebbe
+# essere "2 rate"...). Causale reale dell'archivio: "Russo stip 10 2024".
+_RE_MESE_SPAZIO = re.compile(r"\b(?:stip\w*|salari\w*|mensilit\w*|acconto|saldo)\.?\s+(0?[1-9]|1[0-2])\s+(20\d{2})\b")
 
 
 def _anno_in_testo(c: str) -> Optional[int]:
