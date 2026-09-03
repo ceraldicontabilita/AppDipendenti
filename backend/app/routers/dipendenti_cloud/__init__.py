@@ -581,6 +581,61 @@ async def associa_bonifico(bonifico_id: str, data: Dict[str, Any] = Body(...)):
     return {"ok": True, "bonifico": nuovo}
 
 
+@router.post("/bonifici-da-associare/riprova-automatico")
+async def riprova_aggancio_coda():
+    """Rilegge i PDF fermi nella coda "Bonifici da associare" con il lettore
+    attuale e aggancia da solo quelli che ora risultano univoci ed espliciti
+    (dipendente citato nel PDF, importo, data, causale da stipendio) — stessa
+    decisione dell'import da Drive (`_aggancia_pdf_bonifico`), stesso motore
+    unico per il mese. Serve perché la coda si era riempita per difetti del
+    lettore corretti il 03/09/2026 (importo "IMPORTO EUR 1.800,00" non letto,
+    causali "salario"/"acconto" non riconosciute): 119 PDF, 122 mila euro,
+    fermi lì da mesi. Le distinte cumulative "beneficiari diversi" restano in
+    coda: nessuno viene indovinato. Chi era già in archivio per un'altra via
+    (stesso dipendente/data/importo) esce dalla coda come duplicato."""
+    from backend.app.services.competenza_pagamenti import IndiceCedolini
+    db = get_db()
+    ctx = {"indici": await _indici_dipendenti(db), "esistenti": await _esiti_esistenti(db),
+           "indice_cedolini": await IndiceCedolini.carica(db), "affected": set()}
+    in_coda = await db.bonifici_da_associare.find({"stato": "da_associare"}, {"_id": 0}).to_list(2000)
+    agganciati, duplicati, ancora_in_coda, senza_pdf = 0, 0, 0, 0
+    for b in in_coda:
+        if not b.get("pdf_data"):
+            senza_pdf += 1
+            continue
+        raw = base64.b64decode(b["pdf_data"])
+        h = b.get("hash") or hashlib.sha256(raw).hexdigest()
+        nome_file = b.get("pdf_filename") or ""
+        esito, comp, dip, dati = await _aggancia_pdf_bonifico(
+            db, ctx, _testo_pdf(raw), nome_file, h, b["pdf_data"], f"drive:{h[:24]}")
+        if esito == "importato":
+            agganciati += 1
+            await db.bonifici_da_associare.update_one(
+                {"id": b["id"]},
+                {"$set": {"stato": "associato", "associato_a": dip["id"],
+                          "associato_competenza": "%s-%02d" % (comp["anno"], comp["mese"]),
+                          "associato_il": now_iso(), "associato_da": "riprova-automatico",
+                          "metodo": comp["metodo"]}})
+        elif esito == "duplicato":
+            duplicati += 1
+            await db.bonifici_da_associare.update_one(
+                {"id": b["id"]}, {"$set": {"stato": "duplicato", "associato_il": now_iso(),
+                                          "associato_da": "riprova-automatico"}})
+        else:
+            ancora_in_coda += 1
+            # Salva quel che il lettore ora capisce (importo/data/causale), così
+            # la coda mostra dati aggiornati anche per chi resta da assegnare.
+            agg = {k: v for k, v in {"importo": dati["importo"],
+                                     "data": dati["data"].strftime("%Y-%m-%d") if dati["data"] else None,
+                                     "causale": dati["causale"]}.items() if v}
+            if agg:
+                await db.bonifici_da_associare.update_one({"id": b["id"]}, {"$set": agg})
+    for dip_id, mese, anno in ctx["affected"]:
+        await _aggiorna_bonifico_mese(db, dip_id, anno, mese)
+    return {"esaminati": len(in_coda), "agganciati": agganciati, "duplicati": duplicati,
+            "ancora_in_coda": ancora_in_coda, "senza_pdf": senza_pdf, "mesi_aggiornati": len(ctx["affected"])}
+
+
 @router.post("/bonifici-da-associare/{bonifico_id}/ignora")
 async def ignora_bonifico_da_associare(bonifico_id: str):
     """Non e' un pagamento a un dipendente (es. lotto di fornitori): esce
@@ -600,12 +655,106 @@ _MOVIMENTO_NON_STIPENDIO_RE = re.compile(
     re.IGNORECASE)
 
 
+# Righe dell'intestazione che parlano dell'ORDINANTE o della banca, non del
+# beneficiario: "CERALDI GROUP S.R.L." (l'azienda stessa, su ogni contabile) e
+# "BANCO BPM S.P.A."/"BNL S.P.A." nella distinta. Senza toglierle, il filtro
+# "non è uno stipendio" scattava su OGNI PDF per via di quel S.R.L./S.P.A.:
+# verificato il 03/09/2026 sui PDF reali della coda, l'import da Drive scartava
+# tutto come "non stipendio" e non importava più nulla.
+_INTESTAZIONE_ORDINANTE_RE = re.compile(
+    r"^.*(CERALDI\s+GROUP|BANCO\s+BPM|\bBNL\b|BANCA\s+NAZIONALE\s+DEL\s+LAVORO|^\s*Banca\s*:|Ragione\s+sociale\s*:|Firmatari\s*:).*$",
+    re.IGNORECASE | re.MULTILINE)
+
+
 def _e_movimento_non_stipendio(text: str) -> bool:
     """La cartella Drive dei bonifici (estratto conto aziendale) contiene di tutto:
     mutui, fornitori, tasse, versamenti contanti, utenze — non solo stipendi. Questi
     movimenti non vanno importati né messi in coda di revisione: inquinerebbero
-    "Bonifici da associare" con roba che non è mai stata uno stipendio."""
-    return bool(_MOVIMENTO_NON_STIPENDIO_RE.search(text or ""))
+    "Bonifici da associare" con roba che non è mai stata uno stipendio.
+    Le righe dell'intestazione (ordinante, banca) non contano: vedi sopra."""
+    return bool(_MOVIMENTO_NON_STIPENDIO_RE.search(_INTESTAZIONE_ORDINANTE_RE.sub("", text or "")))
+
+
+def _testo_pdf(raw: bytes, pagine: int = 3) -> str:
+    try:
+        import pdfplumber
+        testo = ""
+        with pdfplumber.open(io.BytesIO(raw)) as pdf:
+            for p in pdf.pages[:pagine]:
+                testo += (p.extract_text() or "") + "\n"
+        return testo
+    except Exception:
+        return ""
+
+
+def _trova_dipendente_in_testo(indici, testo, filename):
+    """Dipendente citato nel testo/nome file, SOLO se univoco (stesso indice
+    nome/cognome degli altri importer). Se compare più di un nome completo
+    (layout con più beneficiari) è ambiguo: meglio la coda manuale che la
+    persona sbagliata su un documento che vale come prova di pagamento."""
+    by_nome, by_cogn = indici["nome"], indici["cogn"]
+    # Righe dell'ordinante fuori dal confronto: la distinta è FIRMATA dal
+    # titolare ("Firmatari: VINCENZO CERALDI"), che è anche in anagrafica —
+    # ogni distinta risultava "due nomi, ambiguo" e finiva in coda (verificato
+    # sui PDF reali della coda, 03/09/2026).
+    testo = _INTESTAZIONE_ORDINANTE_RE.sub("", testo or "")
+    haystack = re.sub(r"\s+", " ", str(f"{testo} {filename}" or "").strip()).lower()
+    per_nome = {}
+    for nome_n, d in by_nome.items():
+        if nome_n in haystack:
+            per_nome[d["id"]] = d
+    if len(per_nome) == 1:
+        return next(iter(per_nome.values()))
+    if len(per_nome) > 1:
+        return None
+    candidati = {}
+    for cogn, lst in by_cogn.items():
+        if cogn in haystack and len(lst) == 1:
+            candidati[lst[0]["id"]] = lst[0]
+    return next(iter(candidati.values())) if len(candidati) == 1 else None
+
+
+async def _aggancia_pdf_bonifico(db, ctx, testo, nome_file, h, pdf_b64, key):
+    """Decisione unica per un PDF di bonifico (da Drive o dalla coda "Bonifici
+    da associare" quando si riprova): legge importo/data/causale, trova il
+    dipendente, e SOLO se tutto è univoco ed esplicito lo registra in
+    pagamenti_esiti col mese deciso dal motore unico. Ritorna
+    (esito, comp, dip, dati) con esito in: importato | duplicato | coda.
+    ctx: indici dipendenti, esistenti (triplette/chiavi/presunti),
+    indice_cedolini, affected (mesi da ricalcolare)."""
+    from backend.app.services.competenza_pagamenti import risolvi_lotto
+    dati = _parse_bonifico_pdf(testo, nome_file)
+    dip = _trova_dipendente_in_testo(ctx["indici"], testo, nome_file) if dati["n_beneficiari"] == 1 else None
+    data_iso = dati["data"].strftime("%Y-%m-%d") if dati["data"] else None
+    if not (dip and dati["importo"] and data_iso and dati["causale_stipendio"]):
+        return "coda", None, dip, dati
+    esistenti = ctx["esistenti"]
+    tripletta = (dip["id"], data_iso, _num_or_none(dati["importo"]))
+    if key not in esistenti["chiavi"] and tripletta in esistenti["triplette"]:
+        return "duplicato", None, dip, dati
+    comp = risolvi_lotto([{"dipendente_id": dip["id"], "data": data_iso, "importo": dati["importo"],
+                           "causale": dati["causale"], "mese_esplicito": dati["mese"],
+                           "anno_esplicito": dati["anno"]}], ctx["indice_cedolini"],
+                         partner_esistenti=esistenti["presunti"])[0]
+    if not comp:
+        return "coda", None, dip, dati
+    await db.pagamenti_esiti.update_one(
+        {"key": key},
+        {"$set": {"key": key, "hash": h, "cro": None, "dipendente_id": dip["id"],
+                  "data": data_iso, "importo": dati["importo"], "causale": dati["causale"],
+                  "beneficiario": dip.get("nome_completo") or f"{dip.get('cognome','')} {dip.get('nome','')}".strip(),
+                  "mese": comp["mese"], "anno": comp["anno"], "origine": "drive-pdf",
+                  "metodo": comp["metodo"], "cedolino_id": comp.get("cedolino_id"),
+                  "pdf_data": pdf_b64, "ha_pdf": True}},
+        upsert=True)
+    ctx["affected"].add((dip["id"], comp["mese"], comp["anno"]))
+    await _sposta_partner(db, esistenti, comp, ctx["affected"])
+    esistenti["triplette"].add(tripletta)
+    esistenti["chiavi"][key] = (dip["id"], comp["mese"], comp["anno"])
+    if comp["metodo"] == "presunto":
+        esistenti["presunti"].append({"key": key, "dipendente_id": dip["id"], "data": data_iso,
+                                      "importo": dati["importo"], "mese": comp["mese"], "anno": comp["anno"]})
+    return "importato", comp, dip, dati
 
 
 def _parse_bonifico_pdf(text: str, filename: str) -> Dict[str, Any]:
@@ -619,6 +768,10 @@ def _parse_bonifico_pdf(text: str, filename: str) -> Dict[str, Any]:
     m = re.search(r"n\.?\s*stipendi\s*:?\s*(\d+)", t, re.IGNORECASE)
     if m:
         n_benef = int(m.group(1))
+    # Contabile "ADDEBITO RIEPILOGATIVO" a favore di "BENEFICIARI DIVERSI": è la
+    # somma di più bonifici, il PDF non nomina nessuno -> sempre coda manuale.
+    if re.search(r"beneficiari\s+diversi", t, re.IGNORECASE):
+        n_benef = max(n_benef, 2)
 
     importo = None
     m = re.search(r"tot\.?\s*distinta\s*:?\s*([\d.,]+)\s*eur", t, re.IGNORECASE)
@@ -632,6 +785,19 @@ def _parse_bonifico_pdf(text: str, filename: str) -> Dict[str, Any]:
         m = re.search(r"importo\s*:?\s*([\d.,]+)\s*(?:eur|€)", t, re.IGNORECASE)
         if m:
             importo = m.group(1)
+    if importo is None:
+        # Contabile "RICEVUTA PER ORDINANTE" (BPM): "IMPORTO EUR 1.800,00" — la
+        # valuta PRIMA del numero. Era il caso di tutte le contabili singole
+        # finite in coda con importo vuoto (verificato sui PDF reali, 03/09/2026).
+        m = re.search(r"importo\s+(?:eur|€)\s*([\d.]+,\d{2})", t, re.IGNORECASE)
+        if m:
+            importo = m.group(1)
+    if importo is None:
+        # Nome file della banca: "..._EUR1800_00.pdf", "..._1000,00.pdf", "..._500,00_2.pdf".
+        m = (re.search(r"eur\s*(\d+)[_.,](\d{2})\b", filename or "", re.IGNORECASE)
+             or re.search(r"_(\d{1,3}(?:\.\d{3})*)[,_](\d{2})(?:_\d+)?\.pdf$", filename or "", re.IGNORECASE))
+        if m:
+            importo = f"{m.group(1)},{m.group(2)}"
     importo_val = None
     if importo:
         try:
@@ -652,9 +818,15 @@ def _parse_bonifico_pdf(text: str, filename: str) -> Dict[str, Any]:
             data_val = None
 
     causale = None
-    m = re.search(r"causale\s*:?\s*\n?\s*([^\n]{4,80})", t, re.IGNORECASE)
-    if m:
-        causale = m.group(1).strip()
+    # Nella distinta la parola "causale" compare prima nell'intestazione della
+    # tabella ("Descrizione causale Importo"): si scarta quella e si prende la
+    # prima causale vera. Nella contabile singola "CAUSALE Taiano stipendio".
+    for m in re.finditer(r"causale\s*:?\s*\n?\s*([^\n]{4,80})", t, re.IGNORECASE):
+        cand = m.group(1).strip()
+        if re.match(r"^(importo|aggiuntiva)\b", cand, re.IGNORECASE):
+            continue
+        causale = cand
+        break
 
     # Mese di competenza SOLO se dichiarato nel nome file/causale ("bonifico
     # marzo…", "stip giugno 2022", "1/2026"). Se non c'è, resta None: lo
@@ -678,8 +850,16 @@ def _parse_bonifico_pdf(text: str, filename: str) -> Dict[str, Any]:
     # segnale sempre. Si guarda solo il titolo del documento ("Distinta
     # Stipendi", vero per costruzione su quel template) o la causale estratta
     # per l'altro formato.
+    # Parole che nelle causali reali del titolare vogliono dire "stipendio":
+    # "stipendio", "stip.", "salario", "acconto"/"saldo" (le due tranche con cui
+    # paga ogni mese), "mensilità", 13ª/14ª. Oppure il nome file dato a mano
+    # "bonifico <nome> <mese>" — bonifico + dipendente + mese esplicito.
+    _RE_STIPENDIO = r"stipend|\bstip\b|\bstip\.|salari|acconto|\bacc\.?\b|\bsaldo\b|mensilit|tredicesim|quattordicesim|1[34]\s*esim"
+    nome_file_esplicito = bool(re.match(r"^\s*bonifico\b", filename or "", re.IGNORECASE)) and mese_comp is not None
     causale_stipendio = (bool(re.search(r"distinta\s+stipend", t, re.IGNORECASE))
-                         or bool(re.search(r"stipend|\bstip\b|\bstip\.", causale or "", re.IGNORECASE)))
+                         or bool(re.search(_RE_STIPENDIO, causale or "", re.IGNORECASE))
+                         or bool(re.search(_RE_STIPENDIO, filename or "", re.IGNORECASE))
+                         or nome_file_esplicito)
 
     return {"importo": importo_val, "data": data_val, "causale": causale or filename,
             "mese": mese_comp, "anno": anno_comp, "n_beneficiari": n_benef,
@@ -729,30 +909,6 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
     id_per_nome = {f["id"]: f.get("name") for f in lotto}
 
     indici = await _indici_dipendenti(db)
-    by_nome, by_cogn = indici["nome"], indici["cogn"]
-
-    def norm(s):
-        return re.sub(r"\s+", " ", str(s or "").strip()).lower()
-
-    def trova_dipendente(testo, filename):
-        haystack = norm(f"{testo} {filename}")
-        # Nomi completi citati nel testo: se ne compare più di uno (es. layout
-        # con più beneficiari che il marcatore "n. stipendi" non ha intercettato),
-        # è ambiguo — meglio la coda manuale che indovinare la persona sbagliata
-        # su un documento che vale come prova di pagamento.
-        per_nome = {}
-        for nome_n, d in by_nome.items():
-            if nome_n in haystack:
-                per_nome[d["id"]] = d
-        if len(per_nome) == 1:
-            return next(iter(per_nome.values()))
-        if len(per_nome) > 1:
-            return None
-        candidati = {}
-        for cogn, lst in by_cogn.items():
-            if cogn in haystack and len(lst) == 1:
-                candidati[lst[0]["id"]] = lst[0]
-        return next(iter(candidati.values())) if len(candidati) == 1 else None
 
     # Hash già visti, letti una volta sola (non un find_one per file nel ciclo):
     # stesso motivo delle altre correzioni in questo file, l'adattatore non ha
@@ -771,11 +927,11 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
     # acconto+saldo dei PDF di questo giro.
     esistenti = await _esiti_esistenti(db)
 
-    from backend.app.services.competenza_pagamenti import IndiceCedolini, risolvi_lotto
-    indice_cedolini = await IndiceCedolini.carica(db)
+    from backend.app.services.competenza_pagamenti import IndiceCedolini
+    ctx = {"indici": indici, "esistenti": esistenti, "indice_cedolini": await IndiceCedolini.carica(db),
+           "affected": set()}
 
     importati, in_coda, duplicati, esclusi_non_stipendio, falliti_lettura = 0, 0, 0, 0, []
-    affected = set()
     for drive_id, nome_file, raw in scaricati:
         async def segna_visto():
             await db.drive_bonifici_visti.update_one(
@@ -787,14 +943,7 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
             await segna_visto()
             continue
         h = hashlib.sha256(raw).hexdigest()
-        try:
-            import pdfplumber
-            testo = ""
-            with pdfplumber.open(io.BytesIO(raw)) as pdf:
-                for p in pdf.pages[:3]:
-                    testo += (p.extract_text() or "") + "\n"
-        except Exception:
-            testo = ""
+        testo = _testo_pdf(raw)
         if _e_movimento_non_stipendio(testo) or _e_movimento_non_stipendio(nome_file):
             esclusi_non_stipendio += 1
             await segna_visto()
@@ -804,43 +953,12 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
             await segna_visto()
             continue
         hash_esistenti.add(h)
-        dati = _parse_bonifico_pdf(testo, nome_file)
-        dip = None
-        if dati["n_beneficiari"] == 1:
-            dip = trova_dipendente(testo, nome_file)
         pdf_b64 = base64.b64encode(raw).decode()
-
-        data_iso = dati["data"].strftime("%Y-%m-%d") if dati["data"] else None
-        comp = None
-        if dip and dati["importo"] and data_iso and dati["causale_stipendio"]:
-            tripletta = (dip["id"], data_iso, _num_or_none(dati["importo"]))
-            if tripletta in esistenti["triplette"]:
-                duplicati += 1
-                await segna_visto()
-                continue
-            esistenti["triplette"].add(tripletta)
-            comp = risolvi_lotto([{"dipendente_id": dip["id"], "data": data_iso, "importo": dati["importo"],
-                                   "causale": dati["causale"], "mese_esplicito": dati["mese"],
-                                   "anno_esplicito": dati["anno"]}], indice_cedolini,
-                                 partner_esistenti=esistenti["presunti"])[0]
-        if comp:
-            key = f"drive:{h[:24]}"
-            await db.pagamenti_esiti.update_one(
-                {"key": key},
-                {"$set": {"key": key, "hash": h, "cro": None, "dipendente_id": dip["id"],
-                          "data": data_iso,
-                          "importo": dati["importo"], "causale": dati["causale"],
-                          "beneficiario": dip.get("nome_completo") or f"{dip.get('cognome','')} {dip.get('nome','')}".strip(),
-                          "mese": comp["mese"], "anno": comp["anno"], "origine": "drive-pdf",
-                          "metodo": comp["metodo"], "cedolino_id": comp.get("cedolino_id"),
-                          "pdf_data": pdf_b64, "ha_pdf": True}},
-                upsert=True)
-            affected.add((dip["id"], comp["mese"], comp["anno"]))
-            await _sposta_partner(db, esistenti, comp, affected)
-            if comp["metodo"] == "presunto":
-                esistenti["presunti"].append({"key": key, "dipendente_id": dip["id"], "data": data_iso,
-                                              "importo": dati["importo"], "mese": comp["mese"], "anno": comp["anno"]})
+        esito, comp, dip, dati = await _aggancia_pdf_bonifico(db, ctx, testo, nome_file, h, pdf_b64, f"drive:{h[:24]}")
+        if esito == "importato":
             importati += 1
+        elif esito == "duplicato":
+            duplicati += 1
         else:
             await db.bonifici_da_associare.insert_one({
                 "id": str(uuid.uuid4()), "hash": h,
@@ -852,7 +970,7 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
             in_coda += 1
         await segna_visto()
 
-    for dip_id, mese, anno in affected:
+    for dip_id, mese, anno in ctx["affected"]:
         await _aggiorna_bonifico_mese(db, dip_id, anno, mese)
 
     falliti_nomi = [id_per_nome.get(fid, fid) for fid in falliti_id]

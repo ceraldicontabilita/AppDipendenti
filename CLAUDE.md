@@ -303,6 +303,20 @@ dipendente), `onomastici`.
   eseguito in produzione (`scadenze_scheduler.py`, `datetime.now()` naive letto
   come ora di Roma → primo giro "missed by 1:59:15", poi istanza free spenta),
   log scheduler con `%r` + traceback e `CancelledError` non più inghiottito.
+  **Coda "Bonifici da associare" (119 PDF, 122 mila €)**: verificato sui PDF
+  reali che l'import da Drive scartava TUTTO come "non stipendio" (il filtro
+  `_e_movimento_non_stipendio` scattava sull'intestazione "CERALDI GROUP
+  S.R.L."/"BANCO BPM S.P.A." presente su ogni contabile), non leggeva
+  "IMPORTO EUR 1.800,00" (valuta prima del numero), non riconosceva
+  "salario"/"acconto" come stipendio, e ogni distinta risultava ambigua
+  perché firmata dal titolare (che è anche in anagrafica). Corretti tutti;
+  bottone **"🔁 Riprova aggancio automatico"** nella pagina della coda
+  (`POST /bonifici-da-associare/riprova-automatico`, stessa decisione
+  dell'import Drive: `_aggancia_pdf_bonifico`). Restano a mano solo le
+  contabili "BENEFICIARI DIVERSI" (addebito cumulativo, il PDF non nomina
+  nessuno). `importa_pagamenti` accetta anche l'Excel "Movimenti bancari"
+  del titolare (Drive: `estratto_bancario_completo_bnl_stipendi_*.xlsx`;
+  simulato offline: solo 54 movimenti nuovi rispetto all'archivio).
   **Dato da verificare**: in archivio ci sono 12 cedolini 2026 con
   `tipo_cedolino=tredicesima` e `mese=7` (Parisi, Vespa, Carotenuto, Capezzuto,
   Guarino, Pocci, Lesina, Murolo, Russo, Taiano, Iazzetta, A. Ceraldi), netti da

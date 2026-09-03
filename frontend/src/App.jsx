@@ -4473,20 +4473,37 @@ function BonificiDaAssociarePage({ dipendenti }) {
     finally { setBusy(null); }
   };
 
+  const [riprovaBusy, setRiprovaBusy] = useState(false);
+  const riprova = async () => {
+    setRiprovaBusy(true);
+    try {
+      const r = await axios.post(`${API}/bonifici-da-associare/riprova-automatico`);
+      const d = r.data || {};
+      toast(`Riletti ${d.esaminati || 0} PDF: ${d.agganciati || 0} agganciati da soli, ${d.duplicati || 0} già in archivio, ${d.ancora_in_coda || 0} restano da assegnare a mano`);
+      await load();
+    } catch (e) { console.error(e); toast(e?.response?.data?.detail || "Errore nel riprovare l'aggancio", "err"); }
+    finally { setRiprovaBusy(false); }
+  };
+
   return (
     <div className="dc-page">
       <div className="dc-page-header">
         <div>
           <h1>Bonifici da associare</h1>
-          <p>{righe.length} bonifici cumulativi ("beneficiari diversi") in attesa di essere assegnati a un dipendente. L'import dalla cartella Drive si fa da "Cedolini &amp; Bonifici" — arrivano qui solo quelli che non si possono assegnare da soli.</p>
+          <p>{righe.length} bonifici in attesa di essere assegnati a un dipendente. L'import dalla cartella Drive si fa da "Cedolini &amp; Bonifici" — arrivano qui solo quelli che non si possono assegnare da soli.</p>
         </div>
+        <button className="dc-btn" disabled={riprovaBusy || righe.length === 0} onClick={riprova}
+          title="Rilegge i PDF in coda con il lettore aggiornato e aggancia da solo quelli con dipendente, importo e causale da stipendio chiari">
+          {riprovaBusy ? "Rileggo…" : "🔁 Riprova aggancio automatico"}
+        </button>
       </div>
 
       <div className="dc-card" style={{ marginBottom: 12, padding: 12, fontSize: 13, color: "#6b7669" }}>
-        Questi bonifici la banca li emette come un unico addebito su piu' persone insieme:
-        il PDF non nomina nessuno, quindi non si possono assegnare da soli. Guarda importo e data
-        (apri il PDF se serve), scegli il dipendente e il mese di competenza, poi conferma:
-        il bonifico entra nella scheda del dipendente con il documento allegato, come tutti gli altri.
+        Qui finiscono i bonifici che il sistema non assegna da solo: le distinte cumulative
+        ("beneficiari diversi", un unico addebito su piu' persone, il PDF non nomina nessuno) e
+        le contabili in cui manca un dato chiaro. Prova prima <b>🔁 Riprova aggancio automatico</b>;
+        per il resto guarda importo e data (apri il PDF se serve), scegli il dipendente e il mese di
+        competenza, poi conferma: il bonifico entra nella scheda del dipendente con il documento allegato.
       </div>
 
       {loading ? <div className="dc-card" style={{ padding: 20 }}>Carico…</div> :

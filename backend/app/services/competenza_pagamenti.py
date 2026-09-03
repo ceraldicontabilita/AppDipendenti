@@ -68,8 +68,15 @@ def mese_registro(cedolino: Dict[str, Any]) -> Optional[int]:
         return None
     return mese if 1 <= mese <= 12 else None
 
-_RE_MESE_NUM = re.compile(r"\b(0?[1-9]|1[0-2])\s*[-/]\s*(20\d{2})\b")
+# "1/2026", "09-2025" — ma NON il mese dentro una data completa ("11-08-2025"
+# nel nome file della banca): il mese non deve essere preceduto da cifra+separatore.
+_RE_MESE_NUM = re.compile(r"(?<![\d/\-])\b(0?[1-9]|1[0-2])\s*[-/]\s*(20\d{2})\b(?![-/]\d)")
 _RE_ANNO = re.compile(r"\b(20\d{2})\b")
+# Abbreviazioni ("febb 2025", "sett. 2024", "dic 25"): accettate SOLO se seguite
+# da un anno, altrimenti "mar" prenderebbe "Marcella" e "ago" "Agostino".
+_ABBREV = {"gen": 1, "genn": 1, "feb": 2, "febb": 2, "mar": 3, "apr": 4, "mag": 5, "magg": 5, "giu": 6,
+           "lug": 7, "ago": 8, "set": 9, "sett": 9, "ott": 10, "nov": 11, "dic": 12}
+_RE_MESE_ABBREV = re.compile(r"\b(" + "|".join(sorted(_ABBREV, key=len, reverse=True)) + r")\.?\s*(20\d{2}|\d{2})\b")
 
 
 def _num(v: Any) -> Optional[float]:
@@ -108,12 +115,18 @@ def competenza_da_causale(causale: Optional[str], data: Optional[str] = None) ->
     "01-2026", "marzo 2026", "stip. dicembre" (anno dedotto dalla data del
     pagamento: "dicembre" pagato a gennaio è dicembre dell'anno prima),
     "tredicesima"/"quattordicesima" (mese 13/14). Altrimenti None."""
-    c = (causale or "").lower()
+    # "_" conta come spazio: nei nomi file ("bonifico_vespa_marzo.pdf") il mese
+    # resterebbe altrimenti incollato alla parola accanto ("-" no: "01-2026").
+    c = re.sub(r"_+", " ", (causale or "").lower())
     if not c.strip():
         return None
     m = _RE_MESE_NUM.search(c)
     if m:
         return int(m.group(2)), int(m.group(1))
+    m = _RE_MESE_ABBREV.search(c)
+    if m:
+        anno = int(m.group(2))
+        return (anno if anno > 99 else 2000 + anno), _ABBREV[m.group(1)]
     dm = anno_mese_da_data(data)
     if "tredicesima" in c or re.search(r"\b13\s*(a|ª|esima)\b", c):
         anno = _anno_in_testo(c) or (dm[0] if dm else None)
