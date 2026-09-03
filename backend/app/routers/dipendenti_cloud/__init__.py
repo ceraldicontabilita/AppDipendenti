@@ -223,89 +223,158 @@ async def set_ordine_dipendenti(data: dict):
 async def sincronizza_paghe_da_cedolini(anno: Optional[int] = None):
     """Popola il registro paghe dai cedolini e dai bonifici reali gia' in
     archivio, invece di lasciarlo alla compilazione manuale. Non tocca un mese
-    che qualcuno ha gia' modificato a mano."""
+    che qualcuno ha gia' modificato a mano.
+
+    Prima aggancia i bonifici in archivio alle buste (stesso ponte del bottone
+    "Recupera bonifici storici"), poi popola/aggiorna il registro: il registro
+    legge i pagamenti da `pagamenti_esiti`, quindi eseguirlo da solo prima del
+    ponte mostrerebbe tutte le buste "in attesa" anche coi bonifici già in
+    archivio (era esattamente quel che succedeva quando lo scheduler chiamava i
+    due passi nell'ordine inverso)."""
     from backend.app.services.sincronizza_paghe_mensili import sincronizza
-    return await sincronizza(get_db(), anno)
+    ponte = await sincronizza_bonifici_storici()
+    registro = await sincronizza(get_db(), anno)
+    return {**registro, "bonifici": ponte}
+
+
+async def _aggiorna_bonifico_mese(db, dip_id: str, anno: int, mese: int):
+    """Bonifico del mese = somma dei pagamenti reali (pagamenti_esiti) di quel
+    dipendente/mese, poi ricalcolo dello stato. UNICO punto che scrive
+    bonifico_importo a partire dagli esiti: usato da ogni ingresso (ponte
+    storico, CSV banca, Drive, PDF caricati, coda manuale). Se il mese non ha
+    più nessun pagamento (perché un bonifico è stato ri-attribuito a un altro
+    mese) azzera SOLO un importo che veniva dagli esiti — un importo scritto
+    a mano o dalla Prima Nota non viene toccato."""
+    anno, mese = int(anno), int(mese)
+    tot, n = 0.0, 0
+    async for p in db.pagamenti_esiti.find({"dipendente_id": dip_id, "mese": mese, "anno": anno},
+                                           {"_id": 0, "importo": 1, "pdf_data": 0}):
+        tot += float(p.get("importo") or 0)
+        n += 1
+    riga = await db.paghe_mensili.find_one({"dipendente_id": dip_id, "anno": anno, "mese": mese},
+                                           {"_id": 0, "bonifico_da_esiti": 1, "importo_busta": 1})
+    if n == 0 and riga is not None and not riga.get("bonifico_da_esiti"):
+        return await _ricalcola_stato_paga(db, dip_id, anno, mese)
+    if n == 0 and riga is None:
+        return None
+    await db.paghe_mensili.update_one(
+        {"dipendente_id": dip_id, "anno": anno, "mese": mese},
+        {"$set": {"dipendente_id": dip_id, "anno": anno, "mese": mese,
+                  "bonifico_importo": round(tot, 2), "bonifico_ricevuto": tot > 0,
+                  "bonifico_da_esiti": n > 0, "updated_at": now_iso()}}, upsert=True)
+    return await _ricalcola_stato_paga(db, dip_id, anno, mese)
 
 
 @router.post("/paghe/sincronizza-bonifici-storici")
 async def sincronizza_bonifici_storici():
-    """Ponte una tantum (ma ripetibile: idempotente) tra la collezione `bonifici`
-    (dove un import passato dei PDF storici ha salvato ~800 bonifici reali con
-    dipendente_id + competenza "YYYY-MM", ma NESSUN cedolino_id) e il motore unico
-    di "Cedolini & Bonifici" / stato paga, che legge solo `pagamenti_esiti`.
-    Senza questo ponte quei bonifici — già nell'archivio, già con il PDF allegato —
-    restavano invisibili nella pagina di riconciliazione e le buste corrispondenti
-    risultavano ancora "da pagare". Non tocca i pagamenti "una_tantum" (TFR/
-    transazioni di fine rapporto: competenza non è un mese di stipendio)."""
+    """Ponte (ripetibile, idempotente) tra la collezione `bonifici` — l'archivio
+    dei bonifici stipendio letti in passato dal gestionale/Drive, con
+    dipendente_id, data, importo e PDF — e il motore unico di "Cedolini &
+    Bonifici" / stato paga, che legge solo `pagamenti_esiti`.
+
+    A quale busta va ogni bonifico lo decide `services/competenza_pagamenti`
+    (cedolino già abbinato → mese in causale → importo = netto di una busta →
+    acconto+saldo → mese precedente al pagamento), NON il vecchio campo
+    `competenza` dell'archivio: in produzione quel campo era uguale al mese del
+    PAGAMENTO in 646 bonifici su 800, e lo stipendio di febbraio finiva sulla
+    busta di marzo. Per questo il ponte ri-attribuisce anche i pagamenti già
+    importati da un giro precedente (stessa chiave `bonifici-coll:<id>`,
+    aggiornata sul posto) e ricalcola sia il mese nuovo sia quello che perde
+    il pagamento — nessuna busta resta "pagata" coi soldi di un'altra.
+
+    Esclusi: i bonifici assegnati a mano dalla coda "Bonifici da associare"
+    (già in pagamenti_esiti come "beneficiari-diversi:*") e i pagamenti
+    "una_tantum" (TFR/transazioni: non sono lo stipendio di un mese)."""
+    from backend.app.services.competenza_pagamenti import IndiceCedolini, risolvi_lotto
+
     db = get_db()
-    # Esclude i bonifici già scritti a mano dalla coda "Bonifici da associare"
-    # (associa_bonifico li ha già messi in pagamenti_esiti con la chiave
-    # "beneficiari-diversi:*"): reimportarli qui creerebbe una seconda riga in
-    # pagamenti_esiti per lo stesso pagamento, raddoppiando il bonifico del mese.
     bonifici = await db.bonifici.find(
-        {"categoria": "DIPENDENTE", "dipendente_id": {"$ne": None}, "competenza": {"$ne": None},
+        {"categoria": "DIPENDENTE", "dipendente_id": {"$ne": None},
          "assegnato_da_bonifico_diversi": {"$exists": False}},
         {"_id": 0}).to_list(5000)
+    bonifici = [b for b in bonifici
+                if b.get("dipendente_id") and _num_or_none(b.get("importo"))
+                and b.get("data") and b.get("tipo_pagamento") != "una_tantum"]
 
-    # Prefetch in blocco (stesso motivo delle altre correzioni in questo file):
-    # un find_one per bonifico dentro il ciclo, su una tabella non indicizzata,
-    # è di nuovo un incrocio N×M — con ~800 bonifici storici è la stessa causa
-    # dei 502 già visti in produzione. pdf_data escluso: qui serve solo la
-    # tripletta dipendente/data/importo per il controllo duplicati.
-    pagamenti_esistenti = set()
+    # Prefetch in blocco (l'adattatore non ha indici: niente query nel ciclo).
+    # Per chiave: i pagamenti già importati da questo ponte, da aggiornare sul
+    # posto. Per tripletta dipendente/data/importo: i pagamenti arrivati da
+    # ALTRI percorsi (CSV, Drive, coda manuale) o duplicati interni
+    # dell'archivio (lo stesso PDF letto due volte: 450 casi in produzione),
+    # da non importare una seconda volta.
+    esiti_per_key: Dict[str, Dict[str, Any]] = {}
+    triplette_altrui = set()
     async for p in db.pagamenti_esiti.find({}, {"_id": 0, "pdf_data": 0, "causale": 0, "beneficiario": 0}):
-        pagamenti_esistenti.add((p.get("dipendente_id"), p.get("data"), p.get("importo")))
+        k = p.get("key") or ""
+        if k.startswith("bonifici-coll:"):
+            esiti_per_key[k] = p
+        else:
+            triplette_altrui.add((p.get("dipendente_id"), p.get("data"), _num_or_none(p.get("importo"))))
+
+    indice = await IndiceCedolini.carica(db)
+    lotto = [{"dipendente_id": b["dipendente_id"], "data": b["data"], "importo": _num_or_none(b["importo"]),
+              "causale": b.get("causale"), "cedolino_id": b.get("cedolino_id")} for b in bonifici]
+    risolti = risolvi_lotto(lotto, indice)
 
     affected = set()
-    importati = duplicati = 0
-    for b in bonifici:
-        competenza = str(b.get("competenza") or "")
-        m = re.match(r"^(\d{4})-(\d{1,2})$", competenza)
-        if not m:
+    importati = aggiornati = riattribuiti = duplicati = 0
+    # Triplette già "occupate": da altri percorsi E dai bonifici importati da
+    # questo stesso ponte in un giro precedente — così il doppione interno di
+    # un bonifico già importato resta un doppione anche al secondo giro (chi
+    # ha la propria chiave passa comunque: controllo per chiave PRIMA della
+    # tripletta).
+    triplette_viste = set(triplette_altrui) | {
+        (p.get("dipendente_id"), p.get("data"), _num_or_none(p.get("importo"))) for p in esiti_per_key.values()}
+    metodi: Dict[str, int] = {}
+    for b, comp in zip(bonifici, risolti):
+        if not comp:
             continue
-        anno, mese = int(m.group(1)), int(m.group(2))
-        dip_id = b.get("dipendente_id")
-        importo = b.get("importo")
-        data_pag = b.get("data")
-        if not dip_id or not importo:
-            continue
-        # Difesa aggiuntiva: stesso dipendente/data/importo già presente in
-        # pagamenti_esiti (da CSV, da un'altra corsa di questo stesso ponte, o
-        # da un altro percorso) -> non è un nuovo pagamento, salta.
-        if (dip_id, data_pag, importo) in pagamenti_esistenti:
+        key = f"bonifici-coll:{b.get('id')}"
+        tripletta = (b["dipendente_id"], b["data"], _num_or_none(b["importo"]))
+        precedente = esiti_per_key.get(key)
+        if precedente is None and tripletta in triplette_viste:
             duplicati += 1
             continue
-        pagamenti_esistenti.add((dip_id, data_pag, importo))
-        key = f"bonifici-coll:{b.get('id')}"
-        doc = {"key": key, "cro": None, "dipendente_id": dip_id,
-               "data": data_pag, "importo": importo,
-               "causale": b.get("fonte") or "Archivio bonifici PDF",
+        triplette_viste.add(tripletta)
+        anno, mese = comp["anno"], comp["mese"]
+        doc = {"key": key, "cro": None, "dipendente_id": b["dipendente_id"],
+               "data": b["data"], "importo": _num_or_none(b["importo"]),
+               "causale": b.get("causale") or b.get("fonte") or "Archivio bonifici PDF",
                "beneficiario": b.get("dipendente_nome"),
-               "mese": mese, "anno": anno, "origine": "bonifici-storico"}
+               "mese": mese, "anno": anno, "origine": "bonifici-storico",
+               "metodo": comp["metodo"], "cedolino_id": comp.get("cedolino_id")}
         if b.get("pdf_data"):
             doc["pdf_data"] = b["pdf_data"]
             doc["ha_pdf"] = True
+        metodi[comp["metodo"]] = metodi.get(comp["metodo"], 0) + 1
+        if precedente is not None:
+            if (precedente.get("anno"), precedente.get("mese"), precedente.get("metodo")) == (anno, mese, comp["metodo"]):
+                continue     # già giusto: niente scrittura
+            if (precedente.get("anno"), precedente.get("mese")) != (anno, mese):
+                riattribuiti += 1
+                affected.add((b["dipendente_id"], int(precedente.get("mese") or 0), int(precedente.get("anno") or 0)))
+            aggiornati += 1
+        else:
+            importati += 1
         await db.pagamenti_esiti.update_one({"key": key}, {"$set": doc}, upsert=True)
-        await db.paghe_mensili.update_one(
-            {"dipendente_id": dip_id, "anno": anno, "mese": mese},
-            {"$set": {"dipendente_id": dip_id, "anno": anno, "mese": mese,
-                      "updated_at": now_iso()}}, upsert=True)
-        affected.add((dip_id, mese, anno))
-        importati += 1
+        affected.add((b["dipendente_id"], mese, anno))
 
     for dip_id, mese, anno in affected:
-        tot = 0.0
-        async for p in db.pagamenti_esiti.find({"dipendente_id": dip_id, "mese": mese, "anno": anno}, {"_id": 0, "importo": 1}):
-            tot += p.get("importo") or 0
-        await db.paghe_mensili.update_one(
-            {"dipendente_id": dip_id, "anno": anno, "mese": mese},
-            {"$set": {"bonifico_importo": round(tot, 2), "bonifico_ricevuto": tot > 0,
-                      "bonifico_da_esiti": True, "updated_at": now_iso()}})
-        await _ricalcola_stato_paga(db, dip_id, anno, mese)
+        if not mese or not anno:
+            continue
+        await _aggiorna_bonifico_mese(db, dip_id, anno, mese)
 
     return {"bonifici_esaminati": len(bonifici), "importati_in_pagamenti_esiti": importati,
-            "duplicati_saltati": duplicati, "mesi_aggiornati": len(affected)}
+            "aggiornati": aggiornati, "riattribuiti_ad_altro_mese": riattribuiti,
+            "duplicati_saltati": duplicati, "mesi_aggiornati": len(affected), "metodi": metodi}
+
+
+def _num_or_none(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f else None
 
 
 @router.get("/paghe")
@@ -462,12 +531,8 @@ async def associa_bonifico(bonifico_id: str, data: Dict[str, Any] = Body(...)):
                   "data": in_coda.get("data"), "importo": in_coda.get("importo") or 0,
                   "causale": in_coda.get("causale") or "Bonifico beneficiari diversi",
                   "beneficiario": dip.get("nome_completo"),
-                  "mese": mese_i, "anno": anno_i}}, upsert=True)
-    await db.paghe_mensili.update_one(
-        {"dipendente_id": dipendente_id, "anno": anno_i, "mese": mese_i},
-        {"$set": {"dipendente_id": dipendente_id, "anno": anno_i, "mese": mese_i,
-                  "updated_at": now_iso()}}, upsert=True)
-    await _ricalcola_stato_paga(db, dipendente_id, anno_i, mese_i)
+                  "mese": mese_i, "anno": anno_i, "metodo": "manuale"}}, upsert=True)
+    await _aggiorna_bonifico_mese(db, dipendente_id, anno_i, mese_i)
     return {"ok": True, "bonifico": nuovo}
 
 
@@ -546,24 +611,15 @@ def _parse_bonifico_pdf(text: str, filename: str) -> Dict[str, Any]:
     if m:
         causale = m.group(1).strip()
 
-    # Mese di competenza: quasi sempre nel nome file/causale ("bonifico marzo…",
-    # "stip giugno 2022"), NON nella data di esecuzione (il bonifico parte
-    # qualche giorno dopo la fine del mese di competenza).
+    # Mese di competenza SOLO se dichiarato nel nome file/causale ("bonifico
+    # marzo…", "stip giugno 2022", "1/2026"). Se non c'è, resta None: lo
+    # decide il motore unico (services/competenza_pagamenti: importo = netto
+    # di una busta, altrimenti mese precedente al pagamento) — NON la data di
+    # esecuzione, che è il mese DOPO quello della busta.
+    from backend.app.services.competenza_pagamenti import competenza_da_causale
     haystack = re.sub(r"\s+", " ", f"{filename} {causale or ''}").lower()
-    mese_comp, anno_comp = None, None
-    for nome, num in _MESI_IT.items():
-        if nome in haystack:
-            mese_comp = num
-            break
-    anno_m = re.search(r"(20\d{2})", haystack)
-    if anno_m:
-        anno_comp = int(anno_m.group(1))
-    if mese_comp and not anno_comp and data_val:
-        anno_comp = data_val.year
-        if mese_comp == 12 and data_val.month == 1:
-            anno_comp -= 1
-    if not mese_comp and data_val:
-        mese_comp, anno_comp = data_val.month, data_val.year
+    esplicita = competenza_da_causale(haystack, data_val.strftime("%Y-%m-%d") if data_val else None)
+    mese_comp, anno_comp = (esplicita[1], esplicita[0]) if esplicita else (None, None)
 
     # Segnale esplicito "è uno stipendio": nella cartella (estratto conto
     # aziendale generico) c'è anche, per es., "CAUSALE vincenzo ceraldi" senza
@@ -665,6 +721,9 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
         if b.get("hash"):
             hash_esistenti.add(b["hash"])
 
+    from backend.app.services.competenza_pagamenti import IndiceCedolini, risolvi_lotto
+    indice_cedolini = await IndiceCedolini.carica(db)
+
     importati, in_coda, duplicati, esclusi_non_stipendio, falliti_lettura = 0, 0, 0, 0, []
     affected = set()
     for drive_id, nome_file, raw in scaricati:
@@ -701,22 +760,25 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
             dip = trova_dipendente(testo, nome_file)
         pdf_b64 = base64.b64encode(raw).decode()
 
-        if dip and dati["importo"] and dati["mese"] and dati["anno"] and dati["causale_stipendio"]:
+        data_iso = dati["data"].strftime("%Y-%m-%d") if dati["data"] else None
+        comp = None
+        if dip and dati["importo"] and data_iso and dati["causale_stipendio"]:
+            comp = risolvi_lotto([{"dipendente_id": dip["id"], "data": data_iso, "importo": dati["importo"],
+                                   "causale": dati["causale"], "mese_esplicito": dati["mese"],
+                                   "anno_esplicito": dati["anno"]}], indice_cedolini)[0]
+        if comp:
             key = f"drive:{h[:24]}"
             await db.pagamenti_esiti.update_one(
                 {"key": key},
                 {"$set": {"key": key, "hash": h, "cro": None, "dipendente_id": dip["id"],
-                          "data": dati["data"].strftime("%Y-%m-%d") if dati["data"] else None,
+                          "data": data_iso,
                           "importo": dati["importo"], "causale": dati["causale"],
                           "beneficiario": dip.get("nome_completo") or f"{dip.get('cognome','')} {dip.get('nome','')}".strip(),
-                          "mese": dati["mese"], "anno": dati["anno"], "origine": "drive-pdf",
+                          "mese": comp["mese"], "anno": comp["anno"], "origine": "drive-pdf",
+                          "metodo": comp["metodo"], "cedolino_id": comp.get("cedolino_id"),
                           "pdf_data": pdf_b64, "ha_pdf": True}},
                 upsert=True)
-            await db.paghe_mensili.update_one(
-                {"dipendente_id": dip["id"], "anno": dati["anno"], "mese": dati["mese"]},
-                {"$set": {"dipendente_id": dip["id"], "anno": dati["anno"], "mese": dati["mese"],
-                          "updated_at": now_iso()}}, upsert=True)
-            affected.add((dip["id"], dati["mese"], dati["anno"]))
+            affected.add((dip["id"], comp["mese"], comp["anno"]))
             importati += 1
         else:
             await db.bonifici_da_associare.insert_one({
@@ -730,14 +792,7 @@ async def importa_bonifici_drive(body: Dict[str, Any] = Body(default={})):
         await segna_visto()
 
     for dip_id, mese, anno in affected:
-        tot = 0.0
-        async for p in db.pagamenti_esiti.find({"dipendente_id": dip_id, "mese": mese, "anno": anno}, {"_id": 0, "importo": 1, "pdf_data": 0}):
-            tot += p.get("importo") or 0
-        await db.paghe_mensili.update_one(
-            {"dipendente_id": dip_id, "anno": anno, "mese": mese},
-            {"$set": {"bonifico_importo": round(tot, 2), "bonifico_ricevuto": tot > 0,
-                      "bonifico_da_esiti": True, "updated_at": now_iso()}})
-        await _ricalcola_stato_paga(db, dip_id, anno, mese)
+        await _aggiorna_bonifico_mese(db, dip_id, anno, mese)
 
     falliti_nomi = [id_per_nome.get(fid, fid) for fid in falliti_id]
     return {"trovati_totale": len(tutti), "lavorati_ora": len(lotto),
@@ -1178,43 +1233,14 @@ async def _importa_documenti(pdf_items, errori_iniziali=None, forza=False):
         except Exception:
             pass
 
-    async def _imputa_competenza(dip_id, b):
-        """Determina (mese, anno, fonte) di competenza del bonifico secondo le regole:
-        1) mese esplicito in causale; 2) match per importo con la busta (acconto=busta o
-        somma cumulativa=busta) nella finestra mese precedente→mese stesso; 3) ripiego sul
-        mese precedente. Sfondamento d'anno (gen→dic anno prima) solo dal 2024 (2023 blindato)."""
-        if b["esplicita"] and b["mese_causale"]:
-            anno = b["anno_causale"] or (int(b["data"][:4]) if b.get("data") else None)
-            return b["mese_causale"], anno, "causale"
-        data = b.get("data")
-        if not data:
-            return None, None, "data assente"
-        y, mo = int(data[:4]), int(data[5:7])
-        pm, py = (mo - 1, y) if mo > 1 else (12, y - 1)
-        finestra = []
-        if not (mo == 1 and py < 2023):   # 2023 blindato: gennaio 2023 non sfonda a dic 2022
-            finestra.append((py, pm))     # mese precedente (priorità)
-        finestra.append((y, mo))          # mese stesso
-        for (a, m) in finestra:
-            rec = await get_db().paghe_mensili.find_one(
-                {"dipendente_id": dip_id, "anno": a, "mese": m})
-            if not rec:
-                continue
-            busta = rec.get("importo_busta") or rec.get("netto_atteso")
-            if busta:
-                if abs(busta - b["importo"]) <= 1:
-                    return m, a, "importo (= busta)"
-                # acconto già dato nel mese (rilevato nel cedolino o bonifico precedente):
-                # acconto + questo bonifico = busta  ->  saldo che chiude la busta
-                gia = (rec.get("bonifico_importo") or 0) + (rec.get("acconto_cedolino") or 0)
-                if abs((gia + b["importo"]) - busta) <= 1:
-                    return m, a, "importo (acconto+saldo = busta)"
-                # il bonifico copre esattamente il saldo residuo dopo l'acconto
-                residuo = rec.get("saldo_residuo")
-                if residuo and abs(residuo - b["importo"]) <= 1:
-                    return m, a, "importo (= saldo dopo acconto)"
-        a, m = finestra[0]
-        return m, a, "mese precedente (dedotta)"
+    # A quale busta appartiene un bonifico lo decide il motore unico
+    # (services/competenza_pagamenti), lo stesso del CSV banca, di Drive e del
+    # ponte storico — prima qui c'era una quarta regola locale che scriveva
+    # bonifico_importo direttamente su paghe_mensili, saltando pagamenti_esiti
+    # (e quindi invisibile in "Cedolini & Bonifici" e sovrascritta al giro
+    # successivo dello scheduler).
+    from backend.app.services.competenza_pagamenti import IndiceCedolini, risolvi_lotto
+    indice_cedolini = await IndiceCedolini.carica(get_db())
 
     async def _processa_pdf(pdfbytes, origine):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -1288,7 +1314,10 @@ async def _importa_documenti(pdf_items, errori_iniziali=None, forza=False):
                                                  "importo": b["importo"], "mese": pm, "anno": pa,
                                                  "data": data, "saldo": saldo})
                         return ass, dac, bon, pres, dup, tfr, prestiti
-                    mese, anno, fonte = await _imputa_competenza(dip["id"], b)
+                    comp = risolvi_lotto([{"dipendente_id": dip["id"], "data": b.get("data"),
+                                           "importo": b["importo"], "causale": b.get("causale")}],
+                                         indice_cedolini)[0]
+                    mese, anno, fonte = (comp["mese"], comp["anno"], comp["metodo"]) if comp else (None, None, None)
                     if not mese or not anno:
                         dac.append({"nome": (b.get("causale") or "?")[:30], "origine": origine,
                                     "motivo": "bonifico: competenza non determinabile"})
@@ -1317,19 +1346,25 @@ async def _importa_documenti(pdf_items, errori_iniziali=None, forza=False):
                                 {"dipendente_id": dip["id"], "anno": anno, "mese": mese}, {"erogato_atteso": 1})
                             atteso = (esist or {}).get("erogato_atteso")
                             discrep = atteso if (atteso is not None and abs(atteso - b["importo"]) > 1) else None
-                            set_doc = {"dipendente_id": dip["id"], "anno": anno, "mese": mese,
-                                       "bonifico_importo": b["importo"], "bonifico_data": b.get("data"),
-                                       "bonifico_ricevuto": True, "bonifico_causale": b.get("causale"),
-                                       "bonifico_cro": cro, "bonifico_pdf": origine,
-                                       "bonifico_riconciliato": True, "updated_at": now_iso()}
-                            await get_db().paghe_mensili.update_one(
-                                {"dipendente_id": dip["id"], "anno": anno, "mese": mese},
-                                {"$set": set_doc, "$setOnInsert": {"busta_riconciliata": False}}, upsert=True)
+                            # Pagamento reale -> pagamenti_esiti (motore unico), il
+                            # bonifico del mese e lo stato vengono ricalcolati da lì.
+                            key = f"cro:{cro}" if cro else f"pdf-caricato:{h[:24]}"
+                            await get_db().pagamenti_esiti.update_one(
+                                {"key": key},
+                                {"$set": {"key": key, "cro": cro or None, "dipendente_id": dip["id"],
+                                          "data": b.get("data"), "importo": b["importo"],
+                                          "causale": b.get("causale"),
+                                          "beneficiario": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
+                                          "mese": mese, "anno": anno, "origine": "pdf-caricato",
+                                          "metodo": comp["metodo"], "cedolino_id": comp.get("cedolino_id"),
+                                          "pdf_nome": origine}}, upsert=True)
+                            await _aggiorna_bonifico_mese(get_db(), dip["id"], anno, mese)
                             await _registra_doc(h, "bonifico", f"cro:{cro}" if cro else f"bon:{dip['id']}:{anno}:{mese}", origine)
                             bon.append({"dipendente": f"{dip.get('cognome')} {dip.get('nome')}".strip(),
                                         "importo": b["importo"], "mese": mese, "anno": anno,
                                         "causale": b.get("causale"), "data": b.get("data"),
-                                        "riconciliato": True, "discrepanza": discrep, "fonte": fonte})
+                                        "riconciliato": comp["metodo"] != "presunto",
+                                        "discrepanza": discrep, "fonte": fonte})
                 return ass, dac, bon, pres, dup, tfr, prestiti
 
             # ---- FOGLIO PRESENZE (ore/timbrature, non è una busta) ----
@@ -3033,10 +3068,6 @@ async def storico_pagamenti(dipendente_id: str):
             "totale_pagato": round(sum(r.get("pagato", 0) for r in righe), 2)}
 
 
-_MESI_IT = {"gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
-            "luglio": 7, "agosto": 8, "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12}
-
-
 @router.post("/dipendenti/importa-anagrafica")
 async def importa_anagrafica(file: UploadFile = File(...)):
     """Importa/aggiorna l'anagrafica da Excel (Cognome, Nome, CF, Data di nascita,
@@ -3193,17 +3224,6 @@ async def importa_pagamenti(file: UploadFile = File(...)):
         except (TypeError, ValueError):
             return None
 
-    def mese_anno(causale, data_dt):
-        c = norm(causale)
-        m = re.search(r'\b(\d{1,2})[-/](20\d{2})\b', c)
-        if m:
-            return int(m.group(1)), int(m.group(2))
-        for nome, n in _MESI_IT.items():
-            if nome in c:
-                y = re.search(r'(20\d{2})', c)
-                return n, int(y.group(1)) if y else data_dt.year
-        return data_dt.month, data_dt.year
-
     def favore(s):
         m = re.search(r'favore\s+(.+?)(?:\s+-|\s+notprovide|$)', norm(s))
         return (m.group(1) if m else norm(s))[:50]
@@ -3230,7 +3250,15 @@ async def importa_pagamenti(file: UploadFile = File(...)):
         i_cro = None
         i_ben = i_caus
 
-    importati, non_trovati, affected = 0, [], set()
+    # Prima si raccolgono tutte le righe valide, poi il motore unico decide la
+    # busta di ciascuna (services/competenza_pagamenti): sull'intero lotto,
+    # così un acconto e il suo saldo nello stesso CSV vengono riconosciuti
+    # insieme. Il ripiego non è più "il mese del movimento" (era il mese DOPO
+    # la busta: lo stipendio di febbraio finiva sulla busta di marzo) ma il
+    # mese precedente, marcato "presunto".
+    from backend.app.services.competenza_pagamenti import IndiceCedolini, risolvi_lotto
+    pendenti = []
+    non_trovati = []
     for r in righe[1:]:
         if i_imp is None or i_imp >= len(r) or i_data is None or i_data >= len(r):
             continue
@@ -3260,27 +3288,26 @@ async def importa_pagamenti(file: UploadFile = File(...)):
         if not d:
             non_trovati.append(beneficiario or favore(causale))
             continue
-        mese, anno = mese_anno(causale, data_dt)
         cro = (r[i_cro].strip() if i_cro is not None and i_cro < len(r) and r[i_cro] else "")
         key = cro or hashlib.sha1(f"{d['id']}|{r[i_data]}|{importo}|{causale}".encode()).hexdigest()
-        await db.pagamenti_esiti.update_one(
-            {"key": key},
-            {"$set": {"key": key, "cro": cro, "dipendente_id": d["id"], "data": data_dt.strftime("%Y-%m-%d"),
-                      "importo": importo, "causale": causale, "beneficiario": beneficiario,
-                      "mese": mese, "anno": anno}}, upsert=True)
-        affected.add((d["id"], mese, anno))
-        importati += 1
-    # ricalcola il bonifico del mese = somma dei pagamenti di quel mese
+        pendenti.append({"key": key, "cro": cro, "dipendente_id": d["id"],
+                         "data": data_dt.strftime("%Y-%m-%d"), "importo": importo,
+                         "causale": causale, "beneficiario": beneficiario})
+
+    importati, affected = 0, set()
+    if pendenti:
+        indice = await IndiceCedolini.carica(db)
+        for p, comp in zip(pendenti, risolvi_lotto(pendenti, indice)):
+            if not comp:
+                continue
+            await db.pagamenti_esiti.update_one(
+                {"key": p["key"]},
+                {"$set": {**p, "mese": comp["mese"], "anno": comp["anno"], "origine": "csv-banca",
+                          "metodo": comp["metodo"], "cedolino_id": comp.get("cedolino_id")}}, upsert=True)
+            affected.add((p["dipendente_id"], comp["mese"], comp["anno"]))
+            importati += 1
     for dip_id, mese, anno in affected:
-        tot = 0.0
-        async for p in db.pagamenti_esiti.find({"dipendente_id": dip_id, "mese": mese, "anno": anno}, {"_id": 0, "importo": 1}):
-            tot += p.get("importo") or 0
-        await db.paghe_mensili.update_one(
-            {"dipendente_id": dip_id, "anno": anno, "mese": mese},
-            {"$set": {"dipendente_id": dip_id, "anno": anno, "mese": mese,
-                      "bonifico_importo": round(tot, 2), "bonifico_ricevuto": tot > 0,
-                      "bonifico_da_esiti": True, "updated_at": now_iso()}}, upsert=True)
-        await _ricalcola_stato_paga(db, dip_id, anno, mese)
+        await _aggiorna_bonifico_mese(db, dip_id, anno, mese)
     return {"importati": importati, "mesi_aggiornati": len(affected),
             "non_trovati": sorted(set(non_trovati))}
 
@@ -3415,7 +3442,11 @@ async def _calcola_associazioni_bonifici(db, anno: Optional[int] = None, mese: O
         dip = dip_map.get(dip_id) or {}
         nome = f"{dip.get('cognome', '')} {dip.get('nome', '')}".strip() or dip_id
 
-        # Bonifici reali pagati (esiti banca) per questo dipendente/mese/anno
+        # Bonifici reali pagati (esiti banca) per questo dipendente/mese/anno.
+        # "metodo" = come il pagamento è stato agganciato a QUESTA busta
+        # (services/competenza_pagamenti): cedolino/causale/importo/
+        # importo_somma sono prove, "presunto" è solo il mese precedente al
+        # pagamento e va mostrato come tale.
         esiti = [{
             "data": e.get("data"),
             "importo": round(float(e.get("importo") or 0), 2),
@@ -3423,6 +3454,7 @@ async def _calcola_associazioni_bonifici(db, anno: Optional[int] = None, mese: O
             "beneficiario": e.get("beneficiario") or "",
             "riferimento": e.get("cro") or e.get("key") or "",
             "pdf_key": e.get("key") if e.get("ha_pdf") else None,
+            "metodo": e.get("metodo") or "",
         } for e in esiti_idx.get((dip_id, p.get("mese"), p.get("anno")), [])]
 
         erogato = bon + acc
@@ -3457,10 +3489,12 @@ async def _calcola_associazioni_bonifici(db, anno: Optional[int] = None, mese: O
                 qualita = "esatto"          # un solo bonifico che combacia con la busta
             elif busta > 0 and abs(bon - busta) <= 0.5:
                 qualita = "per_importo"     # somma bonifici = busta
+            elif all(e["metodo"] == "presunto" for e in esiti):
+                qualita = "presunto"        # attribuiti a questo mese solo per data: da controllare
             elif len(esiti) > 1:
                 qualita = "aggregato"       # più bonifici nello stesso mese
             else:
-                qualita = "per_importo"
+                qualita = "importo_diverso"  # un solo bonifico, provato per questo mese, ma ≠ busta
         else:
             qualita = "da_verificare"       # importo inserito a mano / da prima nota, senza prova banca
 
@@ -3544,9 +3578,16 @@ async def associazioni_bonifici_export_excel(anno: Optional[int] = None, mese: O
     stati_lbl = {"pagato": "Pagato", "parziale": "Parziale", "da_pagare": "Da pagare",
                  "bonifico_senza_busta": "Bonifico senza busta"}
     qualita_lbl = {"esatto": "Match esatto", "per_importo": "Match per importo",
-                   "aggregato": "Più bonifici", "da_verificare": "Da verificare"}
+                   "aggregato": "Più bonifici", "da_verificare": "Da verificare",
+                   "presunto": "Mese dedotto (da verificare)", "importo_diverso": "Importo ≠ busta"}
+    mensilita = {13: "Tredicesima", 14: "Quattordicesima"}
     for r in dati["righe"]:
-        periodo = f"{mesi[r['mese'] - 1]} {r['anno']}" if r.get("mese") and 1 <= r["mese"] <= 12 else f"{r.get('mese')}/{r.get('anno')}"
+        if r.get("mese") and 1 <= r["mese"] <= 12:
+            periodo = f"{mesi[r['mese'] - 1]} {r['anno']}"
+        elif r.get("mese") in mensilita:
+            periodo = f"{mensilita[r['mese']]} {r['anno']}"
+        else:
+            periodo = f"{r.get('mese')}/{r.get('anno')}"
         # "Data ultimo bonifico": paghe_mensili.bonifico_data non viene mai
         # popolato dagli import via pagamenti_esiti (CSV, Drive, ponte storico) —
         # la data vera sta sui singoli pagamenti (r["bonifici"], già ordinati per

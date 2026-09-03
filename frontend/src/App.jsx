@@ -555,7 +555,7 @@ function DashboardPage({ stats, dipendenti, ferie, missioni, getDipendente }) {
                 {pendenze.righe.slice(0, 30).map((x, i) => (
                   <tr key={i}>
                     <td>{x.dipendente}</td>
-                    <td>{mesiIt[(x.mese || 1) - 1]} {x.anno}</td>
+                    <td>{x.mese === 13 ? "Tredicesima" : x.mese === 14 ? "Quattordicesima" : mesiIt[(x.mese || 1) - 1]} {x.anno}</td>
                     <td style={{ textAlign: "right" }}>{x.busta ? x.busta.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—"}</td>
                     <td style={{ textAlign: "right", color: "#d35f4e", fontWeight: 700 }}>{x.saldo.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                     <td><Badge variant={x.stato === "parziale" ? "warning" : "danger"}>{x.stato === "parziale" ? "parziale" : "in attesa"}</Badge></td>
@@ -3349,9 +3349,11 @@ function BustePagaPage({ dipendenti, reload, getDipendente }) {
                   <div style={{ fontSize: 13, color: "#2a3329", display: "flex", flexDirection: "column", gap: 2 }}>
                     {importMsg.bonifici.map((b, i) => (
                       <span key={i}>
-                        {b.dipendente}: € {eur(b.importo)} → {mesi[b.mese - 1]} {b.anno}
+                        {b.dipendente}: € {eur(b.importo)} → {b.mese === 13 ? "Tredicesima" : b.mese === 14 ? "Quattordicesima" : mesi[b.mese - 1]} {b.anno}
                         <span style={{ color: "#6b7669" }}> [{b.fonte}]</span>
-                        <span style={{ color: "#234d3d", fontWeight: 700 }}> · ✓ riconciliato PDF</span>
+                        {b.riconciliato
+                          ? <span style={{ color: "#234d3d", fontWeight: 700 }}> · ✓ agganciato con prova</span>
+                          : <span style={{ color: "#7a3b32", fontWeight: 700 }}> · mese dedotto, da verificare</span>}
                         {b.discrepanza != null && <span style={{ color: "#7d5526" }}> (Excel attendeva € {eur(b.discrepanza)})</span>}
                       </span>
                     ))}
@@ -4662,9 +4664,18 @@ function PagheBonificiPage() {
     esatto: { txt: "Match esatto", col: "#234d3d", bg: "#e2efe8", bd: "#c2ddd0" },
     per_importo: { txt: "Match per importo", col: "#234d3d", bg: "#e2efe8", bd: "#c2ddd0" },
     aggregato: { txt: "Più bonifici", col: "#56442d", bg: "#f3ead9", bd: "#e7d6b9" },
+    importo_diverso: { txt: "Importo ≠ busta", col: "#56442d", bg: "#f3ead9", bd: "#e7d6b9" },
+    presunto: { txt: "Mese dedotto", col: "#7a3b32", bg: "#f6e4e1", bd: "#e8c5bf" },
     da_verificare: { txt: "Da verificare", col: "#7a3b32", bg: "#f6e4e1", bd: "#e8c5bf" },
   };
+  // Come il singolo pagamento è stato agganciato a QUESTA busta (motore unico
+  // competenza_pagamenti nel backend): tutto tranne "presunto" è una prova.
+  const METODI = {
+    cedolino: "cedolino abbinato", causale: "mese in causale", importo: "importo = netto busta",
+    importo_somma: "acconto + saldo = netto", manuale: "assegnato a mano", presunto: "solo per data (mese precedente)",
+  };
   const FONTI = { banca: "Estratto/CSV banca", prima_nota: "Prima nota", manuale: "Inserito a mano" };
+  const MENSILITA = { 13: "Tredicesima", 14: "Quattordicesima" };
 
   const cardWrap = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 18 };
   const card = { background: "#fffefb", border: "1px solid #e6e0d4", borderRadius: 12, padding: "12px 14px" };
@@ -4761,7 +4772,8 @@ function PagheBonificiPage() {
                 const exp = aperta === k;
                 const stInfo = STATI[r.stato] || { label: r.stato, variant: "default" };
                 const qInfo = r.qualita ? QUALITA[r.qualita] : null;
-                const periodoLbl = (r.mese >= 1 && r.mese <= 12) ? `${mesi[r.mese - 1]} ${r.anno}` : `${r.mese}/${r.anno}`;
+                const periodoLbl = (r.mese >= 1 && r.mese <= 12) ? `${mesi[r.mese - 1]} ${r.anno}`
+                  : MENSILITA[r.mese] ? `${MENSILITA[r.mese]} ${r.anno}` : `${r.mese}/${r.anno}`;
                 return (
                   <Fragment key={k}>
                     <tr style={{ background: exp ? "#f7f4ec" : "transparent" }}>
@@ -4813,6 +4825,7 @@ function PagheBonificiPage() {
                                 <th style={{ ...th, borderBottom: "1px solid #e6e0d4" }}>Causale</th>
                                 <th style={{ ...th, borderBottom: "1px solid #e6e0d4" }}>Beneficiario</th>
                                 <th style={{ ...th, borderBottom: "1px solid #e6e0d4" }}>Riferimento</th>
+                                <th style={{ ...th, borderBottom: "1px solid #e6e0d4" }}>Agganciato per</th>
                                 <th style={{ ...th, borderBottom: "1px solid #e6e0d4" }}>PDF</th>
                               </tr>
                             </thead>
@@ -4824,6 +4837,7 @@ function PagheBonificiPage() {
                                   <td style={{ ...td, borderBottom: "none", fontSize: 13 }}>{b.causale || "—"}</td>
                                   <td style={{ ...td, borderBottom: "none", fontSize: 13 }}>{b.beneficiario || "—"}</td>
                                   <td style={{ ...td, borderBottom: "none", fontSize: 12, color: "#7a8576" }}>{b.riferimento || "—"}</td>
+                                  <td style={{ ...td, borderBottom: "none", fontSize: 12, color: b.metodo === "presunto" ? "#7a3b32" : "#234d3d", fontWeight: 600 }}>{METODI[b.metodo] || b.metodo || "—"}</td>
                                   <td style={{ ...td, borderBottom: "none", fontSize: 12 }}>
                                     {b.pdf_key
                                       ? <a href={`${API}/paghe/pagamento-esito/${b.pdf_key}/pdf`} target="_blank" rel="noreferrer" style={{ color: "#3d8168", fontWeight: 600 }}>📄 Apri PDF</a>
@@ -4844,7 +4858,7 @@ function PagheBonificiPage() {
         </div>
       </div>
       <p className="dc-muted" style={{ fontSize: 12, marginTop: 10 }}>
-        <b>Match esatto/per importo</b> = il bonifico combacia con la busta. <b>Da verificare</b> = importo presente senza prova bancaria (inserito a mano o da prima nota): controlla e premi <b>Conferma</b> per associarlo definitivamente al cedolino.
+        <b>Match esatto/per importo</b> = il bonifico combacia con la busta. <b>Mese dedotto</b> = il pagamento è stato messo su questa busta solo perché è del mese precedente al bonifico (nessun importo che combacia): apri <b>Dettagli</b>, controlla e premi <b>Conferma</b>. <b>Da verificare</b> = importo presente senza prova bancaria (inserito a mano o da prima nota).
       </p>
     </div>
   );

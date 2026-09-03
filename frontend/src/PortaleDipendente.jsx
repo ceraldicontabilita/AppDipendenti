@@ -163,6 +163,7 @@ function Login({ onLogin }) {
   // uso era scomodissimo. Tocca il tuo nome -> tastierino PIN, come prima.
   const [elenco, setElenco] = useState(null);   // null = in caricamento
   const [elencoErr, setElencoErr] = useState(false);
+  const [attivi, setAttivi] = useState(0);      // dipendenti attivi totali (anche senza PIN)
   const [sel, setSel] = useState(null);   // {admin:true} | {id, nome}
   const [pin, setPin] = useState("");
   const [err, setErr] = useState("");
@@ -176,7 +177,7 @@ function Login({ onLogin }) {
     setElenco(null);
     setElencoErr(false);
     api.get("/auth/dipendenti-attivi")
-      .then((r) => setElenco(r.data.dipendenti || []))
+      .then((r) => { setElenco(r.data.dipendenti || []); setAttivi(r.data.attivi || 0); })
       .catch(() => { setElenco([]); setElencoErr(true); });
   };
   useEffect(() => { caricaElenco(); }, []);
@@ -224,7 +225,14 @@ function Login({ onLogin }) {
           </>
         )}
         {elenco !== null && elenco.length === 0 && !elencoErr && (
-          <div className="muted">Nessun nome disponibile: contatta l'amministratore</div>
+          // Elenco vuoto per un motivo preciso (in produzione: 17 attivi, 0
+          // con PIN): dirlo, invece di un generico "nessun nome", così chi
+          // apre il portale sa che manca un passo dell'amministratore.
+          <div className="muted">
+            {attivi > 0
+              ? `Nessun dipendente ha ancora un PIN: l'amministratore lo imposta da Gestione → Accessi dipendenti (${attivi} attivi senza PIN)`
+              : "Nessun dipendente attivo in anagrafica: contatta l'amministratore"}
+          </div>
         )}
         <div className="nomi-grid">
           {(elenco || []).map((d) => (
@@ -594,8 +602,27 @@ function Gestione() {
     loadCoda(); if(isAdmin) loadAccessi();
     api.get("/dipendenti-cloud/turni-preferenze").then((r)=>setPrefs(r.data||[])).catch(()=>{});
   },[loadCoda,loadAccessi,isAdmin]);
-  const salvaPin = async (id)=>{ const pin=pinIn[id]; if(!pin)return; try{await api.post(`/accessi/${id}/pin`,{pin});}catch{} setPinIn({...pinIn,[id]:""}); loadAccessi(); };
-  const salvaRuolo = async (id,ruolo_app)=>{ try{await api.post(`/accessi/${id}/ruolo`,{ruolo_app});}catch{} loadAccessi(); };
+  const [esitoPin, setEsitoPin] = useState({});   // id -> {ok, msg}
+  // L'errore NON va inghiottito: prima un salvataggio fallito (PIN non di
+  // 4-8 cifre, sessione scaduta, rete) svuotava il campo e non diceva nulla,
+  // e l'amministratore credeva di aver impostato il PIN — in produzione
+  // nessun dipendente ne aveva uno e il selettore di login restava vuoto.
+  const salvaPin = async (id)=>{
+    const pin=(pinIn[id]||"").trim(); if(!pin)return;
+    try{
+      await api.post(`/accessi/${id}/pin`,{pin});
+      setEsitoPin({...esitoPin,[id]:{ok:true,msg:"PIN salvato"}});
+      setPinIn({...pinIn,[id]:""});
+      loadAccessi();
+    }catch(e){
+      setEsitoPin({...esitoPin,[id]:{ok:false,msg:e?.response?.data?.detail || (e?.response ? "Salvataggio non riuscito" : "Connessione assente — riprova")}});
+    }
+  };
+  const salvaRuolo = async (id,ruolo_app)=>{
+    try{ await api.post(`/accessi/${id}/ruolo`,{ruolo_app}); }
+    catch(e){ setEsitoPin({...esitoPin,[id]:{ok:false,msg:e?.response?.data?.detail || "Ruolo non salvato"}}); }
+    loadAccessi();
+  };
   const risolvi = async (r, esito) => { await api.post(`/richieste/${r.id}/risolvi`,{esito}); loadCoda(); };
   return (
     <>
@@ -627,9 +654,12 @@ function Gestione() {
             <div className="row"><div><b>{d.nome_completo}</b> <span className="muted">· {d.mansione}</span></div>
               {d.pin_impostato?<span className="pill ok">PIN ok</span>:<span className="pill warn">no PIN</span>}</div>
             <div className="row" style={{gap:6}}>
-              <input className="input" style={{marginTop:0}} inputMode="numeric" placeholder="nuovo PIN" value={pinIn[d.id]||""} onChange={(e)=>setPinIn({...pinIn,[d.id]:e.target.value})}/>
+              <input className="input" style={{marginTop:0}} inputMode="numeric" placeholder="nuovo PIN (4-8 cifre)" value={pinIn[d.id]||""} onChange={(e)=>{setPinIn({...pinIn,[d.id]:e.target.value}); if(esitoPin[d.id]) setEsitoPin({...esitoPin,[d.id]:null});}}/>
               <button className="btn sm" onClick={()=>salvaPin(d.id)}>Salva PIN</button>
             </div>
+            {esitoPin[d.id] && (
+              <div className="muted" style={{color: esitoPin[d.id].ok ? "#234d3d" : "#7a3b32", fontWeight:600}}>{esitoPin[d.id].msg}</div>
+            )}
             <select value={d.ruolo_app} onChange={(e)=>salvaRuolo(d.id,e.target.value)}>
               <option value="dipendente">dipendente</option>
               <option value="responsabile_turni">responsabile turni</option>
