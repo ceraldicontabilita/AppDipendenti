@@ -247,8 +247,11 @@ async def _aggiorna_bonifico_mese(db, dip_id: str, anno: int, mese: int):
     a mano o dalla Prima Nota non viene toccato."""
     anno, mese = int(anno), int(mese)
     tot, n = 0.0, 0
+    # Proiezione SOLO a esclusione: mescolare inclusione ed esclusione è
+    # rifiutato da MongoDB (il fallback Motor di database.py), e l'adattatore
+    # Supabase ottimizza comunque solo le esclusioni.
     async for p in db.pagamenti_esiti.find({"dipendente_id": dip_id, "mese": mese, "anno": anno},
-                                           {"_id": 0, "importo": 1, "pdf_data": 0}):
+                                           {"_id": 0, "pdf_data": 0, "causale": 0, "beneficiario": 0}):
         tot += float(p.get("importo") or 0)
         n += 1
     riga = await db.paghe_mensili.find_one({"dipendente_id": dip_id, "anno": anno, "mese": mese}, {"_id": 0, "pdf_data": 0})
@@ -357,30 +360,39 @@ async def sincronizza_bonifici_storici():
             triplette_altrui.add((p.get("dipendente_id"), p.get("data"), _num_or_none(p.get("importo"))))
 
     indice = await IndiceCedolini.carica(db)
-    lotto = [{"dipendente_id": b["dipendente_id"], "data": b["data"], "importo": _num_or_none(b["importo"]),
-              "causale": b.get("causale"), "cedolino_id": b.get("cedolino_id")} for b in bonifici]
-    risolti = risolvi_lotto(lotto, indice)
 
-    affected = set()
-    importati = aggiornati = riattribuiti = duplicati = 0
-    # Triplette già "occupate": da altri percorsi E dai bonifici importati da
-    # questo stesso ponte in un giro precedente — così il doppione interno di
-    # un bonifico già importato resta un doppione anche al secondo giro (chi
-    # ha la propria chiave passa comunque: controllo per chiave PRIMA della
-    # tripletta).
+    # PRIMA i doppioni, POI il motore: due copie dello stesso bonifico da 500
+    # nel lotto verrebbero altrimenti lette come "acconto+saldo = 1000"
+    # (trovato da una review automatica). Triplette già "occupate": da altri
+    # percorsi E dai bonifici importati da questo stesso ponte in un giro
+    # precedente — così il doppione interno di un bonifico già importato resta
+    # un doppione anche al secondo giro (chi ha la propria chiave passa
+    # comunque: controllo per chiave PRIMA della tripletta).
     triplette_viste = set(triplette_altrui) | {
         (p.get("dipendente_id"), p.get("data"), _num_or_none(p.get("importo"))) for p in esiti_per_key.values()}
-    metodi: Dict[str, int] = {}
-    for b, comp in zip(bonifici, risolti):
-        if not comp:
-            continue
+    duplicati = 0
+    unici = []
+    for b in bonifici:
         key = f"bonifici-coll:{b.get('id')}"
         tripletta = (b["dipendente_id"], b["data"], _num_or_none(b["importo"]))
-        precedente = esiti_per_key.get(key)
-        if precedente is None and tripletta in triplette_viste:
+        if esiti_per_key.get(key) is None and tripletta in triplette_viste:
             duplicati += 1
             continue
         triplette_viste.add(tripletta)
+        unici.append(b)
+
+    lotto = [{"dipendente_id": b["dipendente_id"], "data": b["data"], "importo": _num_or_none(b["importo"]),
+              "causale": b.get("causale"), "cedolino_id": b.get("cedolino_id")} for b in unici]
+    risolti = risolvi_lotto(lotto, indice)
+
+    affected = set()
+    importati = aggiornati = riattribuiti = 0
+    metodi: Dict[str, int] = {}
+    for b, comp in zip(unici, risolti):
+        if not comp:
+            continue
+        key = f"bonifici-coll:{b.get('id')}"
+        precedente = esiti_per_key.get(key)
         anno, mese = comp["anno"], comp["mese"]
         doc = {"key": key, "cro": None, "dipendente_id": b["dipendente_id"],
                "data": b["data"], "importo": _num_or_none(b["importo"]),

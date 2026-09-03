@@ -128,11 +128,15 @@ def competenza_da_causale(causale: Optional[str], data: Optional[str] = None) ->
         anno = int(m.group(2))
         return (anno if anno > 99 else 2000 + anno), _ABBREV[m.group(1)]
     dm = anno_mese_da_data(data)
+    # Mensilità aggiuntive senza anno esplicito: la 13ª si paga a dicembre, la
+    # 14ª a giugno/luglio — una "tredicesima" pagata a gennaio (o una
+    # "quattordicesima" pagata prima di giugno) è quella dell'anno PRIMA,
+    # stessa regola di "dicembre" pagato a gennaio qui sotto.
     if "tredicesima" in c or re.search(r"\b13\s*(a|ª|esima)\b", c):
-        anno = _anno_in_testo(c) or (dm[0] if dm else None)
+        anno = _anno_in_testo(c) or (dm[0] - (1 if dm[1] <= 3 else 0) if dm else None)
         return (anno, 13) if anno else None
     if "quattordicesima" in c or re.search(r"\b14\s*(a|ª|esima)\b", c):
-        anno = _anno_in_testo(c) or (dm[0] if dm else None)
+        anno = _anno_in_testo(c) or (dm[0] - (1 if dm[1] < 6 else 0) if dm else None)
         return (anno, 14) if anno else None
     for nome, num in MESI_IT.items():
         if re.search(r"\b" + nome + r"\b", c):
