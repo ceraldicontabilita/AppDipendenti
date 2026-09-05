@@ -13,10 +13,19 @@ gli stessi due handler del router (`sincronizza_paga_da_cedolini`,
 paghe_mensili/pagamenti_esiti — qui si automatizza solo la chiamata.
 """
 import logging
+import os
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 _scheduler = None
+
+# Interruttore d'emergenza (05/09/2026): dopo la PR #30 e il suo revert, il
+# giro automatico uccideva il processo ~40 s dopo l'avvio (nessuna eccezione
+# loggata: kill duro, presumibilmente memoria) mandando l'app in 503 continuo.
+# Con PAGHE_SCHEDULER_ENABLED=false il job non parte; i due bottoni manuali in
+# "Cedolini & Bonifici" restano disponibili come prima del 29/08/2026.
+def _scheduler_abilitato() -> bool:
+    return os.environ.get("PAGHE_SCHEDULER_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
 
 
 async def sincronizza_paghe_periodico():
@@ -35,6 +44,10 @@ def start_scheduler():
     global _scheduler
     if _scheduler:
         return _scheduler
+    if not _scheduler_abilitato():
+        logger.warning("Scheduler sincronizzazione paghe DISATTIVATO da PAGHE_SCHEDULER_ENABLED: "
+                       "usare i bottoni manuali in Cedolini & Bonifici")
+        return None
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
     except Exception as e:
