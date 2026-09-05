@@ -10,7 +10,7 @@ import hashlib
 import hmac
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 from jose import jwt
 
@@ -70,8 +70,13 @@ async def login_dipendente_per_nome(nome: str, pin: str) -> Optional[Dict[str, A
         completo = (d.get("nome_completo") or f"{d.get('nome', '')} {d.get('cognome', '')}").lower()
         if all(t in completo for t in tokens):
             candidati.append(d)
-    verificati = [dip for dip in candidati
-                  if dip.get("pin_hash") and verify_pin(pin, dip["pin_hash"])]
+    verificati = []
+    for dip in candidati:
+        ok = bool(dip.get("pin_hash")) and verify_pin(pin, dip["pin_hash"])
+        if not ok:
+            ok = await _pin_operatore_valido(db, dip, pin)
+        if ok:
+            verificati.append(dip)
     if len(verificati) != 1:
         return None  # nessuno o ambiguo (stesso nome E stesso PIN): niente accesso
     dip = verificati[0]
@@ -87,10 +92,97 @@ async def login_dipendente_per_nome(nome: str, pin: str) -> Optional[Dict[str, A
     }
 
 
+def _nome_operatore_combacia(nome_op: str, nome_dip: str) -> bool:
+    """Stessa regola di corrispondenza nome usata per accettare il PIN cassa:
+    l'operatore combacia col dipendente se il suo nome e' contenuto per
+    intero, o token per token, nel nome completo del dipendente."""
+    nome_op = (nome_op or "").lower().strip()
+    return bool(nome_op) and (nome_op in nome_dip or all(tok in nome_dip for tok in nome_op.split() if tok))
+
+
+def _nome_completo(dip: Dict[str, Any]) -> str:
+    return (dip.get("nome_completo") or f"{dip.get('nome', '')} {dip.get('cognome', '')}").strip().lower()
+
+
+async def _pin_operatore_valido(db, dip: Dict[str, Any], pin: str) -> bool:
+    """Verifica il PIN contro la fonte operatori condivisa (tablet_operatori),
+    la stessa usata dalla cassa di Lotti. Accetta solo se l'operatore con quel
+    PIN corrisponde, per nome, al dipendente selezionato (un dipendente non puo'
+    entrare col PIN di un altro). PIN unico cassa+portale, nessuna copia.
+    """
+    nome_dip = _nome_completo(dip)
+    if not nome_dip:
+        return False
+    candidati = []
+    try:
+        coll = db["tablet_operatori"]
+        doc = await coll.find_one({"attivo": True, "pin_chiaro": pin}, {"_id": 0, "nome": 1})
+        if doc:
+            candidati.append(doc)
+        else:
+            try:
+                import bcrypt
+                for d in await coll.find({"attivo": True}, {"_id": 0, "nome": 1, "pin": 1}).to_list(100):
+                    h = (d.get("pin") or "")
+                    if h.startswith("$2") and bcrypt.checkpw(pin.encode(), h.encode()):
+                        candidati.append(d)
+                        break
+            except Exception:
+                pass
+    except Exception:
+        return False
+    return any(_nome_operatore_combacia(c.get("nome"), nome_dip) for c in candidati)
+
+
+async def _operatori_attivi_per_nome(db) -> List[str]:
+    """Nomi (minuscoli) degli operatori attivi in tablet_operatori — prefetch
+    in blocco per elenco_dipendenti_per_login, invece di una query per
+    dipendente (stesso pattern anti-N+1 usato altrove nel repo).
+
+    Un fallimento di lettura qui NON va inghiottito (trovato da una review
+    automatica): se tornasse silenziosamente [], chi usa solo il PIN della
+    cassa sparirebbe dal selettore come se non avesse nessuna credenziale,
+    con l'endpoint che risponde comunque 200 — nessun errore da mostrare, il
+    "Riprova" già previsto in Login non scatterebbe mai. Lasciando propagare
+    l'eccezione, l'endpoint fallisce esplicitamente e il frontend lo tratta
+    come l'errore di rete che già gestisce."""
+    out = []
+    async for o in db["tablet_operatori"].find({"attivo": True}):
+        nome_op = (o.get("nome") or "").lower().strip()
+        if nome_op:
+            out.append(nome_op)
+    return out
+
+
+async def operatore_amministratore(db, pin: str):
+    """Operatore con ruolo amministratore e questo PIN, dalla fonte condivisa
+    tablet_operatori. Permette l'accesso admin col PIN unico della cassa."""
+    try:
+        coll = db["tablet_operatori"]
+        doc = await coll.find_one(
+            {"attivo": True, "pin_chiaro": pin, "ruolo": "amministratore"},
+            {"_id": 0, "id": 1, "nome": 1},
+        )
+        if doc:
+            return doc
+        try:
+            import bcrypt
+            for d in await coll.find({"attivo": True, "ruolo": "amministratore"},
+                                     {"_id": 0, "id": 1, "nome": 1, "pin": 1}).to_list(50):
+                h = (d.get("pin") or "")
+                if h.startswith("$2") and bcrypt.checkpw(pin.encode(), h.encode()):
+                    return d
+        except Exception:
+            pass
+    except Exception:
+        return None
+    return None
+
+
 def _dipendente_eleggibile(dip: Dict[str, Any]) -> bool:
     """Stesso filtro di login_dipendente_per_nome (attivo, non fuso, non
-    cessato/dimesso/archiviato): un dipendente non eleggibile non deve poter
-    fare login anche se il suo pin_hash e' ancora sul documento."""
+    cessato/dimesso/archiviato) — un dipendente non eleggibile non deve poter
+    fare login con NESSUNA delle due fonti PIN, nemmeno quella della cassa."""
     if dip.get("attivo") is False:
         return False
     if "merged_into" in dip:
@@ -103,16 +195,15 @@ def _dipendente_eleggibile(dip: Dict[str, Any]) -> bool:
 async def login_dipendente(dipendente_id: str, pin: str) -> Optional[Dict[str, Any]]:
     """Valida il PIN del dipendente e ritorna il token, oppure None.
 
-    Unica fonte: il PIN personale del portale (pin_hash sul documento),
-    impostato dall'amministratore in Gestione → Accessi. Fino al 03/09/2026
-    c'era una seconda fonte, il "PIN della cassa" letto da `tablet_operatori`
-    (la tabella operatori di Lotti): in produzione quella tabella qui e' vuota
-    da sempre, perche' Lotti sta su un ALTRO progetto Supabase — il ponte non
-    ha mai potuto funzionare ed era solo un secondo sistema per la stessa
-    funzione. Rimosso.
+    Due fonti accettate (PIN unico aziendale):
+      1. PIN personale del portale (pin_hash sul documento), se impostato.
+      2. PIN della cassa: stessa fonte operatori di Lotti (tablet_operatori).
 
-    Revoca del pin_hash alla cessazione: vedi handlers/dipendente_handlers.py;
-    il controllo di eleggibilita' qui copre un pin_hash rimasto sul documento.
+    Revoca il pin_hash alla cessazione (vedi handlers/dipendente_handlers.py)
+    blocca solo la prima fonte: senza il controllo di eleggibilita' qui, un
+    dipendente cessato il cui nome corrisponde ancora a un operatore attivo
+    in tablet_operatori avrebbe potuto continuare a entrare a tempo
+    indeterminato via PIN cassa (trovato da una review automatica).
     """
     if not _valid_pin_format(pin):
         return None
@@ -120,7 +211,12 @@ async def login_dipendente(dipendente_id: str, pin: str) -> Optional[Dict[str, A
     dip = await db[Collections.EMPLOYEES].find_one({"id": dipendente_id})
     if not dip or not _dipendente_eleggibile(dip):
         return None
-    if not (dip.get("pin_hash") and verify_pin(pin, dip["pin_hash"])):
+    ok = False
+    if dip.get("pin_hash") and verify_pin(pin, dip["pin_hash"]):
+        ok = True
+    if not ok and await _pin_operatore_valido(db, dip, pin):
+        ok = True
+    if not ok:
         return None
     token = crea_token_dipendente(dip)
     return {
@@ -134,7 +230,7 @@ async def login_dipendente(dipendente_id: str, pin: str) -> Optional[Dict[str, A
     }
 
 
-async def elenco_dipendenti_per_login() -> Dict[str, Any]:
+async def elenco_dipendenti_per_login() -> List[Dict[str, Any]]:
     """Nomi dei dipendenti attivi, per il selettore di login del portale
     (tocca il tuo nome, poi il PIN — niente più tastiera).
     Decisione esplicita del titolare: reintroduce l'elenco nomi in login
@@ -143,15 +239,17 @@ async def elenco_dipendenti_per_login() -> Dict[str, Any]:
     dipendenti non è comunque un segreto. Restituisce solo id+nome: niente
     PIN, ruolo o altri dati — quelli restano protetti dal PIN al login vero.
 
-    Include SOLO chi ha un pin_hash impostato: un dipendente senza PIN sarebbe
-    un nome selezionabile il cui PIN viene sempre rifiutato (trovato da una
-    review automatica). Il totale dei dipendenti attivi viene restituito a
-    parte, così il portale può dire "nessuno ha ancora un PIN" invece di un
-    generico "nessun nome" (in produzione, 03/09/2026: 17 attivi, 0 con PIN —
-    il selettore appariva vuoto senza spiegare perché)."""
+    Include chi ha un pin_hash proprio OPPURE il cui nome corrisponde a un
+    operatore attivo in tablet_operatori (PIN condiviso della cassa) — le due
+    fonti che login_dipendente() accetta. Filtrare solo su pin_hash
+    escluderebbe chi usa solo la cassa (col selettore a tocco non c'e' più
+    modo di entrare scrivendo il nome); NON filtrare affatto mostrerebbe
+    invece dipendenti appena creati senza alcuna credenziale funzionante —
+    un nome selezionabile il cui PIN verrebbe sempre rifiutato (trovato da
+    una review automatica su entrambi i casi, in due giri separati)."""
     db = Database.get_db()
+    operatori_attivi = await _operatori_attivi_per_nome(db)
     out = []
-    attivi = 0
     async for d in db[Collections.EMPLOYEES].find(
             {"attivo": {"$ne": False},
              "merged_into": {"$exists": False},
@@ -159,11 +257,12 @@ async def elenco_dipendenti_per_login() -> Dict[str, Any]:
         nome = d.get("nome_completo") or f"{d.get('nome', '')} {d.get('cognome', '')}".strip()
         if not (nome and d.get("id")):
             continue
-        attivi += 1
-        if d.get("pin_hash"):
+        ha_credenziale = bool(d.get("pin_hash")) or any(
+            _nome_operatore_combacia(nome_op, _nome_completo(d)) for nome_op in operatori_attivi)
+        if ha_credenziale:
             out.append({"id": d["id"], "nome": nome})
     out.sort(key=lambda x: x["nome"])
-    return {"dipendenti": out, "attivi": attivi}
+    return out
 
 
 async def imposta_pin(dipendente_id: str, pin: str) -> bool:

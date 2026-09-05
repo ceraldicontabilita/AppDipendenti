@@ -24,7 +24,8 @@ from backend.app.config import settings
 from backend.app.database import Database, Collections
 from backend.app.repositories import UserRepository
 from backend.app.services.auth_dipendenti import (
-    login_dipendente, login_dipendente_per_nome, elenco_dipendenti_per_login,
+    login_dipendente, login_dipendente_per_nome, operatore_amministratore,
+    elenco_dipendenti_per_login,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,10 +85,11 @@ def _pin_ok(pin: str) -> bool:
 @router.get("/dipendenti-attivi", summary="Nomi per il selettore di login del portale")
 async def dipendenti_attivi() -> Dict[str, Any]:
     """Elenco pubblico (nessuna autenticazione) di id+nome dei dipendenti
-    attivi CON un PIN impostato, per il tocca-il-tuo-nome in login — niente
-    digitazione. Solo id+nome (più il conteggio degli attivi, per spiegare un
-    elenco vuoto): nessun altro dato (PIN, ruolo, mansione...) esposto qui."""
-    return await elenco_dipendenti_per_login()
+    attivi, per il tocca-il-tuo-nome in login — niente digitazione. Include
+    anche chi usa solo il PIN condiviso della cassa (nessun pin_hash proprio),
+    perché login_dipendente() accetta entrambe le fonti. Solo id+nome: nessun
+    altro dato (PIN, ruolo, mansione...) esposto qui."""
+    return {"dipendenti": await elenco_dipendenti_per_login()}
 
 
 @router.post("/pin-login", summary="Login via PIN (mobile app)")
@@ -149,9 +151,25 @@ async def pin_login(
         logger.info(f"PIN-login dipendente OK · IP {ip} · {result['user_id']} · {result['role']}")
         return result
 
-    # --- Ramo admin: PIN unico da env (PIN_CODE). Il vecchio ramo "operatore
-    # cassa" (tabella tablet_operatori di Lotti) è stato rimosso: Lotti sta su
-    # un altro progetto Supabase, qui quella tabella è sempre stata vuota. ---
+    # --- Ramo admin via fonte operatori condivisa (PIN unico cassa) ---
+    if pin.isdigit() and 4 <= len(pin) <= 12:
+        db_op = Database.get_db()
+        op = await operatore_amministratore(db_op, pin)
+        if op:
+            _clear_failures(ip)
+            expire = datetime.now(timezone.utc) + timedelta(minutes=PIN_TOKEN_EXPIRE_MINUTES)
+            token = jwt.encode(
+                {"sub": op.get("id", "admin"), "name": op.get("nome", "Amministratore"),
+                 "role": "admin", "tipo": "admin", "exp": expire,
+                 "iat": datetime.now(timezone.utc), "auth_method": "pin_operatore"},
+                settings.SECRET_KEY, algorithm=settings.ALGORITHM,
+            )
+            logger.info(f"PIN-login admin (operatore cassa) OK · IP {ip}")
+            return {"access_token": token, "token_type": "bearer",
+                    "user_id": op.get("id", "admin"), "name": op.get("nome", "Amministratore"),
+                    "role": "admin", "tipo": "admin", "auth_method": "pin_operatore"}
+
+    # --- Ramo admin: PIN unico da env ---
     if not settings.PIN_CODE:
         logger.error("PIN-login: PIN_CODE non configurato nelle env")
         raise HTTPException(503, "Login PIN non configurato")

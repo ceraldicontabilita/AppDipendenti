@@ -6,7 +6,6 @@ Scadenzario automatico (A→B): job periodico che genera alert per
 Usa l'alert_engine esistente (idempotente: non duplica alert già aperti).
 Avviato dal lifespan di FastAPI tramite APScheduler.
 """
-import asyncio
 import logging
 from datetime import datetime, timedelta, date
 
@@ -101,21 +100,13 @@ def start_scheduler():
     async def _job():
         try:
             await verifica_scadenze(Database.get_db())
-        except asyncio.CancelledError:
-            raise
         except Exception as e:
-            logger.error("Job scadenze fallito: %r", e, exc_info=True)
+            logger.error(f"Job scadenze fallito: {e}")
 
     sched = AsyncIOScheduler(timezone="Europe/Rome")
-    # datetime.now() naive = UTC del processo su Render, letto da APScheduler
-    # come ora di Roma: il primo giro risultava "nel passato" di 1-2 ore e
-    # veniva saltato (log di produzione 03/09/2026: "Run time of job ... was
-    # missed by 1:59:15"). Con l'intervallo di 24h e un'istanza free che si
-    # spegne dopo 15 minuti, gli alert di scadenza contratto/fine prova non
-    # venivano MAI generati. Stesso bug già corretto in paghe_scheduler.
     sched.add_job(_job, "interval", hours=24, id="scadenze",
-                  next_run_time=datetime.now(sched.timezone) + timedelta(seconds=45),
-                  misfire_grace_time=600, replace_existing=True)
+                  next_run_time=datetime.now() + timedelta(seconds=45),
+                  replace_existing=True)
     sched.start()
     _scheduler = sched
     logger.info("Scheduler scadenze avviato (ogni 24h)")

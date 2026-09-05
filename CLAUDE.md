@@ -77,19 +77,6 @@ Fondo EST (sanitario), Fon.Te. (previdenza compl.).
   `{dipendente_id, pin}` (niente più ambiguità da omonimi: si sceglie l'id, non
   il nome). Il vecchio flusso a testo `{nome, pin}` resta supportato lato backend
   per compatibilità ma il portale non lo usa più.
-  **Unica fonte del PIN dipendente = `pin_hash` sul documento**, impostato
-  dall'admin nel portale (Gestione → Accessi dipendenti, `POST /api/accessi/{id}/pin`).
-  **[FIX 03/09/2026]** Rimosso il "ponte PIN cassa" (`tablet_operatori`, la tabella
-  operatori di Lotti, letta da `_pin_operatore_valido`/`operatore_amministratore`):
-  Lotti sta su un ALTRO progetto Supabase, qui quella tabella è sempre stata vuota
-  — il ponte non ha mai potuto funzionare ed era un secondo sistema per la stessa
-  funzione. Trovato perché in produzione il selettore di login era vuoto: 17
-  dipendenti attivi, **zero con PIN impostato**, nessun login dipendente mai
-  registrato nei log. Il portale ora lo dice ("Nessun dipendente ha ancora un
-  PIN: l'amministratore lo imposta da Gestione → Accessi", con il conteggio
-  `attivi` restituito da `/api/auth/dipendenti-attivi`) e "Salva PIN" mostra
-  l'errore invece di inghiottirlo. **Azione del titolare: impostare un PIN a
-  ciascun dipendente attivo**, prima nessuno poteva entrare.
 - Login admin: dalla schermata PIN → **"Accesso amministratore"** (PIN = env `PIN_CODE`),
   NON dalla scheda di un dipendente.
 - Sessione admin **2 ore** (`ADMIN_TOKEN_EXPIRE_MINUTES`). Sessione dipendente/portale
@@ -250,23 +237,6 @@ timbrature), `presenze` (LUL), `ferie_cloud`, `turni_settimane` + assegnazioni,
 `missioni_cloud`, `assegnazioni_turni_cloud`, `turni_config` (turno/riposo/Lunga per
 dipendente), `onomastici`.
 - `documenti_cloud`: archivio documenti dipendente. Upload massivo POST `/api/dipendenti-cloud/documenti/upload-massivo`: classifica il tipo (UNILAV/CERTIFICAZIONE_UNICA/CONTRATTO/BONIFICO/CODICE_FISCALE/BUSTA_PAGA/ALTRO) da regole sul testo, trova il dipendente dal codice fiscale/nome nel PDF, dedup per hash, salva file_data. Pagina Documenti = vista a cartelle per tipo + download (`/documenti/{id}/file`).
-- **Cedolini ↔ pagamenti (motore unico)**: ogni pagamento reale sta in
-  `pagamenti_esiti` (chiave stabile per origine: `bonifici-coll:<id>` ponte
-  storico, CRO/hash CSV banca, `drive:<hash>` Drive, `pdf-caricato:<hash>` upload,
-  `beneficiari-diversi:<id>` coda manuale) con `anno`/`mese` della BUSTA a cui
-  appartiene e `metodo` = come è stato deciso. A quale busta va lo decide SOLO
-  `services/competenza_pagamenti.py` (`risolvi_lotto`): 1 `cedolino` (cedolino_id
-  già abbinato) → 2 `causale` (mese esplicito in causale/nome file) → 3 `importo`
-  (= netto di un cedolino del dipendente in [mese-3, mese], preferendo il mese
-  precedente; include 13ª/14ª = mese 13/14) → 4 `importo_somma` (acconto+saldo
-  entro 45 gg) → 5 `presunto` (mese precedente al pagamento, mostrato "Mese
-  dedotto"/da verificare). Regola di fondo verificata sui dati: **lo stipendio di
-  M si paga in M+1**; il vecchio campo `competenza` di `bonifici` NON è una fonte.
-  `_aggiorna_bonifico_mese` (router dipendenti_cloud) è l'unico punto che ricalcola
-  `paghe_mensili.bonifico_importo` dagli esiti; `sincronizza_paghe_mensili` popola
-  il registro dai cedolini (anche 13ª/14ª) leggendo i bonifici solo dagli esiti.
-  `POST /paghe/sincronizza` = ponte storico + registro nell'ordine giusto (è ciò che
-  lo scheduler richiama ogni 6h / 60s dopo l'avvio).
 - Import: anagrafica da Excel (`POST /dipendenti/importa-anagrafica`); pagamenti bonifici
   da CSV banca (`POST /paghe/importa-pagamenti` → collezione `pagamenti_esiti`, ricalcola
   bonifico mese); Prima Nota Excel (`/paghe/importa-prima-nota`); bonifici stipendi da PDF
@@ -285,46 +255,6 @@ dipendente), `onomastici`.
   (codice/testo); backfill storico: POST `/cedolini/riscansiona` (riusa il PDF salvato).
 
 ## Bug noti / da fare
-- **[FIX 03/09/2026 — cedolini↔pagamenti]** Verificato sui dati di produzione:
-  887 bonifici in archivio, ma il campo `competenza` era uguale al **mese del
-  pagamento** in 646 casi su 800, mentre lo stipendio di M si paga in M+1 (91%
-  dei bonifici già abbinati a un cedolino). Il ponte storico prendeva quel campo
-  per buono → busta di febbraio "in attesa", busta di marzo "pagata/parziale" coi
-  soldi di febbraio, a cascata: 809 buste su 1222 in attesa, 106 parziali. In più
-  87 bonifici senza `competenza` (i più recenti, 2025-26) erano esclusi del tutto,
-  69 mai importati (giri interrotti), 450 doppioni interni, e 13ª/14ª non
-  esistevano nel registro. Fix: motore unico `competenza_pagamenti` (vedi
-  Collezioni), ponte che **ri-attribuisce** anche i pagamenti già importati
-  (stessa chiave) e ricalcola sia il mese nuovo sia quello che perde il
-  pagamento, dedup per chiave-poi-tripletta. Dopo il deploy il primo giro dello
-  scheduler risistema tutto da solo; **il titolare deve poi controllare le righe
-  "Mese dedotto"** in Cedolini & Bonifici (Dettagli → "Agganciato per") e
-  premere Conferma o correggere. Stesso giro: scadenzario contratti/prova mai
-  eseguito in produzione (`scadenze_scheduler.py`, `datetime.now()` naive letto
-  come ora di Roma → primo giro "missed by 1:59:15", poi istanza free spenta),
-  log scheduler con `%r` + traceback e `CancelledError` non più inghiottito.
-  **Coda "Bonifici da associare" (119 PDF, 122 mila €)**: verificato sui PDF
-  reali che l'import da Drive scartava TUTTO come "non stipendio" (il filtro
-  `_e_movimento_non_stipendio` scattava sull'intestazione "CERALDI GROUP
-  S.R.L."/"BANCO BPM S.P.A." presente su ogni contabile), non leggeva
-  "IMPORTO EUR 1.800,00" (valuta prima del numero), non riconosceva
-  "salario"/"acconto" come stipendio, e ogni distinta risultava ambigua
-  perché firmata dal titolare (che è anche in anagrafica). Corretti tutti;
-  bottone **"🔁 Riprova aggancio automatico"** nella pagina della coda
-  (`POST /bonifici-da-associare/riprova-automatico`, stessa decisione
-  dell'import Drive: `_aggancia_pdf_bonifico`). Restano a mano solo le
-  contabili "BENEFICIARI DIVERSI" (addebito cumulativo, il PDF non nomina
-  nessuno). `importa_pagamenti` accetta anche l'Excel "Movimenti bancari"
-  del titolare (Drive: `estratto_bancario_completo_bnl_stipendi_*.xlsx`;
-  simulato offline: solo 54 movimenti nuovi rispetto all'archivio).
-  **Dato da verificare**: in archivio ci sono 12 cedolini 2026 con
-  `tipo_cedolino=tredicesima` e `mese=7` (Parisi, Vespa, Carotenuto, Capezzuto,
-  Guarino, Pocci, Lesina, Murolo, Russo, Taiano, Iazzetta, A. Ceraldi), netti da
-  stipendio ordinario, e per quei dipendenti NON esiste il cedolino ordinario di
-  luglio 2026 → quasi certamente il parser LUL ha etichettato male luglio (o la
-  14ª). `mese_registro` li tratta per tipo (→ mese 13, "Tredicesima 2026"): se
-  sono luglio, vanno ricorretti in `cedolini` (tipo ordinario) e il registro si
-  sistema al giro successivo.
 - **[FIX 29/08/2026]** `backend/app/services/paghe_scheduler.py`: "🔄 Sincronizza
   da cedolini" e "🔗 Recupera bonifici storici" (pagina Cedolini & Bonifici) non
   erano mai stati eseguiti con successo in produzione — trovato controllando i

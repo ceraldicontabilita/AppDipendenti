@@ -1,43 +1,28 @@
-"""Popola `paghe_mensili` (il registro che alimenta la pagina Buste Paga e
-"Cedolini & Bonifici") dai cedolini in archivio, invece di lasciarlo alla
-compilazione manuale.
+"""Popola `paghe_mensili` (il registro che alimenta la pagina Buste Paga) dai
+cedolini e dai bonifici reali, invece di lasciarlo alla compilazione manuale.
 
 La pagina Buste Paga dell'app non legge affatto la collection `cedolini`: legge
 `paghe_mensili`, un registro pensato per l'inserimento a mano (importo busta,
-bonifico ricevuto, acconti). Con ~1300 cedolini importati non ha senso
-ricopiarli a mano — questo modulo lo fa per tutti i mesi in archivio, e resta
-richiamabile a ogni nuovo import (lo scheduler lo fa da solo).
+bonifico ricevuto, acconti). Con 1466 cedolini importati e 203 bonifici gia'
+riconciliati, non ha senso ricopiarli a mano — questo modulo lo fa una volta
+per tutti i mesi in archivio, e resta richiamabile a ogni nuovo import.
 
-Bonifico del mese: SOLO da `pagamenti_esiti`, il motore unico dei pagamenti
-reali (CSV banca, PDF Drive, ponte bonifici storici, coda manuale, PDF
-caricati). Prima qui c'era una seconda fonte, `bonifici.cedolino_id`, che
-copriva 142 bonifici su 887 e in 5 casi contraddiceva l'aggancio per importo:
-oggi anche quei bonifici passano dal ponte storico (che rispetta il
-cedolino_id come prova più forte), quindi la seconda fonte era solo un
-doppione — eliminata ("un solo sistema per funzione").
+Scelta prudente sul saldo: `bonifico_importo` viene SOLO dai bonifici bancari
+davvero abbinati al cedolino (tabella `bonifici`, campo `cedolino_id`, gia'
+verificato: 85 abbinamenti su 107 coincidono col netto al centesimo). Gli
+acconti letti sulla busta (`cedolino.acconti.acconto_erogato`) vengono esposti
+come campo informativo a parte, non sommati dentro `acconti[]`: sommarli al
+bonifico rischierebbe di contare due volte la stessa somma, se il bonifico e'
+gia' al netto dell'acconto trattenuto in busta. Il saldo del registro resta
+quindi "netto dovuto meno bonifico ricevuto", il confronto piu' sicuro.
 
-Include anche tredicesima e quattordicesima (mese 13 e 14, stessa convenzione
-dell'import Prima Nota, decisa da `competenza_pagamenti.mese_registro` per
-tipo e non per mese salvato): senza, i bonifici di dicembre/giugno uguali al
-netto della mensilità aggiuntiva restavano "bonifico senza busta" o finivano
-sommati allo stipendio ordinario del mese. Se due cedolini dello stesso tipo
-cadono sullo stesso (dipendente, anno, 13/14) vince quello che porta già il
-mese 13/14 esplicito.
-
-Gli acconti letti sulla busta (`cedolino.acconti.acconto_erogato`) vengono
-esposti come campo informativo a parte, non sommati dentro `acconti[]`:
-sommarli al bonifico conterebbe due volte la stessa somma se il bonifico è
-già al netto dell'acconto trattenuto in busta. Il saldo resta "netto dovuto
-meno bonifico ricevuto".
-
-Non tocca un mese che un umano ha già modificato a mano (`origine` diverso da
+Non tocca un mese che un umano ha gia' modificato a mano (`origine` diverso da
 "cedolino"): l'inserimento manuale vince sempre sulla sincronizzazione.
 """
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from backend.app.database import Collections
-from backend.app.services.competenza_pagamenti import mese_registro
 
 
 def _num(v: Any) -> Optional[float]:
@@ -62,36 +47,44 @@ def _stato_e_saldo(busta: float, bonifico: float) -> Dict[str, Any]:
 
 
 async def sincronizza(db, anno: int = None) -> Dict[str, Any]:
-    filtro_ced: Dict[str, Any] = {}
+    filtro_ced: Dict[str, Any] = {"tipo_cedolino": {"$in": ["ordinario", None]}}
     if anno:
         filtro_ced["anno"] = anno
-    cedolini = await db[Collections.PAYSLIPS].find(filtro_ced, {"_id": 0, "pdf_data": 0, "voci": 0}).to_list(5000)
-    per_chiave: Dict[tuple, tuple] = {}
-    for c in cedolini:
-        mese = mese_registro(c)
-        if not (c.get("dipendente_id") and c.get("anno") and mese and _num(c.get("netto")) is not None):
-            continue
-        try:
-            chiave = (c["dipendente_id"], int(c["anno"]), mese)
-        except (TypeError, ValueError):
-            continue
-        esplicito = str(c.get("mese")) == str(mese)
-        gia = per_chiave.get(chiave)
-        if gia is None or (esplicito and not gia[2]):
-            per_chiave[chiave] = (c, mese, esplicito)
-    voci = [(c, mese) for c, mese, _ in per_chiave.values()]
+    cedolini = await db[Collections.PAYSLIPS].find(filtro_ced, {"_id": 0, "pdf_data": 0}).to_list(3000)
+    cedolini = [c for c in cedolini if c.get("dipendente_id") and c.get("anno") and c.get("mese")
+               and c.get("netto") is not None]
 
-    # Prefetch di pagamenti_esiti, sommati una volta sola per (dipendente,
-    # anno, mese) con la data dell'ultimo pagamento: zero query nel ciclo
-    # (l'adattatore Supabase non ha indici, ogni find legge tutta la tabella).
-    esiti_idx: Dict[tuple, Dict[str, Any]] = {}
-    async for e in db["pagamenti_esiti"].find({}, {"_id": 0, "pdf_data": 0, "causale": 0, "beneficiario": 0}):
+    bonifici = await db["bonifici"].find({"cedolino_id": {"$ne": None}}, {"_id": 0}).to_list(1000)
+    per_cedolino: Dict[str, list] = {}
+    for b in bonifici:
+        # $ne:None nell'adattatore Supabase, come in Mongo, matcha anche i
+        # documenti dove il campo manca del tutto (non solo quelli con null
+        # esplicito) — b["cedolino_id"] andava in KeyError per la maggioranza
+        # degli 887 bonifici (solo 142 hanno davvero cedolino_id), quindi
+        # sincronizza() falliva SEMPRE prima ancora di leggere un cedolino.
+        # Trovato dal primo giro reale dello scheduler in produzione.
+        cid = b.get("cedolino_id")
+        if cid:
+            per_cedolino.setdefault(cid, []).append(b)
+
+    # Prefetch di pagamenti_esiti (il motore unico di "Cedolini & Bonifici", che
+    # copre anche i bonifici da Drive/ponte storico senza cedolino_id, non solo
+    # quelli in `bonifici`): trovato da un review automatico prima del deploy,
+    # senza questo ogni giro dello scheduler periodico sovrascriveva
+    # stato_pagamento/bonifico_importo usando SOLO `bonifici.cedolino_id`
+    # (una vista incompleta, 142 bonifici su 887), annullando le riconciliazioni
+    # gia' fatte da _ricalcola_stato_paga in giri precedenti. Sommati una volta
+    # sola per (dipendente_id, anno, mese), zero query aggiuntive nel ciclo.
+    esiti_idx: Dict[tuple, float] = {}
+    async for e in db["pagamenti_esiti"].find({}, {"_id": 0, "dipendente_id": 1, "anno": 1, "mese": 1, "importo": 1}):
         k = (e.get("dipendente_id"), e.get("anno"), e.get("mese"))
-        agg = esiti_idx.setdefault(k, {"tot": 0.0, "data": None})
-        agg["tot"] = round(agg["tot"] + (_num(e.get("importo")) or 0), 2)
-        if e.get("data") and (agg["data"] is None or e["data"] > agg["data"]):
-            agg["data"] = e["data"]
+        esiti_idx[k] = round((esiti_idx.get(k) or 0) + (_num(e.get("importo")) or 0), 2)
 
+    # Prefetch di paghe_mensili in blocco: l'adattatore Supabase non ha indici,
+    # un find_one per cedolino (fino a 3000) su una tabella che cresce ad ogni
+    # giro dentro lo stesso ciclo e' un O(N^2) che porta la sincronizzazione a
+    # decine di secondi e puo' far scadere la richiesta (502). Si legge una
+    # volta sola e si indicizza in memoria.
     esistenti_idx: Dict[tuple, Dict[str, Any]] = {}
     async for p in db["paghe_mensili"].find({}, {"_id": 0}):
         esistenti_idx[(p.get("dipendente_id"), p.get("anno"), p.get("mese"))] = p
@@ -99,52 +92,40 @@ async def sincronizza(db, anno: int = None) -> Dict[str, Any]:
     adesso = datetime.now(timezone.utc).isoformat()
     creati = aggiornati = saltati_manuali = 0
 
-    for c, mese_c in voci:
-        dip, anno_c = c["dipendente_id"], int(c["anno"])
+    for c in cedolini:
+        dip, anno_c, mese_c = c["dipendente_id"], int(c["anno"]), int(c["mese"])
         esistente = esistenti_idx.get((dip, anno_c, mese_c))
         if esistente and esistente.get("origine") not in (None, "cedolino"):
             saltati_manuali += 1
             continue
 
-        netto = _num(c.get("netto"))
-        agg = esiti_idx.get((dip, anno_c, mese_c))
-        doc: Dict[str, Any] = {
+        bon = per_cedolino.get(c.get("id"), [])
+        bonifico_importo = round(sum(_num(b.get("importo")) or 0 for b in bon), 2)
+        bonifico_data = max((b.get("data") for b in bon), default=None)
+        # pagamenti_esiti e' la fonte autorevole quando presente (copre anche i
+        # bonifici senza cedolino_id): vince su quella derivata da `bonifici`.
+        tot_esiti = esiti_idx.get((dip, anno_c, mese_c))
+        if tot_esiti is not None:
+            bonifico_importo = tot_esiti
+
+        acconti_busta = (c.get("acconti") or {}).get("acconto_erogato")
+
+        doc = {
             "dipendente_id": dip, "anno": anno_c, "mese": mese_c,
-            "importo_busta": netto,
+            "importo_busta": c["netto"],
+            "bonifico_ricevuto": bonifico_importo > 0,
+            "bonifico_importo": bonifico_importo or None,
+            "bonifico_data": bonifico_data,
             "acconti": esistente.get("acconti", []) if esistente else [],
             "giorni_lavorati": (c.get("periodo") or {}).get("giorni_lavorati") or c.get("giorni_lavorati"),
-            "acconto_da_cedolino": (c.get("acconti") or {}).get("acconto_erogato"),
+            "acconto_da_cedolino": acconti_busta,
             "livello": c.get("livello"),
             "cedolino_id": c.get("id"),
-            "tipo_cedolino": c.get("tipo_cedolino") or "ordinario",
             "origine": "cedolino",
             "updated_at": adesso,
         }
-        if agg:
-            bonifico = agg["tot"]
-            doc.update({"bonifico_importo": bonifico, "bonifico_ricevuto": bonifico > 0,
-                        "bonifico_data": agg["data"], "bonifico_da_esiti": True})
-            if (esistente and esistente.get("bonifico_da_prima_nota") and not esistente.get("bonifico_da_esiti")
-                    and esistente.get("erogato_atteso") is None):
-                # Primo pagamento reale su una riga della Prima Nota: se ne
-                # conserva l'importo (l'import Prima Nota non lo salva a parte)
-                # per il ripristino qui sotto, se gli esiti se ne andranno.
-                doc["erogato_atteso"] = _num(esistente.get("bonifico_importo")) or 0.0
-        elif esistente and esistente.get("bonifico_da_esiti"):
-            # Il mese aveva pagamenti che il ponte ha poi ri-attribuito altrove:
-            # l'importo residuo veniva dagli esiti e va azzerato, non lasciato —
-            # a meno che la riga non avesse PRIMA un importo dalla Prima Nota
-            # (erogato_atteso): quello va ripristinato, non cancellato.
-            bonifico = _num(esistente.get("erogato_atteso")) if esistente.get("bonifico_da_prima_nota") else None
-            bonifico = bonifico or 0.0
-            doc.update({"bonifico_importo": bonifico, "bonifico_ricevuto": bonifico > 0,
-                        "bonifico_data": None, "bonifico_da_esiti": False})
-        else:
-            # Nessun pagamento reale: un importo scritto a mano o dalla Prima
-            # Nota (se c'è) resta com'è e conta per lo stato.
-            bonifico = _num((esistente or {}).get("bonifico_importo")) or 0.0
-        doc.update(_stato_e_saldo(netto, bonifico))
-        doc = {k: v for k, v in doc.items() if v is not None or k in ("acconti", "bonifico_data")}
+        doc.update(_stato_e_saldo(c["netto"], bonifico_importo))
+        doc = {k: v for k, v in doc.items() if v is not None or k in ("acconti",)}
 
         await db["paghe_mensili"].update_one(
             {"dipendente_id": dip, "anno": anno_c, "mese": mese_c}, {"$set": doc}, upsert=True)
@@ -153,5 +134,5 @@ async def sincronizza(db, anno: int = None) -> Dict[str, Any]:
         else:
             creati += 1
 
-    return {"cedolini_considerati": len(voci), "creati": creati,
+    return {"cedolini_considerati": len(cedolini), "creati": creati,
             "aggiornati": aggiornati, "saltati_manuali": saltati_manuali}
